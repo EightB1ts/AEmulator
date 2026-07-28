@@ -54,6 +54,11 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Every out-of-tree path (gfxstream dylib, KosmicKrisp ICD) comes from third_party/paths.sh only —
 # this script spelling them itself is how it once kept passing against a tree that had moved.
 . "$ROOT/third_party/paths.sh"
+# ...and the host floor comes from MANIFEST.sh for the same reason: it is a property of the
+# dependency set (KosmicKrisp's Metal API requirement), not of this script. It lived here as a
+# hardcoded `26` while bootstrap.sh also enforced it, so the two could disagree and a bootstrap
+# could spend 45 minutes building a driver this script then rejected.
+. "$ROOT/third_party/MANIFEST.sh"
 HVF="$ROOT/crates/aemulator-hvf"
 BIN="$HVF/target/release/aemulator-hvf"
 ENT="$HVF/hv.entitlements"
@@ -189,13 +194,16 @@ case "$KK_LIB" in /*) ;; *) KK_LIB="$(dirname "$KK_ICD")/$KK_LIB" ;; esac
 ok "driver $KK_LIB"
 
 # KosmicKrisp is built on Metal APIs that only exist on macOS 26+; this is a hard floor, not a
-# preference, and with MoltenVK removed there is nothing to fall back to on an older host.
+# preference, and with MoltenVK removed there is nothing to fall back to on an older host. The
+# number itself is TP_MACOS_MIN_MAJOR from third_party/MANIFEST.sh — one source of truth, shared
+# with bootstrap.sh, so the check that builds the driver and the check that accepts it agree.
+MACOS_MIN="${TP_MACOS_MIN_MAJOR:?TP_MACOS_MIN_MAJOR is not set — third_party/MANIFEST.sh did not source}"
 MACOS_VER="$(sw_vers -productVersion 2>/dev/null || echo unknown)"
 MACOS_MAJOR="${MACOS_VER%%.*}"
-if [ "${MACOS_MAJOR:-0}" -ge 26 ] 2>/dev/null; then
-    ok "macOS $MACOS_VER (macOS 26 or newer is REQUIRED — KosmicKrisp is the only driver)"
+if [ "${MACOS_MAJOR:-0}" -ge "$MACOS_MIN" ] 2>/dev/null; then
+    ok "macOS $MACOS_VER (macOS $MACOS_MIN or newer is REQUIRED — KosmicKrisp is the only driver)"
 else
-    fail "macOS $MACOS_VER — macOS 26 or NEWER is required on Apple Silicon. KosmicKrisp is the only host Vulkan driver in this build and MoltenVK has been removed, so there is no supported configuration on this host."
+    fail "macOS $MACOS_VER — macOS $MACOS_MIN or NEWER is required on Apple Silicon. KosmicKrisp is the only host Vulkan driver in this build and MoltenVK has been removed, so there is no supported configuration on this host."
 fi
 
 step "baked-in rpaths all resolve"
@@ -238,5 +246,66 @@ ls "$BREW_LIB"/libslirp.*dylib >/dev/null 2>&1 \
 LC_ALL=C grep -qa "libslirp" "$BIN" \
     || fail "binary links no NAT backend (STALE build) — rebuild:  pnpm hvf:build"
 ok "libslirp present and linked in"
+
+step "host renderer init/teardown cycle (the shutdown path, end to end)"
+# The ONLY check here that actually RUNS the host renderer, and the guard for three separate
+# findings that all surface at the same instant:
+#
+#   * stream_renderer_teardown() is called at all. It has one live call site (machine.rs, after the
+#     vCPU join loop) and nothing else proves it is reachable.
+#   * a per-layer stream_renderer_release_metal_layer() exists and is exported, so the cached
+#     VkSurfaceKHR/swapchain is destroyed while its CAMetalLayer and the VkDevice are both alive.
+#   * teardown does not CRASH. Teardown runs ~FrameBuffer(), which runs any surviving
+#     process-cleanup callback registered by on_vkCreateInstance. That callback unboxes a
+#     VkInstance box the destroy path already deleted: gfxstream logs "Failed to unbox" and hands
+#     VK_NULL_HANDLE to vkDestroyInstanceImpl, which without its null guard reaches
+#     node_type::key() on an EMPTY node handle and null-derefs inside libc++.
+#
+# So the pass condition is BOTH a zero exit AND no "Failed to unbox" on stderr. The log line alone
+# is not fatal today (the guards absorb it), which is exactly why it has to be checked: it means a
+# callback outlived its instance, and every future change to that path gets louder, not quieter.
+SELFTEST=""
+for _p in release debug; do
+    [ -x "$HVF/target/$_p/aemu-display-selftest" ] && { SELFTEST="$HVF/target/$_p/aemu-display-selftest"; break; }
+done
+if [ -z "$SELFTEST" ]; then
+    warn "no aemu-display-selftest binary — SKIPPING the renderer init/teardown check. Build it:
+    cargo build --release --manifest-path crates/aemulator-hvf/Cargo.toml --bin aemu-display-selftest"
+else
+    # Same staging run-display-selftest.sh does, and for the same reason: with ANDROID_EMU_VK_ICD
+    # non-empty, VulkanDispatch::getPossibleLoaderPaths() restricts the libvulkan.dylib search to
+    # <programDir>/lib64/vulkan, so the loader has to be there or the renderer enumerates no driver.
+    VKDIR="$(dirname "$SELFTEST")/lib64/vulkan"
+    mkdir -p "$VKDIR"
+    ln -sf "$BREW_LIB/libvulkan.dylib" "$VKDIR/libvulkan.dylib"
+    cp -f "$TP_KOSMICKRISP_ICD" "$VKDIR/$TP_KOSMICKRISP_ICD_BASENAME"
+    CYCLE_ERR="$(mktemp)"
+    # 2 cycles, not 1: the second init is the one that proves the first teardown left a clean host.
+    if VK_DRIVER_FILES="$TP_KOSMICKRISP_ICD" ANDROID_EMU_VK_ICD=kosmickrisp \
+       "$SELFTEST" --init-teardown-cycles 2 >/dev/null 2>"$CYCLE_ERR"; then
+        if LC_ALL=C grep -qa "Failed to unbox" "$CYCLE_ERR"; then
+            LC_ALL=C grep -a "Failed to unbox" "$CYCLE_ERR" >&2
+            rm -f "$CYCLE_ERR"
+            fail "the renderer survived teardown but logged \"Failed to unbox\" (above): a
+    process-cleanup callback registered by on_vkCreateInstance outlived the VkInstance box it
+    captured, so unbox_VkInstance() resolved a deleted handle and the destroy path ran on
+    VK_NULL_HANDLE. Only the null guards in vkDestroyInstanceImpl/destroyInstanceObjects are
+    keeping that from being a null-deref — the registration/unregistration keying is the real bug."
+        fi
+        rm -f "$CYCLE_ERR"
+        ok "2 stream_renderer_init/teardown cycles, clean exit, no \"Failed to unbox\""
+    else
+        _rc=$?
+        printf '%s\n' "$(tail -40 "$CYCLE_ERR")" >&2
+        rm -f "$CYCLE_ERR"
+        fail "aemu-display-selftest --init-teardown-cycles 2 exited $_rc (stderr above). Three
+    possibilities, in the order they are worth checking: a \"Library not loaded: @rpath\" line means
+    THIS binary is stale relative to the tree (the ABI step above only checks aemulator-hvf) —
+    rebuild it:  cargo build --release --manifest-path crates/aemulator-hvf/Cargo.toml --bin
+    aemu-display-selftest ; a non-zero stream_renderer_init means the loader / KosmicKrisp ICD are
+    not staged (see crates/aemulator-hvf/run-display-selftest.sh); otherwise
+    stream_renderer_teardown() itself crashed, which is the finding this step exists for."
+    fi
+fi
 
 printf '\n%s==> EMULATOR DEPENDENCY CHAIN OK%s\n' "$C_G" "$C_0"

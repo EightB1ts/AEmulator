@@ -76,10 +76,10 @@ index d8f3f1601..89b7c9167 100644
          // Use Swiftshader vk icd if using swiftshader_indirect
          android::base::setEnvironmentVariable("ANDROID_EMU_VK_ICD", "swiftshader");
 diff --git a/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h b/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
-index eadee8d67..a5c86f3aa 100644
+index eadee8d67..fdf668857 100644
 --- a/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
 +++ b/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
-@@ -70,6 +70,25 @@ VG_EXPORT void gfxstream_backend_setup_window(void* native_window_handle, int32_
+@@ -70,6 +70,41 @@ VG_EXPORT void gfxstream_backend_setup_window(void* native_window_handle, int32_
                                                int32_t window_height, int32_t fb_width,
                                                int32_t fb_height);
  
@@ -102,11 +102,27 @@ index eadee8d67..a5c86f3aa 100644
 +//       to the CPU readback present path.
 +VG_EXPORT int stream_renderer_present_to_metal_layer(uint32_t res_handle, void* ca_metal_layer);
 +
++// Avnir in-Vulkan present (Apache-2.0). Release the VkSurfaceKHR + VK_KHR_swapchain this renderer
++// cached for `ca_metal_layer` on its first stream_renderer_present_to_metal_layer() call. Other
++// layers' presenters are untouched.
++//
++// stream_renderer_teardown() frees every cached presenter, but only at renderer shutdown — and the
++// CAMetalLayer belongs to the caller's window, which can close first. Once it has, the cached
++// surface names a freed CALayer and destroying it at teardown time is a use-after-free. So the
++// caller must call this while the layer is STILL ALIVE and the renderer is STILL RUNNING (the
++// VkDevice must be live to destroy the swapchain), i.e. immediately before it stops publishing the
++// pointer and drops the window.
++//
++// No-op for NULL, and for a layer never presented to. Idempotent. Safe from any thread; serialized
++// against stream_renderer_present_to_metal_layer() internally, though the caller is still
++// responsible for not racing a present into the same layer it is releasing.
++VG_EXPORT void stream_renderer_release_metal_layer(void* ca_metal_layer);
++
  VG_EXPORT void stream_renderer_flush(uint32_t res_handle);
  
  // Platform resources and contexts support
 diff --git a/host/virtio-gpu-gfxstream-renderer.cpp b/host/virtio-gpu-gfxstream-renderer.cpp
-index 9f105497a..44826a277 100644
+index 9f105497a..996fff495 100644
 --- a/host/virtio-gpu-gfxstream-renderer.cpp
 +++ b/host/virtio-gpu-gfxstream-renderer.cpp
 @@ -33,6 +33,8 @@
@@ -118,7 +134,7 @@ index 9f105497a..44826a277 100644
  #include "render-utils/RenderLib.h"
  #include "vk_util.h"
  
-@@ -1002,7 +1004,29 @@ VG_EXPORT void gfxstream_backend_setup_window(void* native_window_handle, int32_
+@@ -1002,7 +1004,45 @@ VG_EXPORT void gfxstream_backend_setup_window(void* native_window_handle, int32_
                                 window_height, fb_width, fb_height, 1.0f, 0, false, false);
  }
  
@@ -138,6 +154,22 @@ index 9f105497a..44826a277 100644
 +    (void)res_handle;
 +    (void)ca_metal_layer;
 +    return -100;
++#endif
++}
++
++// Avnir in-Vulkan present (Apache-2.0). Release the surface/swapchain this renderer cached for
++// `ca_metal_layer` in stream_renderer_present_to_metal_layer(), without disturbing any other layer.
++//
++// stream_renderer_teardown() below already frees every presenter, but only at renderer shutdown. A
++// VMM window can close long before that, and the CAMetalLayer is owned by the window's NSView: once
++// the window is gone the cached VkSurfaceKHR names freed memory, and destroying it at teardown time
++// is a use-after-free. Call this while the layer is still alive and the renderer is still running.
++// Idempotent; safe with a layer that was never presented to, and safe from any thread.
++VG_EXPORT void stream_renderer_release_metal_layer(void* ca_metal_layer) {
++#if defined(__APPLE__)
++    gfxstream::vk::releaseMetalLayerPresenter(ca_metal_layer);
++#else
++    (void)ca_metal_layer;
 +#endif
 +}
 +
@@ -227,10 +259,10 @@ index 4228b3eb8..32d3a0877 100644
      return std::unique_ptr<DisplaySurfaceVk>(new DisplaySurfaceVk(vk, instance, surface));
 diff --git a/host/vulkan/MetalLayerPresenterVk.cpp b/host/vulkan/MetalLayerPresenterVk.cpp
 new file mode 100644
-index 000000000..dafa3afa4
+index 000000000..31dd02682
 --- /dev/null
 +++ b/host/vulkan/MetalLayerPresenterVk.cpp
-@@ -0,0 +1,536 @@
+@@ -0,0 +1,550 @@
 +// Copyright (C) 2024 The Android Open Source Project
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -752,6 +784,19 @@ index 000000000..dafa3afa4
 +    sPresenters.clear();
 +}
 +
++// AEmulator: release ONE layer's cached surface/swapchain, leaving every other layer's presenter
++// live. teardownMetalLayerPresenters() above is all-or-nothing and is only correct at shutdown;
++// this is what a VMM window closing needs, because the CAMetalLayer dies with its NSView while the
++// renderer (and the VkDevice the VkSurfaceKHR/VkSwapchainKHR hang off) is still running. Destroying
++// the presenter here — under sPresentersMutex, so never concurrently with a present into the same
++// layer — is the only point at which the surface can be destroyed both AFTER the last present and
++// BEFORE the CAMetalLayer is freed.
++void releaseMetalLayerPresenter(void* caMetalLayer) {
++    if (caMetalLayer == nullptr) return;
++    std::lock_guard<std::mutex> guard(sPresentersMutex);
++    sPresenters.erase(caMetalLayer);
++}
++
 +}  // namespace vk
 +}  // namespace gfxstream
 +
@@ -762,6 +807,7 @@ index 000000000..dafa3afa4
 +
 +int presentColorBufferToMetalLayer(uint32_t, void*) { return kMetalPresentNoExtension; }
 +void teardownMetalLayerPresenters() {}
++void releaseMetalLayerPresenter(void*) {}
 +
 +}  // namespace vk
 +}  // namespace gfxstream
@@ -769,10 +815,10 @@ index 000000000..dafa3afa4
 +#endif  // __APPLE__
 diff --git a/host/vulkan/MetalLayerPresenterVk.h b/host/vulkan/MetalLayerPresenterVk.h
 new file mode 100644
-index 000000000..e096a30bf
+index 000000000..9e9197db0
 --- /dev/null
 +++ b/host/vulkan/MetalLayerPresenterVk.h
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,52 @@
 +// Copyright (C) 2024 The Android Open Source Project
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -816,6 +862,12 @@ index 000000000..e096a30bf
 +
 +// Destroy every cached surface/swapchain. Must be called while the VkDevice is still alive.
 +void teardownMetalLayerPresenters();
++
++// Destroy the cached surface/swapchain for `caMetalLayer` only, leaving other layers untouched.
++// No-op for a null pointer or a layer that was never presented to. Must be called while the
++// VkDevice is still alive, and before the CAMetalLayer itself is released. Thread-safe.
++// See stream_renderer_release_metal_layer() for the full contract.
++void releaseMetalLayerPresenter(void* caMetalLayer);
 +
 +}  // namespace vk
 +}  // namespace gfxstream
@@ -2006,7 +2058,7 @@ index 000000000..5e735f7c0
 +
 +#endif  // AEMULATOR_VK_DECODER_CEREAL_GAP_INC
 diff --git a/host/vulkan/VkDecoderGlobalState.cpp b/host/vulkan/VkDecoderGlobalState.cpp
-index 9a4c1a363..1ed833bc4 100644
+index 9a4c1a363..d96312345 100644
 --- a/host/vulkan/VkDecoderGlobalState.cpp
 +++ b/host/vulkan/VkDecoderGlobalState.cpp
 @@ -67,7 +67,6 @@
@@ -2136,7 +2188,39 @@ index 9a4c1a363..1ed833bc4 100644
  
          // bug: 155795731
          bool swiftshader =
-@@ -1804,17 +1891,11 @@ class VkDecoderGlobalState::Impl {
+@@ -1142,6 +1229,31 @@ class VkDecoderGlobalState::Impl {
+     }
+ 
+     void vkDestroyInstanceImpl(VkInstance instance, const VkAllocationCallbacks* pAllocator) {
++        // AEmulator: reject VK_NULL_HANDLE here, before anything downstream can act on it.
++        //
++        // WHY THIS IS REACHABLE. on_vkCreateInstance registers a process-cleanup callback that
++        // captures the BOXED VkInstance and is keyed on the UNBOXED one. The normal destroy path
++        // (on_vkDestroyInstance -> here -> destroyInstanceObjects) deletes that box via
++        // delete_VkInstance(instanceInfo.boxed) and only afterwards calls
++        // unregisterProcessCleanupCallback(). Both register and unregister are keyed on
++        // RenderThreadInfo::get()->m_puid and silently no-op when there is no RenderThreadInfo on
++        // the calling thread or when the puid differs (see FrameBuffer::{register,unregister}
++        // ProcessCleanupCallback) — so the callback can outlive its instance and ~FrameBuffer()
++        // then runs it. At that point unbox_VkInstance(boxed) is looking up a deleted box: it logs
++        // "Failed to unbox" and returns VK_NULL_HANDLE, which lands right here.
++        //
++        // Without this guard that VK_NULL_HANDLE reaches extractInstanceAndDependenciesLocked(),
++        // which finds no mInstanceInfo entry and early-returns leaving objects.instance an EMPTY
++        // node_type, and destroyInstanceObjects() then calls .key()/.mapped() on it — node_type
++        // has a precondition of !empty() and libc++ null-derefs. A shutdown warning becomes a
++        // shutdown crash. Guarded again inside destroyInstanceObjects() so the invariant is local
++        // rather than a property of every caller.
++        if (instance == VK_NULL_HANDLE) {
++            WARN("vkDestroyInstanceImpl: ignoring VK_NULL_HANDLE (stale process-cleanup callback "
++                 "for an already-destroyed VkInstance box).");
++            return;
++        }
++
+         // Do delayed removes out of the lock, but get the list of devices to destroy inside the
+         // lock.
+         {
+@@ -1804,17 +1916,11 @@ class VkDecoderGlobalState::Impl {
          auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
          auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
  
@@ -2159,7 +2243,7 @@ index 9a4c1a363..1ed833bc4 100644
          std::vector<VkExtensionProperties> properties;
          VkResult result =
              enumerateDeviceExtensionProperties(vk, physicalDevice, pLayerName, properties);
-@@ -1823,8 +1904,14 @@ class VkDecoderGlobalState::Impl {
+@@ -1823,8 +1929,14 @@ class VkDecoderGlobalState::Impl {
          }
  
  #if defined(__APPLE__) && defined(VK_MVK_moltenvk)
@@ -2176,7 +2260,7 @@ index 9a4c1a363..1ed833bc4 100644
              !hasDeviceExtension(properties, VK_MVK_MOLTENVK_EXTENSION_NAME)) {
              VkExtensionProperties mvk_props;
              strncpy(mvk_props.extensionName, VK_MVK_MOLTENVK_EXTENSION_NAME,
-@@ -1842,6 +1929,49 @@ class VkDecoderGlobalState::Impl {
+@@ -1842,6 +1954,49 @@ class VkDecoderGlobalState::Impl {
              ycbcr_props.specVersion = VK_KHR_SAMPLER_YCBCR_CONVERSION_SPEC_VERSION;
              properties.push_back(ycbcr_props);
          }
@@ -2226,7 +2310,7 @@ index 9a4c1a363..1ed833bc4 100644
          if (pProperties == nullptr) {
              *pPropertyCount = properties.size();
          } else {
-@@ -1944,63 +2074,6 @@ class VkDecoderGlobalState::Impl {
+@@ -1944,63 +2099,6 @@ class VkDecoderGlobalState::Impl {
              }
          }
  
@@ -2290,7 +2374,7 @@ index 9a4c1a363..1ed833bc4 100644
  
          // Filter device memory report as callbacks can not be passed between guest and host.
          vk_struct_chain_filter<VkDeviceDeviceMemoryReportCreateInfoEXT>(&createInfoFiltered);
-@@ -5069,9 +5142,10 @@ class VkDecoderGlobalState::Impl {
+@@ -5069,9 +5167,10 @@ class VkDecoderGlobalState::Impl {
                  bool opaqueFd = true;
  
  #if defined(__APPLE__)
@@ -2304,7 +2388,7 @@ index 9a4c1a363..1ed833bc4 100644
  
                      extern VkImage getColorBufferVkImage(uint32_t colorBufferHandle);
                      if (dedicatedAllocInfoPtr == nullptr || localDedicatedAllocInfo.image == VK_NULL_HANDLE) {
-@@ -5145,7 +5219,7 @@ class VkDecoderGlobalState::Impl {
+@@ -5145,7 +5244,7 @@ class VkDecoderGlobalState::Impl {
  
              bool opaqueFd = true;
  #ifdef __APPLE__
@@ -2313,7 +2397,7 @@ index 9a4c1a363..1ed833bc4 100644
                  MTLResource_id bufferMetalMemoryHandle =
                      getBufferMetalMemoryHandle(importBufferInfoPtr->buffer);
  
-@@ -5158,7 +5232,9 @@ class VkDecoderGlobalState::Impl {
+@@ -5158,7 +5257,9 @@ class VkDecoderGlobalState::Impl {
                      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                  }
  
@@ -2324,7 +2408,7 @@ index 9a4c1a363..1ed833bc4 100644
                  importInfoMetalHandle.handle = bufferMetalMemoryHandle;
  
                  vk_append_struct(&structChainIter, &importInfoMetalHandle);
-@@ -5317,13 +5393,11 @@ class VkDecoderGlobalState::Impl {
+@@ -5317,13 +5418,11 @@ class VkDecoderGlobalState::Impl {
                  VkExternalMemoryHandleTypeFlags handleTypes;
  
  #if defined(__APPLE__)
@@ -2343,7 +2427,7 @@ index 9a4c1a363..1ed833bc4 100644
  #elif defined(_WIN32)
                  handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
  #elif defined(__unix__)
-@@ -5890,9 +5964,9 @@ class VkDecoderGlobalState::Impl {
+@@ -5890,9 +5989,9 @@ class VkDecoderGlobalState::Impl {
  #endif
  
  #ifdef __APPLE__
@@ -2355,7 +2439,7 @@ index 9a4c1a363..1ed833bc4 100644
              }
  #endif
  
-@@ -8112,21 +8186,10 @@ class VkDecoderGlobalState::Impl {
+@@ -8112,21 +8211,10 @@ class VkDecoderGlobalState::Impl {
              res.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
          }
  #elif defined(__APPLE__)
@@ -2381,7 +2465,7 @@ index 9a4c1a363..1ed833bc4 100644
          }
  #endif
  
-@@ -8190,12 +8253,6 @@ class VkDecoderGlobalState::Impl {
+@@ -8190,12 +8278,6 @@ class VkDecoderGlobalState::Impl {
              res.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
          }
  
@@ -2394,6 +2478,22 @@ index 9a4c1a363..1ed833bc4 100644
  
          return res;
      }
+@@ -8557,6 +8639,15 @@ class VkDecoderGlobalState::Impl {
+     }
+ 
+     void destroyInstanceObjects(InstanceObjects& objects) {
++        // AEmulator: extractInstanceAndDependenciesLocked() early-returns without touching
++        // `objects` when the instance is not in mInstanceInfo (unknown, or already destroyed), so
++        // an empty node_type reaches us. std::unordered_map::node_type::key()/mapped() both have a
++        // precondition of !empty(); libc++ dereferences a null node pointer instead of failing an
++        // assertion in a release build. Bail out rather than crash — there is nothing to destroy.
++        if (!objects.instance) {
++            return;
++        }
++
+         VkInstance instance = objects.instance.key();
+         InstanceInfo& instanceInfo = objects.instance.mapped();
+ 
 diff --git a/host/vulkan/VulkanDispatch.cpp b/host/vulkan/VulkanDispatch.cpp
 index fd3048888..9126c8281 100644
 --- a/host/vulkan/VulkanDispatch.cpp

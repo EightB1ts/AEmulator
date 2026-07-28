@@ -595,6 +595,26 @@ fn boot_and_run_common(
     );
     println!("cpu0 stop reason: {stop:?}");
 
+    // Tear the host renderer down while the guest's memory is still mapped and every thread that
+    // could touch it is gone. Idempotent and a no-op when `init_gfxstream` never succeeded (2D
+    // runs, `--gpu3d` on a host with no ICD), so it is unconditional here.
+    //
+    // THIS POSITION IS LOAD-BEARING, on three counts:
+    //   * AFTER the secondary-vCPU join loop above and after `vcpu.run` returned, so no vCPU thread
+    //     exists and no further `flush_3d` can present into the renderer or the layer.
+    //   * AFTER `retire_metal_layer` has run on the display thread, which unpublishes the
+    //     `CAMetalLayer*` and calls `stream_renderer_release_metal_layer` on it — the cached
+    //     `VkSurfaceKHR`/swapchain must be destroyed while both the layer AND the `VkDevice` are
+    //     alive. Teardown is what destroys the device.
+    //   * BEFORE `ram.unmap_from_vm()`, because teardown drains host GPU work that may still be
+    //     reading guest-backed blob memory mapped into the VM.
+    //
+    // It is also the whole reason 1.2's null-guard in `vkDestroyInstanceImpl` had to land first:
+    // teardown runs `~FrameBuffer()`, which runs any surviving process-cleanup callback, which
+    // unboxes an already-deleted `VkInstance` box and hands VK_NULL_HANDLE to the destroy path.
+    // Unguarded, adding this call converts a shutdown warning into a shutdown crash.
+    crate::display::metal::teardown_gfxstream();
+
     ram.unmap_from_vm();
     Ok(stop)
 }

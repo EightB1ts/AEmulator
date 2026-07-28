@@ -366,6 +366,9 @@ unsafe extern "C" {
     ) -> ::std::os::raw::c_int;
 }
 unsafe extern "C" {
+    pub fn stream_renderer_release_metal_layer(ca_metal_layer: *mut ::std::os::raw::c_void);
+}
+unsafe extern "C" {
     pub fn stream_renderer_flush(res_handle: u32);
 }
 unsafe extern "C" {

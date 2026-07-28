@@ -23,9 +23,20 @@
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::os::raw::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use winit::window::Window;
 
 use crate::gfxstream::ffi;
+
+/// Whether [`init_gfxstream`] has brought the host renderer up and [`teardown_gfxstream`] has not
+/// yet taken it down. Gates the teardown FFI call.
+///
+/// `stream_renderer_teardown()` is not defensive on the C++ side: it dereferences the frontend
+/// singleton, tears down the Vulkan emulation, and calls `android_finishOpenglesRenderer()`. Calling
+/// it without a successful init, or twice, is undefined behaviour rather than a no-op — and it now
+/// has two callers (`machine.rs`'s common shutdown path and `aemu-display-selftest`), so "the one
+/// caller knows" is no longer a safe premise.
+static INITED: AtomicBool = AtomicBool::new(false);
 
 extern "C" {
     /// Present a host-generated test pattern into the view's CAMetalLayer drawable. 0 == success.
@@ -162,7 +173,14 @@ pub fn init_gfxstream(w: i32, h: i32, use_gles: bool) -> i32 {
     ];
 
     // Safety: params is a valid, correctly-sized array for the FFI call.
-    unsafe { ffi::stream_renderer_init(params.as_mut_ptr(), params.len() as u64) }
+    let rc = unsafe { ffi::stream_renderer_init(params.as_mut_ptr(), params.len() as u64) };
+    if rc == 0 {
+        // Only a SUCCESSFUL init arms teardown. A failed init leaves the frontend singleton in a
+        // state `stream_renderer_teardown()` is not written to survive, and every caller already
+        // falls back to a non-gfxstream path on a non-zero rc.
+        INITED.store(true, Ordering::Release);
+    }
+    rc
 }
 
 /// Hand gfxstream the window to present into. Derives the `NSWindow*` from the winit `NSView` and
@@ -184,10 +202,98 @@ pub fn setup_gfxstream_window(window: &Window, w: i32, h: i32) -> bool {
     true
 }
 
-/// Tear down the gfxstream host renderer.
+/// Release the host renderer's cached `VkSurfaceKHR` + swapchain for one `CAMetalLayer`.
 ///
-/// # Safety
-/// Only valid after a successful [`init_gfxstream`].
+/// The renderer caches a presenter per layer on the first
+/// `stream_renderer_present_to_metal_layer` call and keys it on the layer pointer. That cache is
+/// otherwise only emptied by [`teardown_gfxstream`] — which is far too late, because the layer is a
+/// sublayer of the window's `NSView` and dies with the window. Destroying a `VkSurfaceKHR` whose
+/// `CAMetalLayer` has already been freed is a use-after-free inside Metal, so the release has to
+/// happen while the layer is **still alive** and the renderer is **still running** (the `VkDevice`
+/// must be live to destroy the swapchain).
+///
+/// The intended shutdown order is: vCPUs joined → `retire_metal_layer` (unpublish + this call) →
+/// [`teardown_gfxstream`]. See `display::retire_metal_layer`.
+///
+/// **But those two run on different threads** — `retire_metal_layer` on the display thread as its
+/// event loop exits, `teardown_gfxstream` on the VMM thread as `boot_and_run_common` returns — so on
+/// a normal guest halt teardown can win the race. The `INITED` check below is what makes that
+/// harmless rather than a second use-after-free: teardown clears `INITED` before it calls into the
+/// FFI, and `stream_renderer_teardown()` starts by running `teardownMetalLayerPresenters()`, which
+/// destroys *every* presenter while the `VkDevice` is still alive. So if teardown went first the
+/// presenter is already gone and there is nothing here to do; if this went first, teardown finds an
+/// empty map. Both orders are correct, and neither ever touches a presenter after device destruction.
+///
+/// A `layer` of 0 is a no-op, as is a layer the renderer never presented to. Idempotent.
+pub fn release_metal_layer(layer: usize) {
+    if layer == 0 {
+        return;
+    }
+    if !INITED.load(Ordering::Acquire) {
+        // No live renderer, so no presenter to release: either init never succeeded, or
+        // teardown_gfxstream() already ran teardownMetalLayerPresenters() for us.
+        return;
+    }
+    // Safety: `layer` came from `layer_for_window` and the NSView that owns it is still alive; the
+    // renderer serializes this against its own present path under `sPresentersMutex`.
+    unsafe { ffi::stream_renderer_release_metal_layer(layer as *mut c_void) }
+}
+
+/// Tear down the gfxstream host renderer. Idempotent, and a no-op if [`init_gfxstream`] never
+/// succeeded — so every exit path can call it unconditionally.
+///
+/// The `compare_exchange` is what makes both true: exactly one caller wins the `true -> false`
+/// transition and reaches the FFI, everybody else returns. Two callers race here in practice
+/// (`machine.rs`'s shutdown path and `aemu-display-selftest`), and the FFI itself is not re-entrant.
+///
+/// **Call this only once no thread can still present.** In `machine.rs` that means after the
+/// secondary-vCPU join loop, since `flush_3d` runs on a vCPU thread; and after
+/// [`release_metal_layer`], since the swapchain must be destroyed before the layer it targets.
 pub fn teardown_gfxstream() {
+    if INITED
+        .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    // Safety: the compare_exchange above proves a successful `stream_renderer_init` happened and
+    // that this is the only call to reach the FFI for it.
     unsafe { ffi::stream_renderer_teardown() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both tests below deliberately exercise ONLY the `INITED` atomic: with `INITED` false the
+    /// `compare_exchange` fails and `stream_renderer_teardown()` is never reached, so they are
+    /// hermetic — no host renderer, no Vulkan loader, no ICD. (They still LINK against the dylib;
+    /// that is what `ci/stub-gfxstream` exists for.) A live-renderer cycle is covered by
+    /// `aemu-display-selftest --init-teardown-cycles N`, run from `ci/hvf-doctor.sh`.
+    ///
+    /// `INITED` is process-global and `cargo test` shares one process across threads, so neither
+    /// test may ever set it to true — that would make them order-dependent on each other and on
+    /// anything else that touches the renderer.
+    #[test]
+    fn teardown_is_a_noop_when_init_never_ran() {
+        assert!(
+            !INITED.load(Ordering::Acquire),
+            "no test may arm INITED: teardown_gfxstream() would then call into the FFI"
+        );
+        teardown_gfxstream();
+        assert!(!INITED.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn teardown_is_idempotent() {
+        assert!(!INITED.load(Ordering::Acquire));
+        for _ in 0..4 {
+            teardown_gfxstream();
+        }
+        assert!(!INITED.load(Ordering::Acquire));
+        // Same guard for the per-layer release: without a live renderer it must not reach the FFI
+        // either, since the presenter map it would touch does not exist yet.
+        release_metal_layer(0);
+        release_metal_layer(0xdead_beef);
+    }
 }

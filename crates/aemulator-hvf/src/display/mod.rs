@@ -418,9 +418,18 @@ pub fn run_event_loop(bridge: DisplayBridge) {
 /// `presented` is cleared for the same reason it exists: it means "an in-Vulkan frame is on the
 /// drawable". Once the drawable is gone that is no longer true, and leaving it set would tell any
 /// future reader to keep skipping the CPU blit.
+///
+/// **Unpublishing is not enough on its own.** The host renderer caches a `VkSurfaceKHR` +
+/// `VK_KHR_swapchain` per layer pointer, and that cache outlives our `store(0)`: it is otherwise
+/// only emptied by `stream_renderer_teardown()`, by which point the `CAMetalLayer` has been freed
+/// with its `NSView` and destroying the surface is a use-after-free inside Metal. So we hand the
+/// pointer to [`metal::release_metal_layer`] first, while the layer is still alive and the
+/// `VkDevice` still is too. The `swap` (rather than `store`) makes that exactly-once: this function
+/// runs on both `CloseRequested` and the guaranteed-last `LoopExiting`, and the second call sees 0.
 fn retire_metal_layer(scanout: &crate::virtio::ScanoutHandle) {
-    scanout.metal_layer.store(0, Ordering::Release);
+    let layer = scanout.metal_layer.swap(0, Ordering::AcqRel);
     scanout.presented.store(false, Ordering::Release);
+    metal::release_metal_layer(layer);
 }
 
 /// Blit the current scanout framebuffer into the window surface and present it. Nearest-neighbour

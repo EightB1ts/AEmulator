@@ -17,8 +17,20 @@
 //!     loader staged + `VK_DRIVER_FILES` pointed at the KosmicKrisp ICD — see
 //!     `run-display-selftest.sh`.
 //!
+//!   * **--init-teardown-cycles N** — headless: no window, no event loop, no Metal. Runs
+//!     `stream_renderer_init` → `stream_renderer_teardown` N times and exits non-zero if any cycle
+//!     fails. This is the guard for the shutdown path (plan items 1.2, 1.3, 1.4):
+//!     `stream_renderer_teardown()` runs `~FrameBuffer()`, which runs any surviving
+//!     process-cleanup callback, which unboxes an already-deleted `VkInstance` box — producing a
+//!     `Failed to unbox` log and then handing `VK_NULL_HANDLE` to `vkDestroyInstanceImpl`, whose
+//!     null path used to reach `node_type::key()` on an empty node and null-deref. So the *pass*
+//!     condition is both a zero exit AND no `Failed to unbox` on stderr; `ci/hvf-doctor.sh`
+//!     enforces both. N ≥ 2 is what proves the second init sees a genuinely clean host.
+//!     Needs the Vulkan loader + KosmicKrisp ICD staged, exactly like `--gfxstream`.
+//!
 //! Usage:
 //!   aemu-display-selftest [--gfxstream] [--gles] [--out <png>] [--width N] [--height N]
+//!   aemu-display-selftest --init-teardown-cycles N [--gles] [--width N] [--height N]
 
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -40,6 +52,7 @@ fn main() {
     // GLES display path isn't compiled under GuestVulkanOnly). It is therefore OFF by default; pass
     // --setup-window to empirically reproduce the abort.
     let mut call_setup_window = false;
+    let mut cycles: u32 = 0;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -48,6 +61,16 @@ fn main() {
             "--gfxstream" => use_gfxstream = true,
             "--gles" => use_gles = true,
             "--setup-window" => call_setup_window = true,
+            "--init-teardown-cycles" => {
+                i += 1;
+                match args.get(i).and_then(|v| v.parse::<u32>().ok()) {
+                    Some(n) if n > 0 => cycles = n,
+                    _ => {
+                        eprintln!("[selftest] --init-teardown-cycles needs a positive integer");
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--out" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
@@ -69,6 +92,15 @@ fn main() {
             other => eprintln!("[selftest] ignoring unknown arg: {other}"),
         }
         i += 1;
+    }
+
+    if cycles > 0 {
+        std::process::exit(init_teardown_cycles(
+            cycles,
+            width as i32,
+            height as i32,
+            use_gles,
+        ));
     }
 
     println!(
@@ -152,6 +184,42 @@ fn main() {
             _ => {}
         }
     });
+}
+
+/// Bring the gfxstream host renderer up and down `cycles` times, with no window and no event loop.
+/// Returns the process exit code (0 = every cycle succeeded).
+///
+/// Deliberately headless. The failure this guards is on the **shutdown** path
+/// (`stream_renderer_teardown` → `~FrameBuffer()` → a surviving process-cleanup callback →
+/// `unbox_VkInstance` of a deleted box → `VK_NULL_HANDLE` into `vkDestroyInstanceImpl`), and none of
+/// it needs a CAMetalLayer, a drawable or a guest frame. Keeping it window-free means it runs under
+/// `ci/hvf-doctor.sh` on a machine with no session attached and cannot be confused by AppKit.
+///
+/// The pass condition has a second half this function cannot check: `Failed to unbox` must not
+/// appear on stderr. gfxstream logs it and carries on, so it costs nothing here but is the exact
+/// signature of the surviving-callback bug. `hvf-doctor` greps for it.
+fn init_teardown_cycles(cycles: u32, w: i32, h: i32, use_gles: bool) -> i32 {
+    println!("[selftest] init/teardown cycles={cycles} size={w}x{h} gles={use_gles}");
+    for n in 1..=cycles {
+        let rc = metal::init_gfxstream(w, h, use_gles);
+        println!("[selftest] cycle {n}/{cycles}: stream_renderer_init returned {rc}");
+        if rc != 0 {
+            eprintln!(
+                "[selftest] FAIL: cycle {n}/{cycles} stream_renderer_init returned {rc} — the \
+                 Vulkan loader / KosmicKrisp ICD are probably not staged (see \
+                 run-display-selftest.sh)"
+            );
+            return 1;
+        }
+        metal::teardown_gfxstream();
+        println!("[selftest] cycle {n}/{cycles}: stream_renderer_teardown complete");
+        // A second teardown must be a no-op, not a second trip through the FFI. Cheap to assert
+        // here and it is the only place the idempotence wrapper is exercised against a renderer
+        // that really did initialize.
+        metal::teardown_gfxstream();
+    }
+    println!("[selftest] DONE — {cycles} init/teardown cycle(s), no crash");
+    0
 }
 
 /// `screencapture -x -R<x,y,w,h>` the window's on-screen region (global display points) to `out`.
