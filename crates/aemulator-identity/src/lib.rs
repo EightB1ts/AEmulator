@@ -65,6 +65,12 @@ pub enum CoherenceError {
     /// SoC ↔ board.platform ↔ MIDR ↔ abilist ↔ page-size cross-check failed.
     #[error("SoC coherence failure: {0}")]
     SocIncoherent(String),
+    /// GPU renderer ↔ vendorID ↔ deviceType ↔ driverID ↔ capability cross-check failed — including
+    /// the two failures that break *rendering* rather than merely leaking: an `ro.hardware.egl`
+    /// naming a `libEGL_*.so` the guest image does not ship, and a claimed capability the host
+    /// provably cannot back.
+    #[error("GPU coherence failure: {0}")]
+    GpuIncoherent(String),
     /// A per-cluster MIDR implementer is anomalous for the claimed SoC (e.g. Apple `0x61`).
     #[error("MIDR implementer 0x{implementer:02x} is anomalous for the claimed SoC: {detail}")]
     MidrAnomaly { implementer: u8, detail: String },
@@ -225,27 +231,386 @@ pub enum VkDeviceType {
 }
 
 /// GPU identity: GL strings + Vulkan device properties + `ro.hardware.egl`. Every field must be
-/// mutually coherent (renderer ↔ vendorID ↔ deviceType ↔ driverID ↔ extension/limit set).
+/// mutually coherent (renderer ↔ vendorID ↔ deviceType ↔ driverID ↔ extension/limit set) — those
+/// cross-checks are **implemented**, in [`DeviceProfile::validate`] §10, and they are the reason
+/// two of the fields below are deliberately *less* impressive than the part they name.
+///
+/// ## This block does not describe a device we can impersonate
+///
+/// The guest image overwrites `deviceName` (with a `"Virtio-GPU GFXStream ("` prefix), `deviceType`
+/// (`VIRTUAL_GPU`) and `driverID` (`MESA_GFXSTREAM`) inside `ResourceTracker.cpp` before any app
+/// sees them, so nothing here can make the device *pass* a GPU-identity check. What it can do is
+/// change the answer to "who is this?" from a population of one — *this* Apple M2, carrying *this*
+/// permanent 16-byte `pipelineCacheUUID` — to "an Android emulator on gfxstream". That is the whole
+/// design goal, and [`GpuProfile::host_spoof`] is where it is encoded.
+///
+/// **A capability claim is not free.** Reporting a feature FALSE that the host has is safe;
+/// reporting TRUE what the host lacks makes the guest put it in `VkDeviceCreateInfo`, and
+/// `vkCreateDevice` then returns `VK_ERROR_FEATURE_NOT_PRESENT` — *no graphics at all*. So the
+/// claims in this block are bounded by what the measured host can actually back
+/// (`crates/aemulator-hvf/gfxstream/evidence/host-vulkan-identity.json`); see [`HOST_UNBACKABLE`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GpuProfile {
-    /// `glGetString(GL_VENDOR)`, e.g. `"Qualcomm"`.
+    /// `glGetString(GL_VENDOR)`, e.g. `"Qualcomm"`. Must agree with `vk_vendor_id` and
+    /// `vk_driver_id` per [`GPU_VENDOR_TRIPLES`].
     pub gl_vendor: String,
     /// `glGetString(GL_RENDERER)`, e.g. `"Adreno (TM) 740"`. Never `"...Translator"`/`"SwiftShader"`.
     pub gl_renderer: String,
-    /// `glGetString(GL_VERSION)`, e.g. `"OpenGL ES 3.2 V@0502.0"`.
+    /// `glGetString(GL_VERSION)`, e.g. `"OpenGL ES 3.1 V@0744.0"`.
+    ///
+    /// **Capped at [`BOOT_OPENGLES_VERSION`]** (3.1) by `validate`. GLES 3.2 requires *both*
+    /// geometry and tessellation shaders; the host has tessellation but `geometryShader = false`
+    /// (Apple hardware — not a porting gap, and ANGLE cannot synthesize the stage). An app that
+    /// reads `GL_VERSION` 3.2 and then calls `glCreateShader(GL_GEOMETRY_SHADER)` gets nothing:
+    /// a worse tell than 3.1 *and* broken rendering. A real Adreno 740 *is* a GLES 3.2 part, so
+    /// this is a permanent, admitted incoherence rather than a gap to close later.
     pub gl_version: String,
-    /// `VkPhysicalDeviceProperties.deviceName`, e.g. `"Adreno (TM) 740"`.
+    /// `VkPhysicalDeviceProperties.deviceName`, e.g. `"Adreno (TM) 740"`. Must name the same part
+    /// as `gl_renderer`. The host applier writes this as the *inner* text of the guest's
+    /// `"Virtio-GPU GFXStream (…)"` wrapper.
     pub vk_device_name: String,
-    /// `VkPhysicalDeviceProperties.vendorID`, e.g. `0x5143` (Qualcomm).
+    /// `VkPhysicalDeviceProperties.vendorID`, e.g. `0x5143` (Qualcomm). A pure identifier with no
+    /// capability semantics, which is exactly why it is safe to claim. `0` = leave the host's.
     pub vk_vendor_id: u32,
-    /// `VkPhysicalDeviceProperties.deviceType`.
+    /// `VkPhysicalDeviceProperties.deviceID`. Profile-owned; `0` is the sentinel meaning **leave
+    /// the host's value alone**.
+    ///
+    /// Deliberately `0` in the bundled reference: no verified Adreno 740 Vulkan `deviceID` exists
+    /// anywhere in this repo, and a fabricated one is a fresh inconsistency against a detector
+    /// holding a real dump — the same reason the plan rules out fabricating limits. A profile
+    /// ingested from a real device dump should carry the real value.
+    pub vk_device_id: u32,
+    /// `VkPhysicalDeviceProperties.deviceType`. **Never [`VkDeviceType::Cpu`]** — `validate`
+    /// rejects it (SwiftShader/lavapipe tell).
     pub vk_device_type: VkDeviceType,
     /// `VkPhysicalDeviceDriverProperties.driverID`, e.g. `"VK_DRIVER_ID_QUALCOMM_PROPRIETARY"`.
+    /// Must agree with `vk_vendor_id` per [`GPU_VENDOR_TRIPLES`].
     pub vk_driver_id: String,
-    /// `ro.hardware.egl`, e.g. `"adreno"` / `"mali"`. Never `"emulation"`/`"swiftshader"`.
+    /// `VkPhysicalDeviceSubgroupProperties.subgroupSize`. Profile-owned; `0` = leave the host's
+    /// (32 on the measured host).
+    ///
+    /// `0` in the bundled reference on purpose. `subgroupSize` looks like a plain number but it is
+    /// a *capability* claim: a shader that reads `gl_SubgroupSize` and gets 128 while the hardware
+    /// executes 32-wide computes the wrong thing. Same asymmetry as a feature bit, so it stays at
+    /// the sentinel until a profile can be paired with a host that really executes that width.
+    pub vk_subgroup_size: u32,
+    /// `ro.hardware.egl`. Android's EGL loader `dlopen`s **`libEGL_${ro.hardware.egl}.so`**, so this
+    /// value must name an implementation the guest image actually ships — see
+    /// [`EGL_IMPLEMENTATIONS_SHIPPED`]. A vendor name the image cannot back (`"adreno"`,
+    /// `"mali"`) means GL disappears entirely, not that GL looks like a different vendor's.
     pub ro_hardware_egl: String,
 }
+
+impl GpuProfile {
+    /// Whether this profile declares a GPU identity at all. `Default` is all-empty/all-zero — the
+    /// "no GPU declared" state — and [`host_spoof`](Self::host_spoof) then yields an all-sentinel
+    /// [`GpuSpoof`], i.e. exact host passthrough.
+    pub fn is_set(&self) -> bool {
+        self.vk_vendor_id != 0
+            || !self.vk_device_name.is_empty()
+            || !self.gl_renderer.is_empty()
+            || !self.gl_vendor.is_empty()
+            || !self.gl_version.is_empty()
+    }
+
+    /// The **entire** host-side GPU identity policy, as plain data: what the host renderer should
+    /// report to the guest for this profile, on this instance.
+    ///
+    /// `instance_seed` is the per-VM-instance seed. Everything derived from it is stable for the
+    /// lifetime of that instance (so a pipeline cache still round-trips) and different across
+    /// instances (so nothing links two of them).
+    ///
+    /// The sentinel convention is the point: `0` / `""` / all-zero means **leave the host value
+    /// alone**, so a default or empty profile yields exact passthrough and the applier's default
+    /// behaviour — setter never called — is "change nothing".
+    ///
+    /// ## Invariant: CLEAR-bits only, never set-bits
+    ///
+    /// Every feature this returns is a *clear* (`clear_*: bool` = "report FALSE"). There is
+    /// deliberately no way to express "report TRUE". Reporting a feature the host lacks does not
+    /// make the device look better; it makes the guest put that feature in `VkDeviceCreateInfo`,
+    /// KosmicKrisp answer `VK_ERROR_FEATURE_NOT_PRESENT`, and **`vkCreateDevice` fail — no
+    /// graphics at all.** `geometryShader` and `wideLines` are FALSE on the measured host
+    /// (`gfxstream/evidence/host-vulkan-identity.json`) and must never be forced on. This is why
+    /// the safe subset of an Adreno-740 spoof is strictly smaller than an Adreno 740, and why this
+    /// crate does not attempt the fuller impersonation.
+    pub fn host_spoof(&self, instance_seed: u64) -> GpuSpoof {
+        // An undeclared GPU is exact passthrough: no clamps, no minted UUID, no strip.
+        if !self.is_set() {
+            return GpuSpoof::default();
+        }
+        GpuSpoof {
+            // Pure identifiers. No capability semantics, hence safe to claim.
+            vendor_id: self.vk_vendor_id,
+            device_id: self.vk_device_id,
+            device_name: self.vk_device_name.clone(),
+            // THE highest-value field in this struct. The host's own pipelineCacheUUID is stable
+            // across reboots (measured: 1655d6f0…), which makes it a permanent, unpermissioned,
+            // cross-app device identifier that survives a factory reset. Replacing it with a
+            // per-instance value is what deletes that identifier.
+            pipeline_cache_uuid: instance_uuid(instance_seed, UUID_KIND_PIPELINE_CACHE, 0),
+            // ---- FEATURE CLAMPS: CLEAR-BITS ONLY. Read the invariant above before adding one. ---
+            // Both of these are TRUE on the host and FALSE on every real mobile GPU, so clearing
+            // them is in the safe direction: the guest simply does not request them.
+            //   * textureCompressionBC — no mobile GPU has BC/DXT. (ETC2/ASTC stay as they are.)
+            //   * multiViewport        — paired with max_viewports = 1 below, NOT optional: the
+            //     Vulkan spec REQUIRES maxViewports == 1 when multiViewport is unsupported, so
+            //     clearing one without the other yields an internally invalid device — a louder
+            //     tell than the honest 16.
+            // NEVER add geometryShader or wideLines here in the other direction: they are FALSE on
+            // this host, so a *set*-bit for either is total loss of graphics.
+            clear_texture_compression_bc: true,
+            clear_multi_viewport: true,
+            max_viewports: 1,
+            subgroup_size: self.vk_subgroup_size,
+            strip_extensions: true,
+        }
+    }
+}
+
+/// What the host renderer should report to the guest in place of the real host GPU's identity —
+/// plain data, no FFI types, no `unsafe`, no `libc`. Produced by [`GpuProfile::host_spoof`];
+/// consumed by the applier inside the host renderer, which is a dumb setter with no policy of its
+/// own.
+///
+/// **Sentinel convention:** `0` / `""` / all-zero / `false` all mean *leave the host's value
+/// alone*. [`Default`] is therefore exact passthrough, and so is an applier whose setter is never
+/// called — the two agree by construction, which is the property that makes this safe to land
+/// ahead of the host side.
+///
+/// **Feature invariant:** every feature field is a `clear_*` flag. See
+/// [`GpuProfile::host_spoof`] for why a set-bit is unrepresentable here on purpose.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GpuSpoof {
+    /// `VkPhysicalDeviceProperties.vendorID`, or `0` to keep the host's.
+    pub vendor_id: u32,
+    /// `VkPhysicalDeviceProperties.deviceID`, or `0` to keep the host's.
+    pub device_id: u32,
+    /// The *inner* text of `VkPhysicalDeviceProperties.deviceName` — the guest wraps whatever the
+    /// host reports in `"Virtio-GPU GFXStream (…)"`. Empty to keep the host's.
+    pub device_name: String,
+    /// `VkPhysicalDeviceProperties.pipelineCacheUUID`, per-instance-stable and **not** the host's.
+    /// All-zero to keep the host's.
+    pub pipeline_cache_uuid: [u8; 16],
+    /// Report `VkPhysicalDeviceFeatures::textureCompressionBC` as FALSE (host: TRUE; no mobile GPU
+    /// has BC/DXT).
+    pub clear_texture_compression_bc: bool,
+    /// Report `VkPhysicalDeviceFeatures::multiViewport` as FALSE (host: TRUE). **Must** be applied
+    /// together with `max_viewports == 1`.
+    pub clear_multi_viewport: bool,
+    /// `VkPhysicalDeviceLimits::maxViewports`, or `0` to keep the host's. The spec requires this to
+    /// be exactly 1 whenever `multiViewport` is unsupported, so it is always `1` when
+    /// `clear_multi_viewport` is set.
+    pub max_viewports: u32,
+    /// `VkPhysicalDeviceSubgroupProperties::subgroupSize`, or `0` to keep the host's.
+    pub subgroup_size: u32,
+    /// Strip the host-only device extensions from the guest-visible list. The *names* live with the
+    /// applier, not here: they describe the host driver (Metal/Apple-specific entry points), not
+    /// the device this profile claims.
+    pub strip_extensions: bool,
+}
+
+impl GpuSpoof {
+    /// Whether this spoof is entirely sentinels, i.e. exact host passthrough. A caller may skip the
+    /// applier call altogether when this is true.
+    pub fn is_passthrough(&self) -> bool {
+        *self == GpuSpoof::default()
+    }
+
+    /// Every Vulkan feature bit this spoof touches, as `(feature_name, reported_value)`.
+    ///
+    /// Exists so the CLEAR-bits-only invariant is *mechanically* checkable (see the
+    /// `host_spoof_only_ever_clears_features_never_sets_them` test) rather than only asserted in a
+    /// comment: every pair this returns must have `reported_value == false`, for every profile.
+    pub fn feature_overrides(&self) -> Vec<(&'static str, bool)> {
+        let mut overrides = Vec::new();
+        if self.clear_texture_compression_bc {
+            overrides.push(("textureCompressionBC", false));
+        }
+        if self.clear_multi_viewport {
+            overrides.push(("multiViewport", false));
+        }
+        overrides
+    }
+}
+
+/// Mint a per-instance, RFC-4122-v4-*shaped* 128-bit identifier: deterministic in
+/// `(seed, kind, index)`, and different for any change to any of the three.
+///
+/// `seed` is the per-VM-instance seed, `kind` one of the `UUID_KIND_*` constants (domain
+/// separation, so the pipeline-cache UUID and a virtio-gpu resource UUID minted from the same seed
+/// cannot collide), and `index` distinguishes members of one kind (e.g. resource id).
+///
+/// The v4 *shape* — byte 6 high nibble `0x4`, byte 8 top bits `0b10` — is what a UUID consumer
+/// checks; the value is derived, not random, which is the whole point (a random UUID could not be
+/// reproduced for the same instance, and a pipeline cache would miss on every launch). Built from
+/// the crate's `fnv1a64` over two domain-separated halves: not cryptographic, and not required to
+/// be — it needs determinism, spread, and to carry **no host-derived bits**.
+///
+/// Public because the virtio-gpu device (`RESOURCE_ASSIGN_UUID`) needs exactly this function: the
+/// `b"AEMU"`-plus-zero-padding magic it writes today is both a literal product name on the wire and
+/// structurally anomalous (eight zero bytes in the middle of a UUID).
+pub fn instance_uuid(seed: u64, kind: u32, index: u32) -> [u8; 16] {
+    let mut payload = [0u8; 16];
+    payload[..8].copy_from_slice(&seed.to_le_bytes());
+    payload[8..12].copy_from_slice(&kind.to_le_bytes());
+    payload[12..].copy_from_slice(&index.to_le_bytes());
+
+    // Two independently domain-separated 64-bit halves: FNV-1a is a 64-bit hash, and hashing the
+    // same payload twice under different prefixes is what makes the halves differ.
+    let hi = fnv1a64(&[b"aemulator/instance-uuid/hi/".as_slice(), &payload].concat());
+    let lo = fnv1a64(&[b"aemulator/instance-uuid/lo/".as_slice(), &payload].concat());
+
+    let mut uuid = [0u8; 16];
+    uuid[..8].copy_from_slice(&hi.to_be_bytes());
+    uuid[8..].copy_from_slice(&lo.to_be_bytes());
+    uuid[6] = (uuid[6] & 0x0F) | 0x40; // version 4
+    uuid[8] = (uuid[8] & 0x3F) | 0x80; // variant RFC 4122
+    uuid
+}
+
+/// [`instance_uuid`] domain: `VkPhysicalDeviceProperties::pipelineCacheUUID`.
+pub const UUID_KIND_PIPELINE_CACHE: u32 = 1;
+/// [`instance_uuid`] domain: a virtio-gpu `RESOURCE_ASSIGN_UUID` reply (`index` = resource id).
+pub const UUID_KIND_RESOURCE: u32 = 2;
+/// [`instance_uuid`] domain: `VkPhysicalDeviceIDProperties::deviceUUID`. Reserved — the guest image
+/// zeroes this field itself today, so writing it is currently dead code.
+pub const UUID_KIND_DEVICE: u32 = 3;
+/// [`instance_uuid`] domain: `VkPhysicalDeviceIDProperties::driverUUID`. Reserved, same reason as
+/// [`UUID_KIND_DEVICE`].
+pub const UUID_KIND_DRIVER: u32 = 4;
+
+// ---------------------------------------------------------------------------------------------
+// GPU policy tables. Public because they ARE the policy: the host renderer must not carry a second,
+// drifting copy of any of it, and CI runs this crate's tests on ubuntu-latest while the VMM crate
+// is workspace-excluded.
+// ---------------------------------------------------------------------------------------------
+
+/// The `androidboot.opengles.version` value every AEmulator launcher puts on the guest kernel
+/// command line: `(3 << 16) | 1` = **GLES 3.1**, the ceiling this host can honestly back.
+///
+/// Named here so [`GpuProfile::gl_version`] and the boot cmdline cannot drift: `validate` pins the
+/// claimed `GL_VERSION` to at most this. Raising it to `196610` (3.2) is explicitly the wrong fix —
+/// GLES 3.2 mandates geometry shaders, the host has none, and an app that reads 3.2 and then calls
+/// `glCreateShader(GL_GEOMETRY_SHADER)` is both a worse tell and broken rendering.
+///
+/// The launchers are shell scripts and cannot import a Rust constant; a text-scan pin test over
+/// them is tracked separately (plan item 4.11).
+pub const BOOT_OPENGLES_VERSION: u32 = 196_609;
+
+/// The EGL implementations the guest image actually ships as `libEGL_<name>.so`, and therefore the
+/// only legal values of [`GpuProfile::ro_hardware_egl`].
+///
+/// Android's EGL loader `dlopen`s `libEGL_${ro.hardware.egl}.so` and has **no fallback to a vendor
+/// name it cannot find** — a wrong value is not "GL that looks like someone else's", it is *no GL*,
+/// surfacing late (SurfaceFlinger/zygote abort) and silently from the host's point of view. So this
+/// is an allowlist of what the image can load, not a wishlist of vendors:
+///
+/// * `angle` — the ANGLE-over-Vulkan driver, present in the image and verified to initialize
+///   (`renderer: ANGLE (Vulkan 1.3.0 …) … OpenGL ES 3.1.0`). **Not a tell**: Pixel ships ANGLE as
+///   its default GLES driver, so a real retail device reports exactly this.
+/// * `emulation` — the goldfish `libEGL_emulation.so`, also present (a boot with
+///   `egl=emulation` got as far as *transport* failure, i.e. the library loaded). Loadable, but a
+///   goldfish tell in its own right, so it is not what any profile should choose.
+///
+/// A vendor name the image has no `libEGL_` for (`adreno`, `mali`, `powervr`) is rejected by
+/// `validate`, which is the check that would have caught the `"adreno"` this crate used to emit.
+pub const EGL_IMPLEMENTATIONS_SHIPPED: &[&str] = &["angle", "emulation"];
+
+/// One coherent mobile-GPU vendor identity: the `vendorID` ↔ `GL_VENDOR` ↔ `driverID` triple that a
+/// real device reports together, plus the part family its marketing names use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuVendorTriple {
+    /// `VkPhysicalDeviceProperties.vendorID`.
+    pub vk_vendor_id: u32,
+    /// Case-insensitive needle the `glGetString(GL_VENDOR)` string must contain.
+    pub gl_vendor: &'static str,
+    /// The exact `VkPhysicalDeviceDriverProperties.driverID` enum name.
+    pub vk_driver_id: &'static str,
+    /// Case-insensitive needle the renderer / device name must contain, e.g. `"Adreno"`.
+    pub part_family: &'static str,
+}
+
+/// The vendor triples a profile may claim. Fail-closed: a `vk_vendor_id` absent from this table is
+/// rejected, because the table is the *only* thing that can keep the three fields agreeing — a
+/// detector reads all three and one mismatched pair is a one-line detection. Extend it (with the
+/// matching `GL_VENDOR` and `driverID`) rather than working around it.
+pub const GPU_VENDOR_TRIPLES: &[GpuVendorTriple] = &[
+    GpuVendorTriple {
+        vk_vendor_id: 0x5143,
+        gl_vendor: "Qualcomm",
+        vk_driver_id: "VK_DRIVER_ID_QUALCOMM_PROPRIETARY",
+        part_family: "Adreno",
+    },
+    GpuVendorTriple {
+        vk_vendor_id: 0x13b5,
+        gl_vendor: "ARM",
+        vk_driver_id: "VK_DRIVER_ID_ARM_PROPRIETARY",
+        part_family: "Mali",
+    },
+    GpuVendorTriple {
+        vk_vendor_id: 0x1010,
+        gl_vendor: "Imagination",
+        vk_driver_id: "VK_DRIVER_ID_IMAGINATION_PROPRIETARY",
+        part_family: "PowerVR",
+    },
+    GpuVendorTriple {
+        vk_vendor_id: 0x144d,
+        gl_vendor: "Samsung",
+        vk_driver_id: "VK_DRIVER_ID_SAMSUNG_PROPRIETARY",
+        part_family: "Xclipse",
+    },
+];
+
+/// A capability the **measured host** provably cannot provide, together with the profile claims that
+/// would imply it.
+///
+/// See [`HOST_UNBACKABLE`] for why this exists at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostUnbackable {
+    /// The capability, named as the host reports it (a `VkPhysicalDeviceFeatures` field or an
+    /// extension name).
+    pub capability: &'static str,
+    /// Why the host cannot back it, quoted from the measured baseline.
+    pub host_evidence: &'static str,
+    /// A GLES 3.x claim at or above this minor version implies the capability. `None` when no GLES
+    /// level implies it.
+    pub implied_by_gles_3_minor: Option<u32>,
+    /// Case-insensitive needles which, appearing anywhere in the profile's GPU claim strings, imply
+    /// the capability.
+    pub claim_needles: &'static [&'static str],
+}
+
+/// Capabilities the host **provably** lacks, per
+/// `crates/aemulator-hvf/gfxstream/evidence/host-vulkan-identity.json` (a reproducible dump of the
+/// real host driver, deliberately byte-stable across reruns).
+///
+/// A profile that *claims* one of these is not merely over-stating the device: the guest will
+/// request it, the host will refuse, and rendering breaks. This is the rule that would have caught
+/// the GLES 3.2 claim this crate shipped before Phase 4.2.
+///
+/// Only capabilities a [`GpuProfile`] can actually claim are listed. `wideLines`,
+/// `fillModeNonSolid`, `depthBounds`, `shaderFloat64` and `pipelineStatisticsQuery` are also FALSE
+/// on this host, but nothing in `GpuProfile` can assert them, so an entry for them would be
+/// vacuous — and a vacuous rule that reads as coverage is worse than no rule.
+pub const HOST_UNBACKABLE: &[HostUnbackable] = &[
+    HostUnbackable {
+        capability: "geometryShader",
+        host_evidence: "features.geometryShader = false — Apple hardware has no geometry stage, \
+                        and ANGLE cannot synthesize one (tessellationShader IS true, so GLES 3.2 \
+                        fails on the geometry half alone)",
+        implied_by_gles_3_minor: Some(2),
+        claim_needles: &["geometry_shader", "geometryshader"],
+    },
+    HostUnbackable {
+        capability: "VK_KHR_ray_query",
+        host_evidence: "absent from all 140 host device extensions (no ray-query, ray-tracing \
+                        pipeline, or acceleration-structure extension is present)",
+        implied_by_gles_3_minor: None,
+        claim_needles: &["ray_query", "rayquery", "ray_tracing", "raytracing"],
+    },
+];
 
 /// The physical panel. **Screen metrics are first-order fingerprint payload** — every app reads
 /// them unpermissioned via `DisplayMetrics`/`WindowMetrics`, and a 4:3 1024×768 landscape panel on a
@@ -1175,6 +1540,167 @@ impl DeviceProfile {
             }
         }
 
+        // 10. GPU coherence — the cross-checks `GpuProfile`'s doc comment has always promised.
+        //     Two of these guard *rendering*, not just plausibility: an EGL name the image cannot
+        //     load means no GL at all, and a claimed capability the host lacks means
+        //     `vkCreateDevice` fails. Those two are the reason this section exists in the identity
+        //     crate (whose tests run in CI) rather than in the workspace-excluded VMM crate.
+        let g = &self.gpu;
+
+        // (a) `ro.hardware.egl` must name an EGL implementation the guest image ships, because
+        //     Android's loader dlopen()s `libEGL_${ro.hardware.egl}.so` with no fallback. Checked
+        //     whenever the value is non-empty — a profile can declare no GPU and still emit this
+        //     property.
+        if !g.ro_hardware_egl.is_empty()
+            && !EGL_IMPLEMENTATIONS_SHIPPED.contains(&g.ro_hardware_egl.as_str())
+        {
+            errs.push(CoherenceError::GpuIncoherent(format!(
+                "ro.hardware.egl `{}` names no EGL implementation the guest image ships: Android \
+                 dlopen()s `libEGL_{}.so`, there is no such library in the image, and the loader \
+                 has no fallback — GL disappears entirely. Legal values: {}",
+                g.ro_hardware_egl,
+                g.ro_hardware_egl,
+                EGL_IMPLEMENTATIONS_SHIPPED.join("|")
+            )));
+        }
+
+        // (b) `deviceType` may never be Cpu. The struct doc has said so since it was written;
+        //     nothing enforced it. VK_PHYSICAL_DEVICE_TYPE_CPU is on our own detection blocklist
+        //     (SwiftShader/lavapipe), and no phone reports it.
+        if g.vk_device_type == VkDeviceType::Cpu {
+            errs.push(CoherenceError::GpuIncoherent(
+                "vk_device_type is Cpu — VK_PHYSICAL_DEVICE_TYPE_CPU is a SwiftShader/lavapipe \
+                 tell on our own blocklist and no physical phone reports it"
+                    .into(),
+            ));
+        }
+
+        // (c) The claimed GLES level may not exceed what the boot cmdline encodes.
+        if !g.gl_version.is_empty() {
+            let (cap_major, cap_minor) = decode_gles_version(BOOT_OPENGLES_VERSION);
+            match parse_gl_es_version(&g.gl_version) {
+                None => errs.push(CoherenceError::GpuIncoherent(format!(
+                    "gl_version `{}` does not parse as an `OpenGL ES <major>.<minor> …` string, so \
+                     it cannot be checked against androidboot.opengles.version",
+                    g.gl_version
+                ))),
+                Some((major, minor)) if (major, minor) > (cap_major, cap_minor) => {
+                    errs.push(CoherenceError::GpuIncoherent(format!(
+                        "gl_version claims GLES {major}.{minor} but androidboot.opengles.version is \
+                         {BOOT_OPENGLES_VERSION} = GLES {cap_major}.{cap_minor}. Raising the \
+                         cmdline is NOT the fix: the extra level is unbacked by the host, so an app \
+                         that reads the higher GL_VERSION and then uses the stage it implies gets \
+                         nothing — a worse tell than the lower version AND broken rendering"
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
+
+        // (d) vendorID ↔ GL_VENDOR ↔ driverID must be one of the triples a real device reports
+        //     together, and the renderer must belong to that vendor's part family.
+        if g.is_set() {
+            match GPU_VENDOR_TRIPLES
+                .iter()
+                .find(|t| t.vk_vendor_id == g.vk_vendor_id)
+            {
+                None => errs.push(CoherenceError::GpuIncoherent(format!(
+                    "vk_vendor_id 0x{:04x} is not a mobile GPU vendor this crate can keep coherent \
+                     — add it to GPU_VENDOR_TRIPLES with its GL_VENDOR and driverID, or the three \
+                     fields cannot be cross-checked at all. Known: {}",
+                    g.vk_vendor_id,
+                    GPU_VENDOR_TRIPLES
+                        .iter()
+                        .map(|t| format!("0x{:04x}/{}", t.vk_vendor_id, t.gl_vendor))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))),
+                Some(triple) => {
+                    if !contains_ignore_ascii_case(&g.gl_vendor, triple.gl_vendor) {
+                        errs.push(CoherenceError::GpuIncoherent(format!(
+                            "vk_vendor_id 0x{:04x} is {} but gl_vendor is `{}` (must contain `{}`)",
+                            g.vk_vendor_id, triple.gl_vendor, g.gl_vendor, triple.gl_vendor
+                        )));
+                    }
+                    if g.vk_driver_id != triple.vk_driver_id {
+                        errs.push(CoherenceError::GpuIncoherent(format!(
+                            "vk_vendor_id 0x{:04x} ({}) requires vk_driver_id `{}`, got `{}`",
+                            g.vk_vendor_id, triple.gl_vendor, triple.vk_driver_id, g.vk_driver_id
+                        )));
+                    }
+                    if !contains_ignore_ascii_case(&g.gl_renderer, triple.part_family) {
+                        errs.push(CoherenceError::GpuIncoherent(format!(
+                            "vk_vendor_id 0x{:04x} ({}) ships `{}` parts but gl_renderer is `{}`",
+                            g.vk_vendor_id, triple.gl_vendor, triple.part_family, g.gl_renderer
+                        )));
+                    }
+                }
+            }
+
+            // (e) `vk_device_name` must name the same part as `gl_renderer` — an app reading
+            //     GL_RENDERER and one reading VkPhysicalDeviceProperties::deviceName must not learn
+            //     two different GPUs.
+            match (
+                gpu_part_token(&g.gl_renderer),
+                gpu_part_token(&g.vk_device_name),
+            ) {
+                (Some(gl_part), Some(vk_part)) if gl_part != vk_part => {
+                    errs.push(CoherenceError::GpuIncoherent(format!(
+                        "gl_renderer `{}` names part `{gl_part}` but vk_device_name `{}` names \
+                         `{vk_part}`",
+                        g.gl_renderer, g.vk_device_name
+                    )));
+                }
+                (Some(gl_part), None) => errs.push(CoherenceError::GpuIncoherent(format!(
+                    "gl_renderer `{}` names part `{gl_part}` but vk_device_name `{}` names no part \
+                     at all",
+                    g.gl_renderer, g.vk_device_name
+                ))),
+                _ => {}
+            }
+
+            // (f) No claim may imply a capability the host provably lacks. Over-claiming here is
+            //     not cosmetic: the guest requests the feature, `vkCreateDevice` returns
+            //     VK_ERROR_FEATURE_NOT_PRESENT, and there is no graphics at all.
+            let claims = [
+                g.gl_vendor.as_str(),
+                g.gl_renderer.as_str(),
+                g.gl_version.as_str(),
+                g.vk_device_name.as_str(),
+                g.vk_driver_id.as_str(),
+            ]
+            .join(" ")
+            .to_ascii_lowercase();
+            let gles = parse_gl_es_version(&g.gl_version);
+            for entry in HOST_UNBACKABLE {
+                let via_gles = match (entry.implied_by_gles_3_minor, gles) {
+                    (Some(min_minor), Some((major, minor))) => (major, minor) >= (3, min_minor),
+                    _ => false,
+                };
+                let via_needle = entry
+                    .claim_needles
+                    .iter()
+                    .find(|needle| claims.contains(**needle));
+                if via_gles || via_needle.is_some() {
+                    let why = if via_gles {
+                        format!(
+                            "a GLES {}.{} claim",
+                            gles.map(|(major, _)| major).unwrap_or(0),
+                            gles.map(|(_, minor)| minor).unwrap_or(0)
+                        )
+                    } else {
+                        format!("the claim string `{}`", via_needle.copied().unwrap_or(""))
+                    };
+                    errs.push(CoherenceError::GpuIncoherent(format!(
+                        "{why} implies `{}`, which the host cannot back: {}. The guest would \
+                         request it and vkCreateDevice would return VK_ERROR_FEATURE_NOT_PRESENT — \
+                         no graphics at all",
+                        entry.capability, entry.host_evidence
+                    )));
+                }
+            }
+        }
+
         if errs.is_empty() {
             Ok(())
         } else {
@@ -1230,6 +1756,48 @@ const VIRT_NEEDLES: &[&str] = &[
 /// Format an Android boolean property (`ro.boot.flash.locked`, etc.) as `"1"`/`"0"`.
 fn bool_prop(value: bool) -> String {
     if value { "1" } else { "0" }.to_string()
+}
+
+/// Case-insensitive substring test. Both sides are ASCII in every identity field we compare.
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    haystack
+        .to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
+}
+
+/// Decode an `androidboot.opengles.version` integer (`major << 16 | minor`) into `(major, minor)` —
+/// `196609` → `(3, 1)`.
+fn decode_gles_version(encoded: u32) -> (u32, u32) {
+    (encoded >> 16, encoded & 0xFFFF)
+}
+
+/// Parse `(major, minor)` out of a `glGetString(GL_VERSION)` string. GLES spells it
+/// `"OpenGL ES <major>.<minor>[.<release>] <vendor-specific>"`, e.g.
+/// `"OpenGL ES 3.1 V@0744.0 (GIT@…)"` → `(3, 1)`. Returns `None` if the mandated prefix or the
+/// version number is missing — which is itself a coherence failure, not a reason to skip the check.
+fn parse_gl_es_version(gl_version: &str) -> Option<(u32, u32)> {
+    const PREFIX: &str = "opengl es";
+    let lower = gl_version.to_ascii_lowercase();
+    let rest = &lower[lower.find(PREFIX)? + PREFIX.len()..];
+    let token = rest.split_whitespace().next()?;
+    let mut parts = token.split('.');
+    let major = parts.next()?.parse().ok()?;
+    // A missing minor is 0 ("OpenGL ES 3"); a trailing release number is ignored.
+    let minor = parts.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor))
+}
+
+/// The model token of a GPU marketing name: the **first** whitespace/punctuation-separated token
+/// containing a digit, uppercased. `"Adreno (TM) 740"` → `"740"`, `"Mali-G715 MC11"` → `"G715"`,
+/// `"PowerVR Rogue GE8320"` → `"GE8320"`.
+///
+/// First rather than last on purpose: trailing tokens are configuration suffixes (core counts,
+/// driver build ids) that the Vulkan `deviceName` and the GL renderer string do not have to share,
+/// whereas the model number is the part itself.
+fn gpu_part_token(name: &str) -> Option<String> {
+    name.split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|token| token.chars().any(|c| c.is_ascii_digit()))
+        .map(|token| token.to_ascii_uppercase())
 }
 
 /// Case-insensitive substring scan of `value` against [`VIRT_NEEDLES`]; returns the first tell hit.
@@ -1492,10 +2060,13 @@ mod tests {
             props.get("ro.product.cpu.abilist").map(String::as_str),
             Some("arm64-v8a,armeabi-v7a,armeabi")
         );
+        // `angle`, NOT `adreno`: Android dlopen()s `libEGL_${ro.hardware.egl}.so` and the image
+        // ships no `libEGL_adreno.so`, so the vendor name would mean no GL at all (Phase 4.1).
         assert_eq!(
             props.get("ro.hardware.egl").map(String::as_str),
-            Some("adreno")
+            Some("angle")
         );
+        assert!(EGL_IMPLEMENTATIONS_SHIPPED.contains(&"angle"));
         // verified boot + retail security posture
         assert_eq!(
             props.get("ro.boot.verifiedbootstate").map(String::as_str),
@@ -1851,6 +2422,20 @@ mod tests {
             loaded.emit_properties(),
             profiles::reference_profile().emit_properties()
         );
+        // ...and the GPU block must match field-for-field, which the property map cannot check:
+        // only `ro.hardware.egl` of it is ever emitted as a property, so `gl_version`,
+        // `vk_device_id` and `vk_subgroup_size` could otherwise drift between the twins unnoticed.
+        assert_eq!(loaded.gpu, profiles::reference_profile().gpu);
+        assert_eq!(
+            loaded.gpu.gl_version, "OpenGL ES 3.1 V@0744.0 (GIT@a0d5f2b, Ie4a2f9d70e, 1675814076)",
+            "the twin must claim GLES 3.1 — 3.2 needs a geometry stage this host does not have"
+        );
+        assert_eq!(loaded.gpu.ro_hardware_egl, "angle");
+        // The same spoof, from either twin.
+        assert_eq!(
+            loaded.gpu.host_spoof(0x51a7_c0de),
+            profiles::reference_profile().gpu.host_spoof(0x51a7_c0de)
+        );
     }
 
     // --- validate: coherence failures are rejected ---------------------------------------------
@@ -2050,6 +2635,418 @@ mod tests {
         assert!(luhn_is_valid("490154203237518"));
         assert!(!luhn_is_valid("490154203237510"));
         assert_eq!(luhn_check_digit("not-digits"), None);
+    }
+
+    // --- GPU: the host-side identity policy (Phase 4.1-4.5) ------------------------------------
+
+    /// The measured host's own `pipelineCacheUUID`, verbatim from
+    /// `crates/aemulator-hvf/gfxstream/evidence/host-vulkan-identity.json`
+    /// (`properties.pipelineCacheUUID`, and bytes 16..32 of `pipelineCacheHeader.first32BytesHex`).
+    /// It is **stable across reboots** on that host, which is exactly what makes it a permanent,
+    /// unpermissioned, cross-app device identifier — and why nothing we mint may reproduce it.
+    const HOST_PIPELINE_CACHE_UUID: [u8; 16] = [
+        0x16, 0x55, 0xd6, 0xf0, 0x9e, 0xe4, 0xd2, 0xa9, 0x99, 0x72, 0xc5, 0x5d, 0xa3, 0x0e, 0x2a,
+        0x0c,
+    ];
+
+    /// Spoofs whose structural invariants must hold unconditionally: the default (passthrough), the
+    /// bundled reference, and an *adversarial* profile that claims everything the host lacks. The
+    /// adversarial case would be rejected by `validate`, and that is the point — even a profile that
+    /// should never ship must not be able to produce a set-bit.
+    fn spoof_matrix() -> Vec<(&'static str, GpuSpoof)> {
+        let mut adversarial = profiles::reference_profile();
+        adversarial.gpu.gl_version = "OpenGL ES 3.2 V@0744.0 ray_query".into();
+        adversarial.gpu.vk_device_id = 0x4305_0a01;
+        adversarial.gpu.vk_subgroup_size = 128;
+        vec![
+            ("default", GpuProfile::default().host_spoof(0)),
+            (
+                "reference",
+                profiles::reference_profile().gpu.host_spoof(0x51a7_c0de),
+            ),
+            ("adversarial", adversarial.gpu.host_spoof(1)),
+        ]
+    }
+
+    #[test]
+    fn host_spoof_only_ever_clears_features_never_sets_them() {
+        // THE invariant that prevents total loss of graphics: reporting a feature TRUE that the host
+        // reports FALSE makes the guest request it, `vkCreateDevice` returns
+        // VK_ERROR_FEATURE_NOT_PRESENT, and there is no graphics at all.
+        for (name, spoof) in spoof_matrix() {
+            for (feature, reported) in spoof.feature_overrides() {
+                assert!(
+                    !reported,
+                    "{name}: GpuSpoof reported `{feature}` TRUE — a set-bit is unrepresentable by \
+                     construction, so this means a new field broke the invariant"
+                );
+            }
+            // The two features that are FALSE on the measured host must never be touched at all:
+            // there is no safe direction to move them, only a clamp that is already redundant.
+            let touched: Vec<&str> = spoof
+                .feature_overrides()
+                .iter()
+                .map(|(feature, _)| *feature)
+                .collect();
+            for forbidden in ["geometryShader", "wideLines"] {
+                assert!(
+                    !touched.contains(&forbidden),
+                    "{name}: `{forbidden}` is FALSE on this host and must never appear in a spoof"
+                );
+            }
+        }
+
+        // Structural half: `feature_overrides` can only report what someone remembered to add to
+        // it, so also pin the STRUCT — every boolean in `GpuSpoof` must be a `clear_*` flag (or the
+        // one non-feature `strip_extensions`). This is what actually catches a future
+        // `set_geometry_shader: bool`, which would be total loss of graphics rather than a tell.
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
+        )
+        .expect("this crate's own source must be readable");
+        let decl = source
+            .split_once("pub struct GpuSpoof {")
+            .expect("GpuSpoof must be declared in this file")
+            .1
+            .split_once("\n}")
+            .expect("GpuSpoof's declaration must be terminated")
+            .0;
+        let bools: Vec<&str> = decl
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("pub "))
+            .filter_map(|field| field.split_once(": bool,"))
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            bools.len() >= 3,
+            "expected to find GpuSpoof's boolean fields, found {bools:?} — the scan broke, and a \
+             vacuous pass here is worse than no test"
+        );
+        for field in bools {
+            assert!(
+                field.starts_with("clear_") || field == "strip_extensions",
+                "GpuSpoof field `{field}` is a boolean that is neither a `clear_*` feature flag nor \
+                 `strip_extensions`. If it reports a feature TRUE, the guest requests it, \
+                 vkCreateDevice returns VK_ERROR_FEATURE_NOT_PRESENT, and there is NO graphics."
+            );
+        }
+    }
+
+    #[test]
+    fn multi_viewport_false_implies_max_viewports_one() {
+        // The Vulkan spec REQUIRES maxViewports == 1 when multiViewport is unsupported. Clearing one
+        // without the other yields an internally invalid device — a louder tell than the host's 16.
+        for (name, spoof) in spoof_matrix() {
+            if spoof.clear_multi_viewport {
+                assert_eq!(
+                    spoof.max_viewports, 1,
+                    "{name}: multiViewport cleared without maxViewports = 1"
+                );
+            } else {
+                assert_eq!(
+                    spoof.max_viewports, 0,
+                    "{name}: maxViewports touched without clearing multiViewport"
+                );
+            }
+        }
+        // And the reference really does exercise the pairing (not vacuously skipped).
+        let spoof = profiles::reference_profile().gpu.host_spoof(1);
+        assert!(spoof.clear_multi_viewport);
+        assert_eq!(spoof.max_viewports, 1);
+    }
+
+    #[test]
+    fn a_default_profile_yields_an_all_sentinel_spoof() {
+        // Exact passthrough when unconfigured — the property that makes an applier whose setter is
+        // never called agree with an applier handed a default profile.
+        let spoof = GpuProfile::default().host_spoof(0xdead_beef);
+        assert!(spoof.is_passthrough(), "default spoof must be passthrough");
+        assert_eq!(spoof.vendor_id, 0);
+        assert_eq!(spoof.device_id, 0);
+        assert_eq!(spoof.device_name, "");
+        assert_eq!(spoof.pipeline_cache_uuid, [0u8; 16]);
+        assert!(!spoof.clear_texture_compression_bc);
+        assert!(!spoof.clear_multi_viewport);
+        assert_eq!(spoof.max_viewports, 0);
+        assert_eq!(spoof.subgroup_size, 0);
+        assert!(!spoof.strip_extensions);
+        assert!(spoof.feature_overrides().is_empty());
+        assert!(!DeviceProfile::default().gpu.is_set());
+        // ...and the configured reference is NOT passthrough, or the test above proves nothing.
+        let reference = profiles::reference_profile().gpu.host_spoof(7);
+        assert!(!reference.is_passthrough());
+        assert_eq!(reference.vendor_id, 0x5143);
+        assert_eq!(reference.device_name, "Adreno (TM) 740");
+        assert!(reference.strip_extensions);
+        // The reference leaves deviceID and subgroupSize alone rather than fabricating them.
+        assert_eq!(reference.device_id, 0);
+        assert_eq!(reference.subgroup_size, 0);
+    }
+
+    #[test]
+    fn instance_uuid_is_v4_shaped_and_deterministic() {
+        let uuid = instance_uuid(0x51a7_c0de, UUID_KIND_PIPELINE_CACHE, 0);
+        // RFC-4122 v4 shape: version nibble 4, variant bits 0b10.
+        assert_eq!(
+            uuid[6] & 0xF0,
+            0x40,
+            "version nibble must be 4: {uuid:02x?}"
+        );
+        assert_eq!(
+            uuid[8] & 0xC0,
+            0x80,
+            "variant bits must be 0b10: {uuid:02x?}"
+        );
+        assert_ne!(
+            uuid, [0u8; 16],
+            "an all-zero UUID is the passthrough sentinel"
+        );
+        // Deterministic for the same (seed, kind, index) — a pipeline cache must survive a relaunch.
+        assert_eq!(
+            uuid,
+            instance_uuid(0x51a7_c0de, UUID_KIND_PIPELINE_CACHE, 0)
+        );
+        // ...and distinct across every input. Seed: two instances must not be linkable. Kind: the
+        // pipeline-cache UUID and a resource UUID minted from one seed must not collide. Index:
+        // per-resource UUIDs must differ.
+        assert_ne!(
+            uuid,
+            instance_uuid(0x51a7_c0df, UUID_KIND_PIPELINE_CACHE, 0)
+        );
+        assert_ne!(uuid, instance_uuid(0x51a7_c0de, UUID_KIND_RESOURCE, 0));
+        assert_ne!(
+            uuid,
+            instance_uuid(0x51a7_c0de, UUID_KIND_PIPELINE_CACHE, 1)
+        );
+        // Every kind/index combination stays v4-shaped and non-zero.
+        for kind in [
+            UUID_KIND_PIPELINE_CACHE,
+            UUID_KIND_RESOURCE,
+            UUID_KIND_DEVICE,
+            UUID_KIND_DRIVER,
+        ] {
+            for index in 0..8 {
+                let u = instance_uuid(0, kind, index);
+                assert_eq!(u[6] & 0xF0, 0x40);
+                assert_eq!(u[8] & 0xC0, 0x80);
+                assert_ne!(u, [0u8; 16]);
+            }
+        }
+        // No eight-zero-byte run in the middle, which is what the `b"AEMU"` magic it replaces has.
+        assert_ne!(&uuid[4..12], &[0u8; 8]);
+    }
+
+    #[test]
+    fn pipeline_cache_uuid_is_not_the_hosts() {
+        // Killing this identifier is the single highest-value item in the whole GPU phase: the
+        // host's is stable across reboots, so it is a permanent hardware ID readable by any app
+        // with no permission, surviving a factory reset.
+        let profile = profiles::reference_profile();
+        let mut seen = std::collections::BTreeSet::new();
+        for seed in [0u64, 1, 0x51a7_c0de, u64::MAX] {
+            let spoof = profile.gpu.host_spoof(seed);
+            assert_ne!(
+                spoof.pipeline_cache_uuid, HOST_PIPELINE_CACHE_UUID,
+                "spoofed pipelineCacheUUID must never be the host's 1655d6f0… (seed {seed})"
+            );
+            assert_ne!(spoof.pipeline_cache_uuid, [0u8; 16]);
+            // Stable for a given instance seed (so a shader cache still hits)...
+            assert_eq!(
+                spoof.pipeline_cache_uuid,
+                profile.gpu.host_spoof(seed).pipeline_cache_uuid
+            );
+            seen.insert(spoof.pipeline_cache_uuid);
+        }
+        // ...and different per instance, so two instances are not linkable by it.
+        assert_eq!(
+            seen.len(),
+            4,
+            "each instance seed must mint a distinct UUID"
+        );
+        // The baseline constant really is the host's, so the assertion above is not vacuous.
+        assert_eq!(
+            HOST_PIPELINE_CACHE_UUID
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+            "1655d6f09ee4d2a99972c55da30e2a0c"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_an_egl_the_image_cannot_load() {
+        // The bug this rule exists for: `adreno` names `libEGL_adreno.so`, which the guest image
+        // does not ship, and Android's loader has no fallback — GL disappears entirely.
+        let mut p = profiles::reference_profile();
+        p.gpu.ro_hardware_egl = "adreno".into();
+        let errs = p
+            .validate()
+            .expect_err("an unloadable ro.hardware.egl must fail validate");
+        assert_has(
+            &errs,
+            |e| matches!(e, CoherenceError::GpuIncoherent(m) if m.contains("libEGL_adreno.so")),
+            "GpuIncoherent(libEGL_adreno.so)",
+        );
+        // Every value the image DOES ship passes.
+        for shipped in EGL_IMPLEMENTATIONS_SHIPPED {
+            let mut ok = profiles::reference_profile();
+            ok.gpu.ro_hardware_egl = (*shipped).to_string();
+            assert_eq!(ok.validate(), Ok(()), "`{shipped}` must be accepted");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_a_gl_version_above_the_cmdline_cap() {
+        // GLES 3.2 is what a real Adreno 740 reports and what this profile used to claim. The boot
+        // cmdline encodes 3.1, and raising the cmdline is not the fix — the host has no geometry
+        // stage to back the extra level.
+        assert_eq!(decode_gles_version(BOOT_OPENGLES_VERSION), (3, 1));
+        let mut p = profiles::reference_profile();
+        p.gpu.gl_version = "OpenGL ES 3.2 V@0744.0 (GIT@a0d5f2b, Ie4a2f9d70e, 1675814076)".into();
+        let errs = p
+            .validate()
+            .expect_err("GLES 3.2 over a 196609 cmdline must fail validate");
+        assert_has(
+            &errs,
+            |e| {
+                matches!(e, CoherenceError::GpuIncoherent(m)
+                    if m.contains("androidboot.opengles.version"))
+            },
+            "GpuIncoherent(opengles.version cap)",
+        );
+        // A version string that is not a GLES version at all is also a failure, not a skip.
+        let mut garbled = profiles::reference_profile();
+        garbled.gpu.gl_version = "Adreno driver 0744".into();
+        let errs = garbled.validate().expect_err("unparseable gl_version");
+        assert_has(
+            &errs,
+            |e| matches!(e, CoherenceError::GpuIncoherent(m) if m.contains("does not parse")),
+            "GpuIncoherent(unparseable gl_version)",
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_vendor_triple_mismatch() {
+        // gl_vendor disagreeing with vendorID.
+        let mut gl = profiles::reference_profile();
+        gl.gpu.gl_vendor = "ARM".into();
+        assert_has(
+            &gl.validate()
+                .expect_err("Qualcomm vendorID + ARM GL_VENDOR"),
+            |e| matches!(e, CoherenceError::GpuIncoherent(m) if m.contains("gl_vendor")),
+            "GpuIncoherent(gl_vendor)",
+        );
+        // driverID disagreeing with vendorID.
+        let mut driver = profiles::reference_profile();
+        driver.gpu.vk_driver_id = "VK_DRIVER_ID_MESA_TURNIP".into();
+        assert_has(
+            &driver.validate().expect_err("Qualcomm vendorID + turnip"),
+            |e| matches!(e, CoherenceError::GpuIncoherent(m) if m.contains("vk_driver_id")),
+            "GpuIncoherent(vk_driver_id)",
+        );
+        // A vendorID outside the table is rejected fail-closed: nothing could cross-check it.
+        let mut unknown = profiles::reference_profile();
+        unknown.gpu.vk_vendor_id = 0x8086; // Intel — not a mobile GPU vendor
+        assert_has(
+            &unknown.validate().expect_err("an unknown vendorID"),
+            |e| matches!(e, CoherenceError::GpuIncoherent(m) if m.contains("GPU_VENDOR_TRIPLES")),
+            "GpuIncoherent(unknown vendorID)",
+        );
+        // The renderer must belong to the claimed vendor's part family.
+        let mut family = profiles::reference_profile();
+        family.gpu.gl_renderer = "Mali-G715".into();
+        family.gpu.vk_device_name = "Mali-G715".into();
+        assert_has(
+            &family
+                .validate()
+                .expect_err("Qualcomm vendorID + a Mali part"),
+            |e| matches!(e, CoherenceError::GpuIncoherent(m) if m.contains("Adreno")),
+            "GpuIncoherent(part family)",
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_renderer_that_disagrees_with_the_vulkan_device_name() {
+        let mut p = profiles::reference_profile();
+        p.gpu.vk_device_name = "Adreno (TM) 730".into();
+        let errs = p
+            .validate()
+            .expect_err("GL_RENDERER 740 + deviceName 730 must fail validate");
+        assert_has(
+            &errs,
+            |e| matches!(e, CoherenceError::GpuIncoherent(m) if m.contains("names part `740`")),
+            "GpuIncoherent(part disagreement)",
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_cpu_device_type() {
+        let mut p = profiles::reference_profile();
+        p.gpu.vk_device_type = VkDeviceType::Cpu;
+        let errs = p
+            .validate()
+            .expect_err("VK_PHYSICAL_DEVICE_TYPE_CPU must fail validate");
+        assert_has(
+            &errs,
+            |e| matches!(e, CoherenceError::GpuIncoherent(m) if m.contains("vk_device_type is Cpu")),
+            "GpuIncoherent(Cpu deviceType)",
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_profile_claiming_host_unbackable_capability() {
+        // (a) via a claim needle, at a GLES level that is otherwise legal — so this rule is proven
+        //     independent of the version cap.
+        let mut ray = profiles::reference_profile();
+        ray.gpu.gl_version = "OpenGL ES 3.1 V@0744.0 (GIT@a0d5f2b, ray_query)".into();
+        let errs = ray
+            .validate()
+            .expect_err("a ray-query claim must fail validate");
+        assert_has(
+            &errs,
+            |e| matches!(e, CoherenceError::GpuIncoherent(m) if m.contains("VK_KHR_ray_query")),
+            "GpuIncoherent(VK_KHR_ray_query)",
+        );
+        assert!(
+            !errs
+                .iter()
+                .any(|e| matches!(e, CoherenceError::GpuIncoherent(m)
+                if m.contains("androidboot.opengles.version"))),
+            "the unbackable rule must fire on its own, not as a side effect of the version cap"
+        );
+        // (b) via the GLES level: 3.2 implies a geometry stage the host does not have. This is the
+        //     rule that would have caught the profile this crate shipped before Phase 4.2.
+        let mut gles32 = profiles::reference_profile();
+        gles32.gpu.gl_version = "OpenGL ES 3.2 V@0744.0".into();
+        assert_has(
+            &gles32.validate().expect_err("GLES 3.2 must fail validate"),
+            |e| matches!(e, CoherenceError::GpuIncoherent(m) if m.contains("geometryShader")),
+            "GpuIncoherent(geometryShader)",
+        );
+    }
+
+    #[test]
+    fn gl_version_and_part_token_helpers_are_correct() {
+        assert_eq!(
+            parse_gl_es_version("OpenGL ES 3.1 V@0744.0 (GIT@a0d5f2b)"),
+            Some((3, 1))
+        );
+        assert_eq!(parse_gl_es_version("OpenGL ES 3.2"), Some((3, 2)));
+        assert_eq!(parse_gl_es_version("OpenGL ES 3"), Some((3, 0)));
+        assert_eq!(parse_gl_es_version("OpenGL ES 3.1.0"), Some((3, 1)));
+        assert_eq!(parse_gl_es_version("OpenGL 4.6 (Core Profile)"), None);
+        assert_eq!(decode_gles_version(196_609), (3, 1));
+        assert_eq!(decode_gles_version(196_610), (3, 2));
+
+        assert_eq!(gpu_part_token("Adreno (TM) 740").as_deref(), Some("740"));
+        assert_eq!(gpu_part_token("Mali-G715 MC11").as_deref(), Some("G715"));
+        assert_eq!(
+            gpu_part_token("PowerVR Rogue GE8320").as_deref(),
+            Some("GE8320")
+        );
+        assert_eq!(gpu_part_token("Adreno").as_deref(), None);
+        assert!(contains_ignore_ascii_case("Adreno (TM) 740", "adreno"));
+        assert!(!contains_ignore_ascii_case("Adreno (TM) 740", "mali"));
     }
 
     #[test]

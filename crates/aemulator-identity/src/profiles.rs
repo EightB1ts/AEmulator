@@ -116,15 +116,29 @@ pub fn reference_profile() -> DeviceProfile {
         // Adreno 740 — a Vulkan 1.3 device (the SM8250-era Adreno 650 topped out at 1.1 on its
         // shipping driver). This is the level the guest must be able to claim for a Vulkan 1.3
         // host renderer (gfxstream -> KosmicKrisp) to be a coherent story.
+        //
+        // Two fields here are deliberately NOT what a real Adreno 740 reports, and both are
+        // load-bearing for rendering rather than for plausibility (see the TOML twin's provenance
+        // note and `GpuProfile`'s doc comment):
+        //   * `gl_version` claims GLES 3.1, not the 3.2 a real A740 does. 3.2 mandates geometry
+        //     shaders and the host has none, so 3.2 would be a worse tell AND broken rendering.
+        //   * `ro_hardware_egl` is `angle`, not `adreno`. Android dlopen()s
+        //     `libEGL_${ro.hardware.egl}.so`; there is no `libEGL_adreno.so` in the image, so
+        //     `adreno` would mean no GL at all. ANGLE is not a tell — Pixel ships it as default.
         gpu: GpuProfile {
             gl_vendor: "Qualcomm".to_string(),
             gl_renderer: "Adreno (TM) 740".to_string(),
-            gl_version: "OpenGL ES 3.2 V@0744.0 (GIT@a0d5f2b, Ie4a2f9d70e, 1675814076)".to_string(),
+            gl_version: "OpenGL ES 3.1 V@0744.0 (GIT@a0d5f2b, Ie4a2f9d70e, 1675814076)".to_string(),
             vk_device_name: "Adreno (TM) 740".to_string(),
             vk_vendor_id: 0x5143, // Qualcomm
+            // Sentinel: no verified A740 Vulkan deviceID exists in this repo, so the host's is left
+            // alone rather than fabricated. Same for subgroupSize, which is a capability claim in
+            // disguise.
+            vk_device_id: 0,
             vk_device_type: VkDeviceType::IntegratedGpu,
             vk_driver_id: "VK_DRIVER_ID_QUALCOMM_PROPRIETARY".to_string(),
-            ro_hardware_egl: "adreno".to_string(),
+            vk_subgroup_size: 0,
+            ro_hardware_egl: "angle".to_string(),
         },
         // The real fuxi panel: 6.36" (162 mm) 1080x2400 AMOLED, declared at 440 dpi — which yields
         // 393 dp of width, exactly what a real Xiaomi 13 reports, against a ~414 ppi physical
