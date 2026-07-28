@@ -21,6 +21,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod display;
 pub mod profiles;
 
 // Re-export the detection Finding so callers of `lint_property_map` don't need a direct dep.
@@ -246,6 +247,119 @@ pub struct GpuProfile {
     pub ro_hardware_egl: String,
 }
 
+/// The physical panel. **Screen metrics are first-order fingerprint payload** — every app reads
+/// them unpermissioned via `DisplayMetrics`/`WindowMetrics`, and a 4:3 1024×768 landscape panel on a
+/// device claiming a Xiaomi 13 is a one-line detector. This block is the single source of truth for
+/// all of it: the virtio-gpu scanout geometry, the EDID the guest's DRM connector parses
+/// ([`DisplayProfile::edid`]), `ro.sf.lcd_density`, and `androidboot.lcd_density`.
+///
+/// The *physical* size is deliberately **not** a field: panels are specced by diagonal, so
+/// `diagonal_mm` is stored and the millimetre extents are derived ([`DisplayProfile::physical_mm`]).
+/// A stored width/height in mm could drift out of agreement with the resolution; a derived one
+/// cannot.
+///
+/// [`Default`] is all-zero (like every other block here), which means "no panel declared" —
+/// [`DisplayProfile::is_set`] is what consumers branch on, and a zeroed block emits no properties,
+/// no bootconfig line, and is skipped by [`DeviceProfile::validate`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DisplayProfile {
+    /// Native panel width in pixels, in the panel's native (portrait) orientation, e.g. `1080`.
+    /// Drives `DisplayMetrics.widthPixels` / `wm size`, the DRM preferred mode's `hdisplay`, and the
+    /// virtio-gpu scanout width. Must be a multiple of 8 — the EDID detailed timing's horizontal
+    /// values are CVT cell-granular, and the guest kernel rejects a preferred mode that disagrees
+    /// with the scanout by more than 16 px.
+    pub width_px: u32,
+    /// Native panel height in pixels, e.g. `2400`. Drives `DisplayMetrics.heightPixels`, the DRM
+    /// mode's `vdisplay`, and the virtio-gpu scanout height.
+    pub height_px: u32,
+    /// The *declared* density bucket: `ro.sf.lcd_density` / `androidboot.lcd_density` →
+    /// `DisplayMetrics.densityDpi` / `density` / `wm density`, e.g. `440`. This is a real device's
+    /// **rounded** density, not its physical dpi — a real `fuxi` reports 440 against a ~414 ppi
+    /// panel (yielding 393 dp of width), and `validate` bounds how far the two may diverge.
+    /// **Never** emitted as `qemu.sf.lcd_density`: SurfaceFlinger prefers that key *and* it is on
+    /// our own detection blocklist.
+    pub density_dpi: u32,
+    /// Panel refresh rate in Hz, e.g. `60`. Drives the EDID detailed timing's field rate (and hence
+    /// the DRM mode's `vrefresh` and `Display.getRefreshRate()`), plus the range-limits descriptor's
+    /// vertical window.
+    pub refresh_hz: u32,
+    /// Panel diagonal in millimetres, e.g. `162` (6.36″). The one physical dimension real panels are
+    /// specced by; [`physical_mm`](Self::physical_mm) derives the EDID's `width_mm`/`height_mm` from
+    /// it, which is what the guest's DRM connector reports and Android turns into `xdpi`/`ydpi` and
+    /// the internal display's `DisplayViewport` (the precondition for `INPUT_PROP_DIRECT` touch).
+    pub diagonal_mm: u32,
+}
+
+impl DisplayProfile {
+    /// The active area in millimetres, **derived** from the pixel aspect ratio and `diagonal_mm`:
+    /// `mm = px × diagonal_mm / hypot(width_px, height_px)`. These are the values the EDID carries
+    /// and therefore what the guest's DRM connector reports as `width_mm`/`height_mm`.
+    ///
+    /// Truncates rather than rounds, so the advertised active area is never *larger* than the panel
+    /// (1080×2400 @ 162 mm → 66×147 mm; rounding would claim 148 mm of height for a 147.7 mm panel).
+    /// Returns `(0, 0)` for an unset block; [`display::build_edid`] then clamps the millimetre bytes
+    /// it writes to at least 1, because a zero physical size in the EDID is what breaks
+    /// `INPUT_PROP_DIRECT` touch association in the guest.
+    pub fn physical_mm(&self) -> (u32, u32) {
+        let diagonal_px = self.diagonal_px();
+        if diagonal_px <= 0.0 || self.diagonal_mm == 0 {
+            return (0, 0);
+        }
+        let mm_per_px = self.diagonal_mm as f64 / diagonal_px;
+        (
+            (self.width_px as f64 * mm_per_px) as u32,
+            (self.height_px as f64 * mm_per_px) as u32,
+        )
+    }
+
+    /// The panel's true pixel density in dots per inch — the diagonal in pixels over the diagonal in
+    /// inches. 1080×2400 @ 162 mm → ~414 ppi, against a *declared* `density_dpi` of 440.
+    ///
+    /// Computed from [`physical_mm`](Self::physical_mm) (not from `diagonal_mm` directly) so this is
+    /// exactly the density the guest itself derives from the EDID millimetre bytes — the same number
+    /// a fingerprinter reads out of `DisplayMetrics.xdpi`/`ydpi`. Returns `0.0` for an unset block.
+    pub fn physical_dpi(&self) -> f32 {
+        let (w_mm, h_mm) = self.physical_mm();
+        let diagonal_mm = ((w_mm as f64).powi(2) + (h_mm as f64).powi(2)).sqrt();
+        if diagonal_mm <= 0.0 {
+            return 0.0;
+        }
+        (self.diagonal_px() / (diagonal_mm / 25.4)) as f32
+    }
+
+    /// Whether this profile declares a panel at all. `Default` is all-zero — the "no display
+    /// declared" state — so every consumer (property emission, bootconfig, `validate`, the VMM's
+    /// scanout geometry) branches on this rather than on a sentinel resolution.
+    pub fn is_set(&self) -> bool {
+        self.width_px != 0
+    }
+
+    /// The 128-byte EDID 1.4 base block describing this panel: a CVT reduced-blanking detailed
+    /// timing for `width_px × height_px @ refresh_hz` as the preferred mode, plus the derived
+    /// physical size. See [`display`] for the bit layout and the invariants it guarantees.
+    pub fn edid(&self) -> [u8; 128] {
+        let (w_mm, h_mm) = self.physical_mm();
+        display::build_edid(self.width_px, self.height_px, self.refresh_hz, w_mm, h_mm)
+    }
+
+    /// The panel diagonal in pixels — `hypot(width_px, height_px)`.
+    fn diagonal_px(&self) -> f64 {
+        ((self.width_px as f64).powi(2) + (self.height_px as f64).powi(2)).sqrt()
+    }
+
+    /// Width in density-independent pixels: `width_px / (density_dpi / 160)`. What
+    /// `Configuration.screenWidthDp` reports and what every resource qualifier (`sw360dp`, …) keys
+    /// off, so an implausible value changes which layouts apps pick — 1080 px @ 440 dpi → 393 dp,
+    /// which is what a real `fuxi` reports.
+    fn width_dp(&self) -> f32 {
+        if self.density_dpi == 0 {
+            return 0.0;
+        }
+        self.width_px as f32 / (self.density_dpi as f32 / 160.0)
+    }
+}
+
 /// One sensor entry, reachable from an unprivileged app via `SensorManager.getSensorList`.
 /// Names/vendors must be **real datasheet parts** (never `"Goldfish ..."` /
 /// `"The Android Open Source Project"`), with plausible range/resolution/power/min-delay.
@@ -351,6 +465,7 @@ pub struct DeviceProfile {
     pub soc: SocProfile,
     pub abi: AbiProfile,
     pub gpu: GpuProfile,
+    pub display: DisplayProfile,
     pub sensors: Vec<SensorSpec>,
     pub telephony: TelephonyProfile,
     pub verified_boot: VerifiedBoot,
@@ -551,6 +666,21 @@ impl DeviceProfile {
             props.insert("ro.hardware.egl".into(), self.gpu.ro_hardware_egl.clone());
         }
 
+        // --- display. `ro.sf.lcd_density` is the density SurfaceFlinger and `DisplayMetrics` read;
+        //     the guest image's init sets it from `ro.boot.lcd_density`, which is why
+        //     `emit_bootconfig` carries the same value. We NEVER emit `qemu.sf.lcd_density`:
+        //     SurfaceFlinger *prefers* that key, and it is on our own detection blocklist
+        //     (aemulator-detection PROP_TELLS, from AOSP init.ranchu.rc). A zeroed display block
+        //     emits nothing at all — the pre-DisplayProfile behaviour, so nothing half-declares a
+        //     panel. The resolution itself is NOT a property (a real device's comes from the DRM
+        //     connector); it reaches the guest through the scanout + EDID.
+        if self.display.is_set() {
+            props.insert(
+                "ro.sf.lcd_density".into(),
+                self.display.density_dpi.to_string(),
+            );
+        }
+
         // --- retail-device security posture ---
         props.insert("ro.secure".into(), "1".into());
         props.insert("ro.debuggable".into(), "0".into());
@@ -602,7 +732,7 @@ impl DeviceProfile {
         // `init` synthesizes `ro.boot.*` from these `androidboot.*` lines. We deliberately emit NO
         // `androidboot.qemu` — `Build.IS_EMULATOR` reads `ro.boot.qemu`, so simply never creating
         // it means the property never exists (there is nothing to "hide").
-        vec![
+        let mut lines = vec![
             (
                 "androidboot.verifiedbootstate".to_string(),
                 vb.verifiedbootstate.clone(),
@@ -621,7 +751,18 @@ impl DeviceProfile {
                 "androidboot.hardware".to_string(),
                 self.build.hardware.clone(),
             ),
-        ]
+        ];
+        // `init` mirrors this into `ro.boot.lcd_density`, and the guest image's init .rc does
+        // `setprop ro.sf.lcd_density ${ro.boot.lcd_density}` — so this single line is what actually
+        // makes SurfaceFlinger's density match the panel, with no image repack. Emitted only when a
+        // panel is declared: `androidboot.lcd_density=0` would be worse than absent.
+        if self.display.is_set() {
+            lines.push((
+                "androidboot.lcd_density".to_string(),
+                self.display.density_dpi.to_string(),
+            ));
+        }
+        lines
     }
 
     /// The per-cluster `MIDR_EL1`/`REVIDR_EL1` writes to program via `KVM_SET_ONE_REG`, so
@@ -926,6 +1067,112 @@ impl DeviceProfile {
                 field: finding.location,
                 needle: finding.matched,
             });
+        }
+
+        // 9. Display coherence. Screen metrics are unpermissioned, first-order fingerprint payload
+        //    (`DisplayMetrics`), and the panel is described in three places at once — the declared
+        //    density, the derived physical size, and the EDID the guest actually parses — so this
+        //    section's whole job is to stop those three from disagreeing. A zeroed block declares no
+        //    panel and is skipped entirely.
+        let d = &self.display;
+        if d.is_set() {
+            // (a) A partially-declared panel is worse than none: an is_set() block that emits a
+            //     zero density or refresh would put `androidboot.lcd_density=0` on the cmdline.
+            for (field, value) in [
+                ("width_px", d.width_px),
+                ("height_px", d.height_px),
+                ("density_dpi", d.density_dpi),
+                ("refresh_hz", d.refresh_hz),
+                ("diagonal_mm", d.diagonal_mm),
+            ] {
+                if value == 0 {
+                    errs.push(CoherenceError::Other(format!(
+                        "display.{field} is 0 while the display block is set — all five of \
+                         width_px/height_px/density_dpi/refresh_hz/diagonal_mm are required"
+                    )));
+                }
+            }
+            // (b) The declared density bucket must be within 25% of the panel's physical dpi. Real
+            //     devices round (fuxi: 440 declared against ~414 physical = 1.06x); a desktop-ish
+            //     160/96 dpi against a 414 ppi phone panel is the emulator's own giveaway.
+            let physical_dpi = d.physical_dpi();
+            if physical_dpi > 0.0 && d.density_dpi > 0 {
+                let ratio = d.density_dpi as f32 / physical_dpi;
+                if !(0.75..=1.25).contains(&ratio) {
+                    errs.push(CoherenceError::Other(format!(
+                        "display.density_dpi {} is {ratio:.2}x the panel's physical {physical_dpi:.0} \
+                         dpi (must be within 0.75..1.25 — a real device rounds, it does not invent)",
+                        d.density_dpi
+                    )));
+                }
+            }
+            // (c) Aspect ratio, in the panel's native portrait orientation. A phone is 1.7..2.4:1;
+            //     0.75 (a transposed 4:3 landscape panel) is precisely the incoherence this whole
+            //     block exists to prevent.
+            if d.width_px > 0 {
+                let aspect = d.height_px as f32 / d.width_px as f32;
+                if !(1.7..=2.4).contains(&aspect) {
+                    errs.push(CoherenceError::Other(format!(
+                        "display aspect ratio {}x{} = {aspect:.2}:1 is not a phone panel in its \
+                         native portrait orientation (expected 1.7..2.4)",
+                        d.width_px, d.height_px
+                    )));
+                }
+            }
+            // (d) Width in dp — `Configuration.screenWidthDp`, which selects every resource
+            //     qualifier. Outside 320..600 dp the device is a watch or a tablet, not this phone.
+            let width_dp = d.width_dp();
+            if d.density_dpi > 0 && !(320.0..=600.0).contains(&width_dp) {
+                errs.push(CoherenceError::Other(format!(
+                    "display width is {width_dp:.0} dp ({} px @ {} dpi) — outside the 320..600 dp \
+                     a phone reports; every resource qualifier keys off this",
+                    d.width_px, d.density_dpi
+                )));
+            }
+            // (e) The EDID must be well-formed and must round-trip the declared mode. The EDID's
+            //     preferred timing and the scanout are a hard coherence pair (the guest kernel
+            //     rejects a preferred mode more than 16 px off the scanout, and reports MODE_BAD
+            //     without any host-visible error — a silently blank screen).
+            let edid = d.edid();
+            if !display::checksum_is_valid(&edid) {
+                errs.push(CoherenceError::Other(
+                    "the emitted EDID base block does not sum to 0 mod 256 — a guest EDID parser \
+                     rejects it outright"
+                        .into(),
+                ));
+            }
+            match display::decode_dtd(&edid) {
+                None => errs.push(CoherenceError::Other(
+                    "the emitted EDID declares no detailed timing (descriptor 1 has a zero pixel \
+                     clock), so the guest has no preferred mode"
+                        .into(),
+                )),
+                Some(t) => {
+                    if t.width_px != d.width_px || t.height_px != d.height_px {
+                        errs.push(CoherenceError::Other(format!(
+                            "the emitted EDID's preferred mode is {}x{} but the profile declares \
+                             {}x{} (a width that is not a multiple of 8 cannot round-trip a CVT \
+                             detailed timing)",
+                            t.width_px, t.height_px, d.width_px, d.height_px
+                        )));
+                    }
+                    if (t.refresh_hz - d.refresh_hz as f32).abs() > 1.0 {
+                        errs.push(CoherenceError::Other(format!(
+                            "the emitted EDID's preferred mode runs at {:.2} Hz but the profile \
+                             declares {} Hz",
+                            t.refresh_hz, d.refresh_hz
+                        )));
+                    }
+                    if t.width_mm == 0 || t.height_mm == 0 {
+                        errs.push(CoherenceError::Other(
+                            "the emitted EDID carries a zero physical image size — the guest's \
+                             DisplayViewport, and with it INPUT_PROP_DIRECT touch association, \
+                             depends on it being non-zero"
+                                .into(),
+                        ));
+                    }
+                }
+            }
         }
 
         if errs.is_empty() {
@@ -1377,6 +1624,161 @@ mod tests {
         }
         // Deterministic across calls.
         assert_eq!(bc, profiles::reference_profile().emit_bootconfig());
+    }
+
+    // --- display -------------------------------------------------------------------------------
+
+    #[test]
+    fn display_profile_is_coherent() {
+        let p = profiles::reference_profile();
+        // The reference panel passes every arm of validate's display section.
+        assert_eq!(p.validate(), Ok(()));
+        let d = p.display;
+        assert!(d.is_set());
+        assert_eq!((d.width_px, d.height_px), (1080, 2400));
+        assert_eq!((d.density_dpi, d.refresh_hz, d.diagonal_mm), (440, 60, 162));
+        // 162 mm diagonal over a 1080x2400 pixel diagonal -> 66x147 mm of active area.
+        assert_eq!(d.physical_mm(), (66, 147));
+        // ~414 ppi physical against the declared 440 bucket: a ratio of 1.06.
+        let physical = d.physical_dpi();
+        assert!(
+            (413.0..=416.0).contains(&physical),
+            "physical dpi should be ~414, got {physical}"
+        );
+        assert!((d.density_dpi as f32 / physical - 1.06).abs() < 0.02);
+        // 393 dp of width — what a real fuxi reports, and inside validate's 320..600 dp band.
+        assert!(
+            (392.0..=394.0).contains(&d.width_dp()),
+            "width should be ~393 dp, got {}",
+            d.width_dp()
+        );
+
+        // A desktop 96 dpi against this panel is incoherent, and validate must name the field.
+        let mut bad = p.clone();
+        bad.display.density_dpi = 96;
+        let errs = bad
+            .validate()
+            .expect_err("96 dpi on a 414 ppi phone panel must fail validate");
+        assert_has(
+            &errs,
+            |e| matches!(e, CoherenceError::Other(m) if m.contains("display.density_dpi")),
+            "Other(display.density_dpi)",
+        );
+
+        // A transposed (landscape 4:3) panel is the exact incoherence this section prevents.
+        let mut landscape = p.clone();
+        landscape.display = DisplayProfile {
+            width_px: 1024,
+            height_px: 768,
+            density_dpi: 320,
+            refresh_hz: 60,
+            diagonal_mm: 162,
+        };
+        let errs = landscape
+            .validate()
+            .expect_err("a 4:3 landscape panel must fail validate");
+        assert_has(
+            &errs,
+            |e| matches!(e, CoherenceError::Other(m) if m.contains("aspect ratio")),
+            "Other(aspect ratio)",
+        );
+
+        // A width that is not a multiple of 8 cannot round-trip a CVT detailed timing, so the EDID
+        // would advertise a preferred mode that disagrees with the scanout.
+        let mut off_grid = p.clone();
+        off_grid.display.width_px = 1084;
+        let errs = off_grid
+            .validate()
+            .expect_err("an off-cell-granularity width must fail validate");
+        assert_has(
+            &errs,
+            |e| matches!(e, CoherenceError::Other(m) if m.contains("preferred mode")),
+            "Other(preferred mode)",
+        );
+    }
+
+    #[test]
+    fn edid_round_trips_the_declared_mode() {
+        let d = profiles::reference_profile().display;
+        let edid = d.edid();
+
+        // Structurally valid: header magic + a checksum that zeroes the block.
+        assert_eq!(edid[0..8], [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]);
+        assert_eq!(edid.iter().map(|b| *b as u32).sum::<u32>() % 256, 0);
+        assert!(display::checksum_is_valid(&edid));
+        // Bytes 21/22 (cm) — non-zero, or the guest has no physical size and INPUT_PROP_DIRECT
+        // touch association fails.
+        assert!(edid[21] > 0 && edid[22] > 0, "cm image size must be > 0");
+        // Established timings: byte 36 bit 3 is "this panel does 1024x768@60". It must be clear —
+        // 1024x768 is not this panel's native mode.
+        assert_eq!(&edid[35..38], &[0x00, 0x00, 0x00]);
+
+        // DECODE descriptor 1 back out: the declared mode, not a frozen VESA DMT block.
+        let t = display::decode_dtd(&edid).expect("DTD-1 must be a real detailed timing");
+        assert_eq!(t.width_px, 1080);
+        assert_eq!(t.height_px, 2400);
+        assert!(
+            (t.refresh_hz - 60.0).abs() <= 1.0,
+            "decoded refresh {} Hz, declared 60",
+            t.refresh_hz
+        );
+        assert_eq!((t.width_mm, t.height_mm), (66, 147));
+        assert_eq!(t.width_mm, d.physical_mm().0);
+        assert_eq!(t.height_mm, d.physical_mm().1);
+        // The CVT reduced-blanking derivation for 1080x2400@60.
+        assert_eq!((t.h_total, t.v_total), (1240, 2469));
+        assert_eq!(t.pixel_clock_hz, 183_690_000);
+        assert_eq!((t.h_front_porch, t.h_sync_width), (48, 32));
+        assert_eq!((t.v_front_porch, t.v_sync_width), (3, 4));
+    }
+
+    #[test]
+    fn bootconfig_carries_lcd_density() {
+        let bc = profiles::reference_profile().emit_bootconfig();
+        let line = bc
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            line.contains("androidboot.lcd_density=440"),
+            "bootconfig must carry the panel density: {line}"
+        );
+        // `qemu.sf.lcd_density` is on our own detection blocklist and SurfaceFlinger prefers it.
+        for (key, _) in &bc {
+            assert!(
+                !key.contains("qemu"),
+                "bootconfig must never carry a qemu key: {key}"
+            );
+        }
+        // ...and the property side carries the same value, from the same field.
+        let props = profiles::reference_profile().emit_properties();
+        assert_eq!(
+            props.get("ro.sf.lcd_density").map(String::as_str),
+            Some("440")
+        );
+        assert!(!props.contains_key("qemu.sf.lcd_density"));
+    }
+
+    #[test]
+    fn a_default_profile_emits_no_display_properties() {
+        let p = DeviceProfile::default();
+        assert!(!p.display.is_set(), "Default must stay all-zero");
+        assert_eq!(p.display.physical_mm(), (0, 0));
+        assert_eq!(p.display.physical_dpi(), 0.0);
+        assert!(!p.emit_properties().contains_key("ro.sf.lcd_density"));
+        assert!(!p
+            .emit_bootconfig()
+            .iter()
+            .any(|(k, _)| k == "androidboot.lcd_density"));
+        // ...and validate's display section is skipped entirely rather than firing five times.
+        let display_errs = p
+            .validate()
+            .expect_err("a default profile is incoherent for other reasons")
+            .into_iter()
+            .filter(|e| matches!(e, CoherenceError::Other(m) if m.contains("display")))
+            .count();
+        assert_eq!(display_errs, 0, "an unset display block must not validate");
     }
 
     // --- midr_regs -----------------------------------------------------------------------------

@@ -9,8 +9,9 @@
 //! shape-accurate derivations.
 
 use crate::{
-    AbiProfile, BuildIdentity, DeviceProfile, GpuProfile, MidrCluster, NetworkProfile, ProfileMeta,
-    SensorSpec, SocProfile, Socinfo, TelephonyProfile, VerifiedBoot, VkDeviceType,
+    AbiProfile, BuildIdentity, DeviceProfile, DisplayProfile, GpuProfile, MidrCluster,
+    NetworkProfile, ProfileMeta, SensorSpec, SocProfile, Socinfo, TelephonyProfile, VerifiedBoot,
+    VkDeviceType,
 };
 
 /// A minimal, coherent reference `DeviceProfile` (Xiaomi 13 `fuxi` / SM8550).
@@ -124,6 +125,17 @@ pub fn reference_profile() -> DeviceProfile {
             vk_device_type: VkDeviceType::IntegratedGpu,
             vk_driver_id: "VK_DRIVER_ID_QUALCOMM_PROPRIETARY".to_string(),
             ro_hardware_egl: "adreno".to_string(),
+        },
+        // The real fuxi panel: 6.36" (162 mm) 1080x2400 AMOLED, declared at 440 dpi — which yields
+        // 393 dp of width, exactly what a real Xiaomi 13 reports, against a ~414 ppi physical
+        // density. 60 Hz, not the panel's 120: the refresh rate the *host* can actually present is
+        // the honest value, and it is the one the EDID's detailed timing has to agree with.
+        display: DisplayProfile {
+            width_px: 1080,
+            height_px: 2400,
+            density_dpi: 440,
+            refresh_hz: 60,
+            diagonal_mm: 162,
         },
         sensors: vec![
             SensorSpec {

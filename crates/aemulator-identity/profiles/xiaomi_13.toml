@@ -118,6 +118,23 @@ vk_device_type = "integrated_gpu"
 vk_driver_id = "VK_DRIVER_ID_QUALCOMM_PROPRIETARY"
 ro_hardware_egl = "adreno"
 
+# The panel. VERIFIED against public fuxi specs: 6.36" (162 mm) 1080x2400 AMOLED, density bucket
+# 440 (1080 px / (440/160) = 393 dp of width — what a real Xiaomi 13 reports) against a ~414 ppi
+# physical density. The physical millimetre size is NOT stored: it is derived from `diagonal_mm` plus
+# the pixel aspect (162 mm diagonal -> 66x147 mm), so it can never drift out of agreement with the
+# resolution, and it is what the emitted EDID carries as the DRM connector's width_mm/height_mm.
+#
+# `refresh_hz` is 60, not the panel's 120: the host presents at 60 and the EDID's detailed timing
+# must agree with what is actually scanned out. `density_dpi` reaches the guest as
+# `androidboot.lcd_density` -> `ro.boot.lcd_density` -> `ro.sf.lcd_density`; NEVER as
+# `qemu.sf.lcd_density`, which SurfaceFlinger prefers and which is on our own detection blocklist.
+[display]
+width_px = 1080
+height_px = 2400
+density_dpi = 440
+refresh_hz = 60
+diagonal_mm = 162
+
 [[sensors]]
 sensor_type = "accelerometer"
 name = "LSM6DSO Accelerometer"
