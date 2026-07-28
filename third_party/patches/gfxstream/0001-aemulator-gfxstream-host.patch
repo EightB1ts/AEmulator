@@ -2772,10 +2772,10 @@ index ccc354a70..2afa9d346 100644
                  GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DECODER_CATEGORY,
 diff --git a/host/vulkan/VkDecoderCerealGap.inc b/host/vulkan/VkDecoderCerealGap.inc
 new file mode 100644
-index 000000000..0109e3594
+index 000000000..39e453ec5
 --- /dev/null
 +++ b/host/vulkan/VkDecoderCerealGap.inc
-@@ -0,0 +1,659 @@
+@@ -0,0 +1,1226 @@
 +// VkDecoderCerealGap.inc — GENERATED FILE, DO NOT EDIT.
 +//
 +// Vulkan device extensions that MUST NOT be advertised to the guest, because this gfxstream tree's
@@ -3432,11 +3432,578 @@ index 000000000..0109e3594
 +    return nullptr;
 +}
 +
++
++// Every extension name the vendored Vulkan registry defines. An extension the host driver
++// advertises that is ABSENT from this table has VkStructureTypes in NEITHER cereal switch, so a
++// guest that chains one reaches goldfish_vk_extension_struct_size()'s default: arm, which is
++// GFXSTREAM_ABORT — the whole VMM. Hiding those is the only safe response.
++[[maybe_unused]] static constexpr const char* const kCerealRegistryExtensions[] = {
++    "VK_AMDX_shader_enqueue",
++    "VK_AMD_buffer_marker",
++    "VK_AMD_device_coherent_memory",
++    "VK_AMD_display_native_hdr",
++    "VK_AMD_draw_indirect_count",
++    "VK_AMD_extension_134",
++    "VK_AMD_extension_136",
++    "VK_AMD_extension_140",
++    "VK_AMD_extension_142",
++    "VK_AMD_extension_143",
++    "VK_AMD_extension_17",
++    "VK_AMD_extension_18",
++    "VK_AMD_extension_183",
++    "VK_AMD_extension_187",
++    "VK_AMD_extension_20",
++    "VK_AMD_extension_229",
++    "VK_AMD_extension_231",
++    "VK_AMD_extension_232",
++    "VK_AMD_extension_233",
++    "VK_AMD_extension_234",
++    "VK_AMD_extension_236",
++    "VK_AMD_extension_314",
++    "VK_AMD_extension_316",
++    "VK_AMD_extension_318",
++    "VK_AMD_extension_319",
++    "VK_AMD_extension_32",
++    "VK_AMD_extension_320",
++    "VK_AMD_extension_33",
++    "VK_AMD_extension_35",
++    "VK_AMD_extension_44",
++    "VK_AMD_extension_46",
++    "VK_AMD_extension_470",
++    "VK_AMD_extension_472",
++    "VK_AMD_extension_473",
++    "VK_AMD_extension_474",
++    "VK_AMD_extension_475",
++    "VK_AMD_extension_476",
++    "VK_AMD_extension_477",
++    "VK_AMD_extension_478",
++    "VK_AMD_extension_479",
++    "VK_AMD_gcn_shader",
++    "VK_AMD_gpu_shader_half_float",
++    "VK_AMD_gpu_shader_int16",
++    "VK_AMD_memory_overallocation_behavior",
++    "VK_AMD_mixed_attachment_samples",
++    "VK_AMD_negative_viewport_height",
++    "VK_AMD_pipeline_compiler_control",
++    "VK_AMD_rasterization_order",
++    "VK_AMD_shader_ballot",
++    "VK_AMD_shader_core_properties",
++    "VK_AMD_shader_core_properties2",
++    "VK_AMD_shader_early_and_late_fragment_tests",
++    "VK_AMD_shader_explicit_vertex_parameter",
++    "VK_AMD_shader_fragment_mask",
++    "VK_AMD_shader_image_load_store_lod",
++    "VK_AMD_shader_info",
++    "VK_AMD_shader_trinary_minmax",
++    "VK_AMD_texture_gather_bias_lod",
++    "VK_ANDROID_external_format_resolve",
++    "VK_ANDROID_external_memory_android_hardware_buffer",
++    "VK_ANDROID_native_buffer",
++    "VK_ARM_extension_344",
++    "VK_ARM_extension_424",
++    "VK_ARM_extension_425",
++    "VK_ARM_extension_453",
++    "VK_ARM_rasterization_order_attachment_access",
++    "VK_ARM_scheduling_controls",
++    "VK_ARM_shader_core_builtins",
++    "VK_ARM_shader_core_properties",
++    "VK_BRCM_extension_264",
++    "VK_BRCM_extension_265",
++    "VK_COREAVI_extension_442",
++    "VK_COREAVI_extension_443",
++    "VK_COREAVI_extension_444",
++    "VK_COREAVI_extension_445",
++    "VK_COREAVI_extension_446",
++    "VK_COREAVI_extension_447",
++    "VK_EXT_4444_formats",
++    "VK_EXT_acquire_drm_display",
++    "VK_EXT_acquire_xlib_display",
++    "VK_EXT_application_parameters",
++    "VK_EXT_astc_decode_mode",
++    "VK_EXT_attachment_feedback_loop_dynamic_state",
++    "VK_EXT_attachment_feedback_loop_layout",
++    "VK_EXT_blend_operation_advanced",
++    "VK_EXT_border_color_swizzle",
++    "VK_EXT_buffer_device_address",
++    "VK_EXT_calibrated_timestamps",
++    "VK_EXT_color_write_enable",
++    "VK_EXT_conditional_rendering",
++    "VK_EXT_conservative_rasterization",
++    "VK_EXT_custom_border_color",
++    "VK_EXT_debug_marker",
++    "VK_EXT_debug_report",
++    "VK_EXT_debug_utils",
++    "VK_EXT_depth_bias_control",
++    "VK_EXT_depth_clamp_zero_one",
++    "VK_EXT_depth_clip_control",
++    "VK_EXT_depth_clip_enable",
++    "VK_EXT_depth_range_unrestricted",
++    "VK_EXT_descriptor_buffer",
++    "VK_EXT_descriptor_indexing",
++    "VK_EXT_device_address_binding_report",
++    "VK_EXT_device_fault",
++    "VK_EXT_device_memory_report",
++    "VK_EXT_direct_mode_display",
++    "VK_EXT_directfb_surface",
++    "VK_EXT_discard_rectangles",
++    "VK_EXT_display_control",
++    "VK_EXT_display_surface_counter",
++    "VK_EXT_dynamic_rendering_unused_attachments",
++    "VK_EXT_extended_dynamic_state",
++    "VK_EXT_extended_dynamic_state2",
++    "VK_EXT_extended_dynamic_state3",
++    "VK_EXT_extension_160",
++    "VK_EXT_extension_177",
++    "VK_EXT_extension_220",
++    "VK_EXT_extension_223",
++    "VK_EXT_extension_259",
++    "VK_EXT_extension_267",
++    "VK_EXT_extension_28",
++    "VK_EXT_extension_289",
++    "VK_EXT_extension_313",
++    "VK_EXT_extension_359",
++    "VK_EXT_extension_360",
++    "VK_EXT_extension_362",
++    "VK_EXT_extension_363",
++    "VK_EXT_extension_384",
++    "VK_EXT_extension_388",
++    "VK_EXT_extension_390",
++    "VK_EXT_extension_391",
++    "VK_EXT_extension_420",
++    "VK_EXT_extension_437",
++    "VK_EXT_extension_457",
++    "VK_EXT_extension_458",
++    "VK_EXT_extension_461",
++    "VK_EXT_extension_462",
++    "VK_EXT_extension_468",
++    "VK_EXT_extension_480",
++    "VK_EXT_extension_481",
++    "VK_EXT_extension_484",
++    "VK_EXT_extension_487",
++    "VK_EXT_extension_488",
++    "VK_EXT_extension_496",
++    "VK_EXT_extension_497",
++    "VK_EXT_extension_501",
++    "VK_EXT_extension_502",
++    "VK_EXT_extension_503",
++    "VK_EXT_extension_505",
++    "VK_EXT_extension_508",
++    "VK_EXT_extension_509",
++    "VK_EXT_extension_512",
++    "VK_EXT_extension_517",
++    "VK_EXT_extension_523",
++    "VK_EXT_extension_524",
++    "VK_EXT_extension_526",
++    "VK_EXT_extension_527",
++    "VK_EXT_extension_528",
++    "VK_EXT_extension_533",
++    "VK_EXT_extension_537",
++    "VK_EXT_extension_538",
++    "VK_EXT_extension_539",
++    "VK_EXT_extension_540",
++    "VK_EXT_extension_541",
++    "VK_EXT_extension_542",
++    "VK_EXT_extension_543",
++    "VK_EXT_external_memory_acquire_unmodified",
++    "VK_EXT_external_memory_dma_buf",
++    "VK_EXT_external_memory_host",
++    "VK_EXT_external_memory_metal",
++    "VK_EXT_filter_cubic",
++    "VK_EXT_fragment_density_map",
++    "VK_EXT_fragment_density_map2",
++    "VK_EXT_fragment_shader_interlock",
++    "VK_EXT_frame_boundary",
++    "VK_EXT_full_screen_exclusive",
++    "VK_EXT_global_priority",
++    "VK_EXT_global_priority_query",
++    "VK_EXT_graphics_pipeline_library",
++    "VK_EXT_hdr_metadata",
++    "VK_EXT_headless_surface",
++    "VK_EXT_host_image_copy",
++    "VK_EXT_host_query_reset",
++    "VK_EXT_image_2d_view_of_3d",
++    "VK_EXT_image_compression_control",
++    "VK_EXT_image_compression_control_swapchain",
++    "VK_EXT_image_drm_format_modifier",
++    "VK_EXT_image_robustness",
++    "VK_EXT_image_sliced_view_of_3d",
++    "VK_EXT_image_view_min_lod",
++    "VK_EXT_index_type_uint8",
++    "VK_EXT_inline_uniform_block",
++    "VK_EXT_legacy_dithering",
++    "VK_EXT_line_rasterization",
++    "VK_EXT_load_store_op_none",
++    "VK_EXT_memory_budget",
++    "VK_EXT_memory_priority",
++    "VK_EXT_mesh_shader",
++    "VK_EXT_metal_objects",
++    "VK_EXT_metal_surface",
++    "VK_EXT_multi_draw",
++    "VK_EXT_multisampled_render_to_single_sampled",
++    "VK_EXT_mutable_descriptor_type",
++    "VK_EXT_nested_command_buffer",
++    "VK_EXT_non_seamless_cube_map",
++    "VK_EXT_opacity_micromap",
++    "VK_EXT_pageable_device_local_memory",
++    "VK_EXT_pci_bus_info",
++    "VK_EXT_physical_device_drm",
++    "VK_EXT_pipeline_creation_cache_control",
++    "VK_EXT_pipeline_creation_feedback",
++    "VK_EXT_pipeline_library_group_handles",
++    "VK_EXT_pipeline_properties",
++    "VK_EXT_pipeline_protected_access",
++    "VK_EXT_pipeline_robustness",
++    "VK_EXT_post_depth_coverage",
++    "VK_EXT_primitive_topology_list_restart",
++    "VK_EXT_primitives_generated_query",
++    "VK_EXT_private_data",
++    "VK_EXT_provoking_vertex",
++    "VK_EXT_queue_family_foreign",
++    "VK_EXT_rasterization_order_attachment_access",
++    "VK_EXT_rgba10x6_formats",
++    "VK_EXT_robustness2",
++    "VK_EXT_sample_locations",
++    "VK_EXT_sampler_filter_minmax",
++    "VK_EXT_scalar_block_layout",
++    "VK_EXT_separate_stencil_usage",
++    "VK_EXT_shader_atomic_float",
++    "VK_EXT_shader_atomic_float2",
++    "VK_EXT_shader_demote_to_helper_invocation",
++    "VK_EXT_shader_image_atomic_int64",
++    "VK_EXT_shader_module_identifier",
++    "VK_EXT_shader_object",
++    "VK_EXT_shader_stencil_export",
++    "VK_EXT_shader_subgroup_ballot",
++    "VK_EXT_shader_subgroup_vote",
++    "VK_EXT_shader_tile_image",
++    "VK_EXT_shader_viewport_index_layer",
++    "VK_EXT_subgroup_size_control",
++    "VK_EXT_subpass_merge_feedback",
++    "VK_EXT_surface_maintenance1",
++    "VK_EXT_swapchain_colorspace",
++    "VK_EXT_swapchain_maintenance1",
++    "VK_EXT_texel_buffer_alignment",
++    "VK_EXT_texture_compression_astc_hdr",
++    "VK_EXT_tooling_info",
++    "VK_EXT_transform_feedback",
++    "VK_EXT_validation_cache",
++    "VK_EXT_validation_features",
++    "VK_EXT_validation_flags",
++    "VK_EXT_vertex_attribute_divisor",
++    "VK_EXT_vertex_input_dynamic_state",
++    "VK_EXT_video_encode_h264",
++    "VK_EXT_video_encode_h265",
++    "VK_EXT_ycbcr_2plane_444_formats",
++    "VK_EXT_ycbcr_image_arrays",
++    "VK_FB_extension_402",
++    "VK_FB_extension_403",
++    "VK_FB_extension_404",
++    "VK_FUCHSIA_buffer_collection",
++    "VK_FUCHSIA_extension_364",
++    "VK_FUCHSIA_extension_368",
++    "VK_FUCHSIA_external_memory",
++    "VK_FUCHSIA_external_semaphore",
++    "VK_FUCHSIA_imagepipe_surface",
++    "VK_GGP_extension_263",
++    "VK_GGP_extension_407",
++    "VK_GGP_extension_408",
++    "VK_GGP_extension_409",
++    "VK_GGP_extension_410",
++    "VK_GGP_extension_411",
++    "VK_GGP_frame_token",
++    "VK_GGP_stream_descriptor_surface",
++    "VK_GOOGLE_decorate_string",
++    "VK_GOOGLE_display_timing",
++    "VK_GOOGLE_extension_194",
++    "VK_GOOGLE_extension_195",
++    "VK_GOOGLE_extension_196",
++    "VK_GOOGLE_extension_217",
++    "VK_GOOGLE_extension_386",
++    "VK_GOOGLE_extension_455",
++    "VK_GOOGLE_extension_49",
++    "VK_GOOGLE_hlsl_functionality1",
++    "VK_GOOGLE_surfaceless_query",
++    "VK_GOOGLE_user_type",
++    "VK_HUAWEI_cluster_culling_shader",
++    "VK_HUAWEI_extension_406",
++    "VK_HUAWEI_extension_415",
++    "VK_HUAWEI_invocation_mask",
++    "VK_HUAWEI_subpass_shading",
++    "VK_IMG_extension_107",
++    "VK_IMG_extension_108",
++    "VK_IMG_extension_111",
++    "VK_IMG_filter_cubic",
++    "VK_IMG_format_pvrtc",
++    "VK_INTEL_extension_243",
++    "VK_INTEL_extension_273",
++    "VK_INTEL_performance_query",
++    "VK_INTEL_shader_integer_functions2",
++    "VK_JUICE_extension_399",
++    "VK_JUICE_extension_400",
++    "VK_KHR_16bit_storage",
++    "VK_KHR_8bit_storage",
++    "VK_KHR_acceleration_structure",
++    "VK_KHR_android_surface",
++    "VK_KHR_bind_memory2",
++    "VK_KHR_buffer_device_address",
++    "VK_KHR_cooperative_matrix",
++    "VK_KHR_copy_commands2",
++    "VK_KHR_create_renderpass2",
++    "VK_KHR_dedicated_allocation",
++    "VK_KHR_deferred_host_operations",
++    "VK_KHR_depth_stencil_resolve",
++    "VK_KHR_descriptor_update_template",
++    "VK_KHR_device_group",
++    "VK_KHR_device_group_creation",
++    "VK_KHR_display",
++    "VK_KHR_display_swapchain",
++    "VK_KHR_draw_indirect_count",
++    "VK_KHR_driver_properties",
++    "VK_KHR_dynamic_rendering",
++    "VK_KHR_extension_119",
++    "VK_KHR_extension_209",
++    "VK_KHR_extension_221",
++    "VK_KHR_extension_280",
++    "VK_KHR_extension_297",
++    "VK_KHR_extension_299",
++    "VK_KHR_extension_325",
++    "VK_KHR_extension_335",
++    "VK_KHR_extension_350",
++    "VK_KHR_extension_358",
++    "VK_KHR_extension_380",
++    "VK_KHR_extension_381",
++    "VK_KHR_extension_417",
++    "VK_KHR_extension_435",
++    "VK_KHR_extension_513",
++    "VK_KHR_extension_514",
++    "VK_KHR_extension_515",
++    "VK_KHR_extension_516",
++    "VK_KHR_extension_529",
++    "VK_KHR_extension_532",
++    "VK_KHR_extension_534",
++    "VK_KHR_extension_544",
++    "VK_KHR_extension_545",
++    "VK_KHR_extension_546",
++    "VK_KHR_external_fence",
++    "VK_KHR_external_fence_capabilities",
++    "VK_KHR_external_fence_fd",
++    "VK_KHR_external_fence_win32",
++    "VK_KHR_external_memory",
++    "VK_KHR_external_memory_capabilities",
++    "VK_KHR_external_memory_fd",
++    "VK_KHR_external_memory_win32",
++    "VK_KHR_external_semaphore",
++    "VK_KHR_external_semaphore_capabilities",
++    "VK_KHR_external_semaphore_fd",
++    "VK_KHR_external_semaphore_win32",
++    "VK_KHR_format_feature_flags2",
++    "VK_KHR_fragment_shader_barycentric",
++    "VK_KHR_fragment_shading_rate",
++    "VK_KHR_get_display_properties2",
++    "VK_KHR_get_memory_requirements2",
++    "VK_KHR_get_physical_device_properties2",
++    "VK_KHR_get_surface_capabilities2",
++    "VK_KHR_global_priority",
++    "VK_KHR_image_format_list",
++    "VK_KHR_imageless_framebuffer",
++    "VK_KHR_incremental_present",
++    "VK_KHR_line_rasterization",
++    "VK_KHR_maintenance1",
++    "VK_KHR_maintenance2",
++    "VK_KHR_maintenance3",
++    "VK_KHR_maintenance4",
++    "VK_KHR_maintenance5",
++    "VK_KHR_map_memory2",
++    "VK_KHR_mir_surface",
++    "VK_KHR_multiview",
++    "VK_KHR_object_refresh",
++    "VK_KHR_performance_query",
++    "VK_KHR_pipeline_executable_properties",
++    "VK_KHR_pipeline_library",
++    "VK_KHR_portability_enumeration",
++    "VK_KHR_portability_subset",
++    "VK_KHR_present_id",
++    "VK_KHR_present_wait",
++    "VK_KHR_push_descriptor",
++    "VK_KHR_ray_query",
++    "VK_KHR_ray_tracing_maintenance1",
++    "VK_KHR_ray_tracing_pipeline",
++    "VK_KHR_ray_tracing_position_fetch",
++    "VK_KHR_relaxed_block_layout",
++    "VK_KHR_sampler_mirror_clamp_to_edge",
++    "VK_KHR_sampler_ycbcr_conversion",
++    "VK_KHR_separate_depth_stencil_layouts",
++    "VK_KHR_shader_atomic_int64",
++    "VK_KHR_shader_clock",
++    "VK_KHR_shader_draw_parameters",
++    "VK_KHR_shader_float16_int8",
++    "VK_KHR_shader_float_controls",
++    "VK_KHR_shader_integer_dot_product",
++    "VK_KHR_shader_non_semantic_info",
++    "VK_KHR_shader_subgroup_extended_types",
++    "VK_KHR_shader_subgroup_uniform_control_flow",
++    "VK_KHR_shader_terminate_invocation",
++    "VK_KHR_shared_presentable_image",
++    "VK_KHR_spirv_1_4",
++    "VK_KHR_storage_buffer_storage_class",
++    "VK_KHR_surface",
++    "VK_KHR_surface_protected_capabilities",
++    "VK_KHR_swapchain",
++    "VK_KHR_swapchain_mutable_format",
++    "VK_KHR_synchronization2",
++    "VK_KHR_timeline_semaphore",
++    "VK_KHR_uniform_buffer_standard_layout",
++    "VK_KHR_variable_pointers",
++    "VK_KHR_video_decode_h264",
++    "VK_KHR_video_decode_h265",
++    "VK_KHR_video_decode_queue",
++    "VK_KHR_video_encode_queue",
++    "VK_KHR_video_queue",
++    "VK_KHR_vulkan_memory_model",
++    "VK_KHR_wayland_surface",
++    "VK_KHR_win32_keyed_mutex",
++    "VK_KHR_win32_surface",
++    "VK_KHR_workgroup_memory_explicit_layout",
++    "VK_KHR_xcb_surface",
++    "VK_KHR_xlib_surface",
++    "VK_KHR_zero_initialize_workgroup_memory",
++    "VK_LUNARG_direct_driver_loading",
++    "VK_MESA_extension_244",
++    "VK_MESA_extension_385",
++    "VK_MESA_extension_510",
++    "VK_MESA_extension_518",
++    "VK_MSFT_layered_driver",
++    "VK_MVK_ios_surface",
++    "VK_MVK_macos_surface",
++    "VK_MVK_moltenvk",
++    "VK_NN_vi_surface",
++    "VK_NVX_binary_import",
++    "VK_NVX_device_generated_commands",
++    "VK_NVX_extension_48",
++    "VK_NVX_image_view_handle",
++    "VK_NVX_multiview_per_view_attributes",
++    "VK_NV_acquire_winrt_display",
++    "VK_NV_clip_space_w_scaling",
++    "VK_NV_compute_shader_derivatives",
++    "VK_NV_cooperative_matrix",
++    "VK_NV_copy_memory_indirect",
++    "VK_NV_corner_sampled_image",
++    "VK_NV_coverage_reduction_mode",
++    "VK_NV_cuda_kernel_launch",
++    "VK_NV_dedicated_allocation",
++    "VK_NV_dedicated_allocation_image_aliasing",
++    "VK_NV_descriptor_pool_overallocation",
++    "VK_NV_device_diagnostic_checkpoints",
++    "VK_NV_device_diagnostics_config",
++    "VK_NV_device_generated_commands",
++    "VK_NV_device_generated_commands_compute",
++    "VK_NV_displacement_micromap",
++    "VK_NV_extended_sparse_address_space",
++    "VK_NV_extension_101",
++    "VK_NV_extension_104",
++    "VK_NV_extension_152",
++    "VK_NV_extension_168",
++    "VK_NV_extension_292",
++    "VK_NV_extension_330",
++    "VK_NV_extension_332",
++    "VK_NV_extension_351",
++    "VK_NV_extension_430",
++    "VK_NV_extension_432",
++    "VK_NV_extension_433",
++    "VK_NV_extension_492",
++    "VK_NV_extension_494",
++    "VK_NV_extension_504",
++    "VK_NV_extension_53",
++    "VK_NV_extension_549",
++    "VK_NV_extension_550",
++    "VK_NV_extension_551",
++    "VK_NV_external_memory",
++    "VK_NV_external_memory_capabilities",
++    "VK_NV_external_memory_rdma",
++    "VK_NV_external_memory_sci_buf",
++    "VK_NV_external_memory_win32",
++    "VK_NV_external_sci_sync",
++    "VK_NV_external_sci_sync2",
++    "VK_NV_fill_rectangle",
++    "VK_NV_fragment_coverage_to_color",
++    "VK_NV_fragment_shader_barycentric",
++    "VK_NV_fragment_shading_rate_enums",
++    "VK_NV_framebuffer_mixed_samples",
++    "VK_NV_geometry_shader_passthrough",
++    "VK_NV_glsl_shader",
++    "VK_NV_inherited_viewport_scissor",
++    "VK_NV_linear_color_attachment",
++    "VK_NV_low_latency",
++    "VK_NV_low_latency2",
++    "VK_NV_memory_decompression",
++    "VK_NV_mesh_shader",
++    "VK_NV_optical_flow",
++    "VK_NV_present_barrier",
++    "VK_NV_private_vendor_info",
++    "VK_NV_ray_tracing",
++    "VK_NV_ray_tracing_invocation_reorder",
++    "VK_NV_ray_tracing_motion_blur",
++    "VK_NV_representative_fragment_test",
++    "VK_NV_sample_mask_override_coverage",
++    "VK_NV_scissor_exclusive",
++    "VK_NV_shader_image_footprint",
++    "VK_NV_shader_sm_builtins",
++    "VK_NV_shader_subgroup_partitioned",
++    "VK_NV_shading_rate_image",
++    "VK_NV_viewport_array2",
++    "VK_NV_viewport_swizzle",
++    "VK_NV_win32_keyed_mutex",
++    "VK_QCOM_extension_173",
++    "VK_QCOM_extension_174",
++    "VK_QCOM_extension_303",
++    "VK_QCOM_extension_304",
++    "VK_QCOM_extension_305",
++    "VK_QCOM_extension_306",
++    "VK_QCOM_extension_307",
++    "VK_QCOM_extension_310",
++    "VK_QCOM_extension_369",
++    "VK_QCOM_extension_440",
++    "VK_QCOM_extension_536",
++    "VK_QCOM_extension_548",
++    "VK_QCOM_filter_cubic_clamp",
++    "VK_QCOM_filter_cubic_weights",
++    "VK_QCOM_fragment_density_map_offset",
++    "VK_QCOM_image_processing",
++    "VK_QCOM_image_processing2",
++    "VK_QCOM_multiview_per_view_render_areas",
++    "VK_QCOM_multiview_per_view_viewports",
++    "VK_QCOM_render_pass_shader_resolve",
++    "VK_QCOM_render_pass_store_ops",
++    "VK_QCOM_render_pass_transform",
++    "VK_QCOM_rotated_copy_commands",
++    "VK_QCOM_tile_properties",
++    "VK_QCOM_ycbcr_degamma",
++    "VK_QNX_external_memory_screen_buffer",
++    "VK_QNX_screen_surface",
++    "VK_RESERVED_do_not_use_146",
++    "VK_RESERVED_do_not_use_94",
++    "VK_SEC_amigo_profiling",
++    "VK_SEC_extension_439",
++    "VK_SEC_extension_448",
++    "VK_SEC_extension_449",
++    "VK_SEC_extension_450",
++    "VK_SEC_extension_451",
++    "VK_VALVE_descriptor_set_host_mapping",
++    "VK_VALVE_mutable_descriptor_type",
++};
++
++[[maybe_unused]] static bool CerealRegistryKnowsExtension(const char* name) {
++    for (const char* known : kCerealRegistryExtensions) {
++        if (strcmp(name, known) == 0) return true;
++    }
++    return false;
++}
++
 +}  // namespace aemu_cereal_gap
 +
 +#endif  // AEMULATOR_VK_DECODER_CEREAL_GAP_INC
 diff --git a/host/vulkan/VkDecoderGlobalState.cpp b/host/vulkan/VkDecoderGlobalState.cpp
-index 9a4c1a363..4204342e0 100644
+index 9a4c1a363..9dce55c35 100644
 --- a/host/vulkan/VkDecoderGlobalState.cpp
 +++ b/host/vulkan/VkDecoderGlobalState.cpp
 @@ -67,7 +67,6 @@
@@ -3465,7 +4032,7 @@ index 9a4c1a363..4204342e0 100644
      "VK_FUCHSIA_buffer_collection",
      "VK_FUCHSIA_external_memory",
      "VK_FUCHSIA_external_semaphore",
-@@ -179,6 +189,85 @@ static constexpr const char* const kEmulatedDeviceExtensions[] = {
+@@ -179,6 +189,104 @@ static constexpr const char* const kEmulatedDeviceExtensions[] = {
  #endif
  };
  
@@ -3528,8 +4095,27 @@ index 9a4c1a363..4204342e0 100644
 +    // allow-list is ever widened (the Phase B work), THIS ENTRY MUST BE RE-EXAMINED FIRST.
 +    "VK_KHR_push_descriptor",
 +};
-+// True when `name` must be hidden from the guest: in the generated gap AND not in the allowlist.
++// True when `name` must be hidden from the guest.
++//
++// TWO independent hazards, and they need opposite logic:
++//
++//  1. BLACKLIST — the cereal gap. The codegen can SIZE the extension's pNext structs but cannot
++//     DECODE them, so reservedunmarshal_extension_struct()'s default: arm abort()s the VMM. These
++//     names are known ahead of time, hence a strip list.
++//
++//  2. WHITELIST — the registry horizon. The host driver is a live Mesa build that moves
++//     independently of the pinned Vulkan registry the cereal was generated from. An extension the
++//     driver advertises that the registry has never heard of has its VkStructureTypes in NEITHER
++//     switch, so it aborts one step EARLIER, inside goldfish_vk_extension_struct_size(). This
++//     cannot be a strip list: the dangerous names are by definition unknown when the list is built.
++//     At the time of writing KosmicKrisp advertises 26 such extensions (VK_KHR_maintenance6..10,
++//     VK_KHR_robustness2, VK_KHR_vertex_attribute_divisor, ...) and the guest ICD's own allow-list
++//     permits several of them — a live abort path the gap list is structurally blind to.
++//
++// The allowlist can only override (1). Overriding (2) would be advertising an extension whose
++// structs the host cannot even measure, which is never defensible.
 +static bool cerealGapHidesExtension(const char* name) {
++    if (!aemu_cereal_gap::CerealRegistryKnowsExtension(name)) return true;
 +    for (const char* kept : kCerealGapExtensionsKeptAnyway) {
 +        if (strcmp(name, kept) == 0) return false;
 +    }
@@ -3551,7 +4137,7 @@ index 9a4c1a363..4204342e0 100644
  // A list of instance extensions that should not be passed to the host driver.
  // On older pre-1.1 Vulkan platforms, gfxstream emulates these features.
  static constexpr const char* const kEmulatedInstanceExtensions[] = {
-@@ -190,6 +279,55 @@ static constexpr const char* const kEmulatedInstanceExtensions[] = {
+@@ -190,6 +298,55 @@ static constexpr const char* const kEmulatedInstanceExtensions[] = {
  static constexpr uint32_t kMaxSafeVersion = VK_MAKE_VERSION(1, 3, 0);
  static constexpr uint32_t kMinVersion = VK_MAKE_VERSION(1, 0, 0);
  
@@ -3607,7 +4193,7 @@ index 9a4c1a363..4204342e0 100644
  static constexpr uint64_t kPageSizeforBlob = 4096;
  static constexpr uint64_t kPageMaskForBlob = ~(0xfff);
  
-@@ -1060,11 +1198,6 @@ class VkDecoderGlobalState::Impl {
+@@ -1060,11 +1217,6 @@ class VkDecoderGlobalState::Impl {
              curr = curr->pNext;
          }
  
@@ -3619,7 +4205,7 @@ index 9a4c1a363..4204342e0 100644
  
          // bug: 155795731
          bool swiftshader =
-@@ -1142,6 +1275,31 @@ class VkDecoderGlobalState::Impl {
+@@ -1142,6 +1294,31 @@ class VkDecoderGlobalState::Impl {
      }
  
      void vkDestroyInstanceImpl(VkInstance instance, const VkAllocationCallbacks* pAllocator) {
@@ -3651,7 +4237,7 @@ index 9a4c1a363..4204342e0 100644
          // Do delayed removes out of the lock, but get the list of devices to destroy inside the
          // lock.
          {
-@@ -1261,6 +1419,27 @@ class VkDecoderGlobalState::Impl {
+@@ -1261,6 +1438,27 @@ class VkDecoderGlobalState::Impl {
          auto instance = unbox_VkInstance(boxed_instance);
          auto vk = dispatch_VkInstance(boxed_instance);
  
@@ -3679,7 +4265,7 @@ index 9a4c1a363..4204342e0 100644
          std::vector<VkPhysicalDevice> physicalDevices;
          auto res = GetPhysicalDevices(instance, vk, physicalDevices);
          if (res != VK_SUCCESS) {
-@@ -1337,6 +1516,53 @@ class VkDecoderGlobalState::Impl {
+@@ -1337,6 +1535,53 @@ class VkDecoderGlobalState::Impl {
          return res;
      }
  
@@ -3733,7 +4319,7 @@ index 9a4c1a363..4204342e0 100644
      void on_vkGetPhysicalDeviceFeatures(android::base::BumpPool* pool,
                                          VkPhysicalDevice boxed_physicalDevice,
                                          VkPhysicalDeviceFeatures* pFeatures) {
-@@ -1346,6 +1572,7 @@ class VkDecoderGlobalState::Impl {
+@@ -1346,6 +1591,7 @@ class VkDecoderGlobalState::Impl {
          vk->vkGetPhysicalDeviceFeatures(physicalDevice, pFeatures);
          pFeatures->textureCompressionETC2 |= enableEmulatedEtc2(physicalDevice, vk);
          pFeatures->textureCompressionASTC_LDR |= enableEmulatedAstc(physicalDevice, vk);
@@ -3741,7 +4327,7 @@ index 9a4c1a363..4204342e0 100644
      }
  
      void on_vkGetPhysicalDeviceFeatures2(android::base::BumpPool* pool,
-@@ -1387,6 +1614,7 @@ class VkDecoderGlobalState::Impl {
+@@ -1387,6 +1633,7 @@ class VkDecoderGlobalState::Impl {
  
          pFeatures->features.textureCompressionETC2 |= enableEmulatedEtc2(physicalDevice, vk);
          pFeatures->features.textureCompressionASTC_LDR |= enableEmulatedAstc(physicalDevice, vk);
@@ -3749,7 +4335,7 @@ index 9a4c1a363..4204342e0 100644
          VkPhysicalDeviceSamplerYcbcrConversionFeatures* ycbcrFeatures =
              vk_find_struct<VkPhysicalDeviceSamplerYcbcrConversionFeatures>(pFeatures);
          if (ycbcrFeatures != nullptr) {
-@@ -1618,6 +1846,106 @@ class VkDecoderGlobalState::Impl {
+@@ -1618,6 +1865,106 @@ class VkDecoderGlobalState::Impl {
          }
      }
  
@@ -3856,7 +4442,7 @@ index 9a4c1a363..4204342e0 100644
      void on_vkGetPhysicalDeviceProperties(android::base::BumpPool* pool,
                                            VkPhysicalDevice boxed_physicalDevice,
                                            VkPhysicalDeviceProperties* pProperties) {
-@@ -1629,6 +1957,17 @@ class VkDecoderGlobalState::Impl {
+@@ -1629,6 +1976,17 @@ class VkDecoderGlobalState::Impl {
          if (pProperties->apiVersion > kMaxSafeVersion) {
              pProperties->apiVersion = kMaxSafeVersion;
          }
@@ -3874,7 +4460,7 @@ index 9a4c1a363..4204342e0 100644
      }
  
      void on_vkGetPhysicalDeviceProperties2(android::base::BumpPool* pool,
-@@ -1671,6 +2010,8 @@ class VkDecoderGlobalState::Impl {
+@@ -1671,6 +2029,8 @@ class VkDecoderGlobalState::Impl {
          if (pProperties->properties.apiVersion > kMaxSafeVersion) {
              pProperties->properties.apiVersion = kMaxSafeVersion;
          }
@@ -3883,7 +4469,7 @@ index 9a4c1a363..4204342e0 100644
      }
  
      void on_vkGetPhysicalDeviceQueueFamilyProperties(
-@@ -1804,17 +2145,11 @@ class VkDecoderGlobalState::Impl {
+@@ -1804,17 +2164,11 @@ class VkDecoderGlobalState::Impl {
          auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
          auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
  
@@ -3906,7 +4492,7 @@ index 9a4c1a363..4204342e0 100644
          std::vector<VkExtensionProperties> properties;
          VkResult result =
              enumerateDeviceExtensionProperties(vk, physicalDevice, pLayerName, properties);
-@@ -1822,17 +2157,16 @@ class VkDecoderGlobalState::Impl {
+@@ -1822,17 +2176,16 @@ class VkDecoderGlobalState::Impl {
              return result;
          }
  
@@ -3934,7 +4520,7 @@ index 9a4c1a363..4204342e0 100644
  
          if (m_emu->enableYcbcrEmulation &&
              !hasDeviceExtension(properties, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME)) {
-@@ -1842,6 +2176,120 @@ class VkDecoderGlobalState::Impl {
+@@ -1842,6 +2195,120 @@ class VkDecoderGlobalState::Impl {
              ycbcr_props.specVersion = VK_KHR_SAMPLER_YCBCR_CONVERSION_SPEC_VERSION;
              properties.push_back(ycbcr_props);
          }
@@ -4055,7 +4641,7 @@ index 9a4c1a363..4204342e0 100644
          if (pProperties == nullptr) {
              *pPropertyCount = properties.size();
          } else {
-@@ -1944,63 +2392,6 @@ class VkDecoderGlobalState::Impl {
+@@ -1944,63 +2411,6 @@ class VkDecoderGlobalState::Impl {
              }
          }
  
@@ -4119,7 +4705,7 @@ index 9a4c1a363..4204342e0 100644
  
          // Filter device memory report as callbacks can not be passed between guest and host.
          vk_struct_chain_filter<VkDeviceDeviceMemoryReportCreateInfoEXT>(&createInfoFiltered);
-@@ -4002,6 +4393,111 @@ class VkDecoderGlobalState::Impl {
+@@ -4002,6 +4412,111 @@ class VkDecoderGlobalState::Impl {
          destroyShaderModuleLocked(device, deviceDispatch, shaderModule, pAllocator);
      }
  
@@ -4231,7 +4817,7 @@ index 9a4c1a363..4204342e0 100644
      VkResult on_vkCreatePipelineCache(android::base::BumpPool* pool, VkDevice boxed_device,
                                        const VkPipelineCacheCreateInfo* pCreateInfo,
                                        const VkAllocationCallbacks* pAllocator,
-@@ -4009,8 +4505,41 @@ class VkDecoderGlobalState::Impl {
+@@ -4009,8 +4524,41 @@ class VkDecoderGlobalState::Impl {
          auto device = unbox_VkDevice(boxed_device);
          auto deviceDispatch = dispatch_VkDevice(boxed_device);
  
@@ -4275,7 +4861,7 @@ index 9a4c1a363..4204342e0 100644
          if (result != VK_SUCCESS) {
              return result;
          }
-@@ -5069,9 +5598,10 @@ class VkDecoderGlobalState::Impl {
+@@ -5069,9 +5617,10 @@ class VkDecoderGlobalState::Impl {
                  bool opaqueFd = true;
  
  #if defined(__APPLE__)
@@ -4289,7 +4875,7 @@ index 9a4c1a363..4204342e0 100644
  
                      extern VkImage getColorBufferVkImage(uint32_t colorBufferHandle);
                      if (dedicatedAllocInfoPtr == nullptr || localDedicatedAllocInfo.image == VK_NULL_HANDLE) {
-@@ -5145,7 +5675,7 @@ class VkDecoderGlobalState::Impl {
+@@ -5145,7 +5694,7 @@ class VkDecoderGlobalState::Impl {
  
              bool opaqueFd = true;
  #ifdef __APPLE__
@@ -4298,7 +4884,7 @@ index 9a4c1a363..4204342e0 100644
                  MTLResource_id bufferMetalMemoryHandle =
                      getBufferMetalMemoryHandle(importBufferInfoPtr->buffer);
  
-@@ -5158,7 +5688,9 @@ class VkDecoderGlobalState::Impl {
+@@ -5158,7 +5707,9 @@ class VkDecoderGlobalState::Impl {
                      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                  }
  
@@ -4309,7 +4895,7 @@ index 9a4c1a363..4204342e0 100644
                  importInfoMetalHandle.handle = bufferMetalMemoryHandle;
  
                  vk_append_struct(&structChainIter, &importInfoMetalHandle);
-@@ -5317,13 +5849,11 @@ class VkDecoderGlobalState::Impl {
+@@ -5317,13 +5868,11 @@ class VkDecoderGlobalState::Impl {
                  VkExternalMemoryHandleTypeFlags handleTypes;
  
  #if defined(__APPLE__)
@@ -4328,7 +4914,7 @@ index 9a4c1a363..4204342e0 100644
  #elif defined(_WIN32)
                  handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
  #elif defined(__unix__)
-@@ -5890,9 +6420,9 @@ class VkDecoderGlobalState::Impl {
+@@ -5890,9 +6439,9 @@ class VkDecoderGlobalState::Impl {
  #endif
  
  #ifdef __APPLE__
@@ -4340,7 +4926,7 @@ index 9a4c1a363..4204342e0 100644
              }
  #endif
  
-@@ -8112,21 +8642,10 @@ class VkDecoderGlobalState::Impl {
+@@ -8112,21 +8661,10 @@ class VkDecoderGlobalState::Impl {
              res.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
          }
  #elif defined(__APPLE__)
@@ -4366,7 +4952,7 @@ index 9a4c1a363..4204342e0 100644
          }
  #endif
  
-@@ -8190,12 +8709,6 @@ class VkDecoderGlobalState::Impl {
+@@ -8190,12 +8728,6 @@ class VkDecoderGlobalState::Impl {
              res.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
          }
  
@@ -4379,7 +4965,7 @@ index 9a4c1a363..4204342e0 100644
  
          return res;
      }
-@@ -8557,6 +9070,15 @@ class VkDecoderGlobalState::Impl {
+@@ -8557,6 +9089,15 @@ class VkDecoderGlobalState::Impl {
      }
  
      void destroyInstanceObjects(InstanceObjects& objects) {
@@ -4395,7 +4981,7 @@ index 9a4c1a363..4204342e0 100644
          VkInstance instance = objects.instance.key();
          InstanceInfo& instanceInfo = objects.instance.mapped();
  
-@@ -9075,6 +9597,16 @@ void VkDecoderGlobalState::reset() {
+@@ -9075,6 +9616,16 @@ void VkDecoderGlobalState::reset() {
      sGlobalDecoderState = nullptr;
  }
  
@@ -4412,7 +4998,7 @@ index 9a4c1a363..4204342e0 100644
  // Snapshots
  bool VkDecoderGlobalState::snapshotsEnabled() const { return mImpl->snapshotsEnabled(); }
  bool VkDecoderGlobalState::batchedDescriptorSetUpdateEnabled() const { return mImpl->batchedDescriptorSetUpdateEnabled(); }
-@@ -9507,6 +10039,13 @@ void VkDecoderGlobalState::on_vkDestroyPipelineCache(android::base::BumpPool* po
+@@ -9507,6 +10058,13 @@ void VkDecoderGlobalState::on_vkDestroyPipelineCache(android::base::BumpPool* po
      mImpl->on_vkDestroyPipelineCache(pool, boxed_device, pipelineCache, pAllocator);
  }
  

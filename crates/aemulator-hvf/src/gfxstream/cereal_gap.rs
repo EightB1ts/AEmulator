@@ -84,6 +84,43 @@ pub struct GapEntry {
 ///
 /// `#ifdef VK_VERSION_*` blocks are skipped: core versions are not extensions, cannot be stripped
 /// from an enumerate result, and their structs are all handled anyway.
+/// The Vulkan registry the cereal code was generated from, relative to a gfxstream checkout root.
+pub const REGISTRY_REL_PATH: &str = "codegen/vulkan/vulkan-docs-next/xml/vk.xml";
+
+/// Every extension name the vendored registry defines.
+///
+/// # The hole this closes
+/// The strip list answers "which extensions can the host SIZE but not DECODE?". It is structurally
+/// blind to a third case: an extension the codegen has never heard of *at all*, because the
+/// registry it was generated from predates it. Those `VkStructureType`s are in NEITHER switch, so
+/// they reach `goldfish_vk_extension_struct_size`'s `default:` arm — `GFXSTREAM_ABORT`, the same
+/// full-VMM kill as the unmarshal default, one step earlier.
+///
+/// Not hypothetical: the host driver is a live Mesa build that moves independently of this pinned
+/// registry. At the time of writing KosmicKrisp advertises 26 device extensions absent from the
+/// vendored 1.3.269 registry (`VK_KHR_maintenance6..10`, `VK_KHR_robustness2`,
+/// `VK_KHR_vertex_attribute_divisor`, …), and the guest ICD's own allow-list permits several.
+///
+/// Membership is tested against the REGISTRY, not against guard names in the size table: a promoted
+/// extension (`VK_EXT_descriptor_indexing`, promoted to 1.2) has its structs filed under a
+/// `VK_VERSION_*` guard and owns no guard, so whitelisting by guard would wrongly hide it.
+pub fn registry_extensions(registry_src: &str) -> BTreeSet<String> {
+    const NEEDLE: &str = "<extension name=\"";
+    let mut out = BTreeSet::new();
+    let mut rest = registry_src;
+    while let Some(i) = rest.find(NEEDLE) {
+        rest = &rest[i + NEEDLE.len()..];
+        match rest.find('"') {
+            Some(end) => {
+                out.insert(rest[..end].to_string());
+                rest = &rest[end..];
+            }
+            None => break,
+        }
+    }
+    out
+}
+
 pub fn compute_gap(size_table_src: &str, unmarshal_src: &str) -> Vec<GapEntry> {
     let sized = cases_by_extension(size_table_src, SIZE_TABLE_FN);
     let unmarshalled = all_case_labels(unmarshal_src, UNMARSHAL_FN);
@@ -144,7 +181,11 @@ pub fn promotion_alias(extension: &str, structs: &[String]) -> Option<String> {
 ///
 /// Deterministic: `generate` and `verify` must produce byte-identical output for the drift guard to
 /// mean anything.
-pub fn render_inc(gap: &[GapEntry], gfxstream_sha: &str) -> String {
+pub fn render_inc(
+    gap: &[GapEntry],
+    gfxstream_sha: &str,
+    registry: &BTreeSet<String>,
+) -> String {
     // extension name -> comment lines (first trailing, rest continued). A promotion alias is
     // emitted as its own entry, in sorted position, so the C++ side needs no alias logic of its own.
     let mut entries: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -272,6 +313,45 @@ struct CerealGapStructToExtension {
 #endif  // AEMULATOR_VK_DECODER_CEREAL_GAP_INC
 "#,
     );
+    // ---- second table: what the REGISTRY knows -------------------------------------------------
+    // A hazard the gap cannot express, because the dangerous names are unknown when the list is
+    // built — so the host must whitelist rather than blacklist. See registry_extensions().
+    // Spliced in just before the namespace close so both tables share the namespace and the
+    // internal linkage; building the text and inserting is deliberate — computing the exact literal
+    // boundaries of the emitter above is how this got mis-nested inside kCerealGapStructToExtension
+    // the first time.
+    {
+        const NS_CLOSE: &str = "}  // namespace aemu_cereal_gap";
+        let mut table = String::from(
+            r#"
+// Every extension name the vendored Vulkan registry defines. An extension the host driver
+// advertises that is ABSENT from this table has VkStructureTypes in NEITHER cereal switch, so a
+// guest that chains one reaches goldfish_vk_extension_struct_size()'s default: arm, which is
+// GFXSTREAM_ABORT — the whole VMM. Hiding those is the only safe response.
+[[maybe_unused]] static constexpr const char* const kCerealRegistryExtensions[] = {
+"#,
+        );
+        for name in registry {
+            let _ = writeln!(table, "    \"{name}\",");
+        }
+        table.push_str(
+            r#"};
+
+[[maybe_unused]] static bool CerealRegistryKnowsExtension(const char* name) {
+    for (const char* known : kCerealRegistryExtensions) {
+        if (strcmp(name, known) == 0) return true;
+    }
+    return false;
+}
+
+"#,
+        );
+        match out.rfind(NS_CLOSE) {
+            Some(at) => out.insert_str(at, &table),
+            None => panic!("emitted .inc has no `{NS_CLOSE}` to splice the registry table before"),
+        }
+    }
+
     out
 }
 

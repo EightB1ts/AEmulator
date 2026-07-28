@@ -61,7 +61,7 @@ TP_GFXSTREAM_CODEGEN_PATCHES="gfxstream-codegen"
 # RE-RECORD IT whenever the patch series legitimately changes — the digest is a function of the
 # series, so it goes stale on every regeneration:
 #     bash third_party/bootstrap.sh --record-digest      # recomputes and rewrites the line below
-TP_GFXSTREAM_TREE_DIGEST="44b40df398411cf963593a5dac47c2df476a5617"
+TP_GFXSTREAM_TREE_DIGEST="5f8e497d64101a5ba2b6d25a7894c3ca35f25bd5"
 
 # ---------------------------------------------------------------------------------------------
 # aemu — aemu-base / aemu-host-common. A build-time dependency of gfxstream's SYSTEM dependency

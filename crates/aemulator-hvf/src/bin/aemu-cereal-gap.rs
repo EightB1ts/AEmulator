@@ -24,7 +24,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use aemulator_hvf::gfxstream::cereal_gap::{
-    compute_gap, render_inc, INC_REL_PATH, SIZE_TABLE_REL_PATH, UNMARSHAL_REL_PATH,
+    compute_gap, registry_extensions, render_inc, INC_REL_PATH, REGISTRY_REL_PATH,
+    SIZE_TABLE_REL_PATH, UNMARSHAL_REL_PATH,
 };
 
 const USAGE: &str = "\
@@ -74,7 +75,18 @@ fn render(src: &Path) -> Result<String, String> {
             src.display()
         ));
     }
-    Ok(render_inc(&gap, &gfxstream_sha(src)))
+    // The registry is what tells us which extension names the codegen could POSSIBLY know. An
+    // advertised name absent from it aborts in the SIZE table, before the gap is ever consulted.
+    let registry = registry_extensions(&read(&src.join(REGISTRY_REL_PATH))?);
+    if registry.is_empty() {
+        return Err(format!(
+            "parsed ZERO extensions from {}.\n  \
+             Refusing to emit a registry whitelist that would hide every extension the host \
+             advertises.",
+            src.join(REGISTRY_REL_PATH).display()
+        ));
+    }
+    Ok(render_inc(&gap, &gfxstream_sha(src), &registry))
 }
 
 fn verify(src: &Path, inc_path: &Path) -> ExitCode {
