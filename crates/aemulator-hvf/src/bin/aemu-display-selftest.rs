@@ -71,7 +71,10 @@ fn main() {
         i += 1;
     }
 
-    println!("[selftest] mode={} gles={use_gles} size={width}x{height} out={out}", if use_gfxstream { "gfxstream" } else { "metal" });
+    println!(
+        "[selftest] mode={} gles={use_gles} size={width}x{height} out={out}",
+        if use_gfxstream { "gfxstream" } else { "metal" }
+    );
 
     let event_loop = EventLoop::new().expect("event loop");
     let window = WindowBuilder::new()
@@ -169,7 +172,9 @@ fn capture_window(window: &winit::window::Window, out: &str) {
 
     let status = if let Some(r) = region.as_deref() {
         println!("[selftest] screencapture -x -R{r} {out}");
-        Command::new("screencapture").args(["-x", &format!("-R{r}"), out]).status()
+        Command::new("screencapture")
+            .args(["-x", &format!("-R{r}"), out])
+            .status()
     } else {
         println!("[selftest] screencapture -x {out} (full screen — no window region)");
         Command::new("screencapture").args(["-x", out]).status()

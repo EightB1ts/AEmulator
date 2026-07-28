@@ -112,7 +112,12 @@ impl SecureEnv {
     /// Handle one framed request. `command` is the transport header's command word (low 31 bits);
     /// `payload` is the message body. Returns `Some((resp_command, resp_payload))` to send back, or
     /// `None` to send nothing.
-    pub fn handle(&mut self, ch: SecChannel, command: u32, payload: &[u8]) -> Option<(u32, Vec<u8>)> {
+    pub fn handle(
+        &mut self,
+        ch: SecChannel,
+        command: u32,
+        payload: &[u8],
+    ) -> Option<(u32, Vec<u8>)> {
         let n = self.bump(ch);
         eprintln!(
             "[secure_env] {} req #{n}: cmd={:#x} len={} bytes={}",
@@ -182,7 +187,7 @@ impl SecureEnv {
             OP_GET_SHARED_SECRET_PARAMETERS => {
                 // GetSharedSecretParametersResponse { params: SharedSecretParameters { seed, nonce } }.
                 struct_of(vec![Cbor::Array(vec![
-                    Cbor::Bytes(vec![]),                 // seed (empty)
+                    Cbor::Bytes(vec![]),                     // seed (empty)
                     Cbor::Bytes(self.shared_nonce.to_vec()), // nonce (32 stable bytes)
                 ])])
             }

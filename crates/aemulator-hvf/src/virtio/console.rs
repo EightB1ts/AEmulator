@@ -172,7 +172,10 @@ impl Console {
                     for desc in chain {
                         if !desc.is_write_only() {
                             let mut buf = vec![0u8; desc.len() as usize];
-                            if mem.read_slice(&mut buf, GuestAddress(desc.addr().0)).is_ok() {
+                            if mem
+                                .read_slice(&mut buf, GuestAddress(desc.addr().0))
+                                .is_ok()
+                            {
                                 self.rx_frame.extend_from_slice(&buf);
                             }
                         }
@@ -207,7 +210,10 @@ impl Console {
         if !self.dumped_raw && !self.rx_frame.is_empty() {
             self.dumped_raw = true;
             let n = self.rx_frame.len().min(64);
-            let hex: String = self.rx_frame[..n].iter().map(|b| format!("{b:02x}")).collect();
+            let hex: String = self.rx_frame[..n]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
             eprintln!(
                 "[secure_env] {} RAW first {n}B (total {}): {hex}",
                 channel.label(),
@@ -255,7 +261,10 @@ impl Console {
             for desc in chain {
                 if !desc.is_write_only() {
                     let mut buf = vec![0u8; desc.len() as usize];
-                    if mem.read_slice(&mut buf, GuestAddress(desc.addr().0)).is_ok() {
+                    if mem
+                        .read_slice(&mut buf, GuestAddress(desc.addr().0))
+                        .is_ok()
+                    {
                         let _ = out.write_all(&buf);
                     }
                 }
@@ -276,7 +285,10 @@ impl Console {
             for desc in chain {
                 if !desc.is_write_only() {
                     let mut buf = vec![0u8; desc.len() as usize];
-                    if mem.read_slice(&mut buf, GuestAddress(desc.addr().0)).is_ok() {
+                    if mem
+                        .read_slice(&mut buf, GuestAddress(desc.addr().0))
+                        .is_ok()
+                    {
                         collected.extend_from_slice(&buf);
                     }
                 }

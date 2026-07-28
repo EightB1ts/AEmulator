@@ -324,7 +324,9 @@ impl Renderer3d for GfxstreamRenderer {
         // guest RAM), so both are discarded.
         let mut iov: *mut ffi::iovec = std::ptr::null_mut();
         let mut num: c_int = 0;
-        unsafe { ffi::stream_renderer_resource_detach_iov(resource_id as c_int, &mut iov, &mut num) }
+        unsafe {
+            ffi::stream_renderer_resource_detach_iov(resource_id as c_int, &mut iov, &mut num)
+        }
     }
 
     fn transfer_to_host_3d(&mut self, ctx_id: u32, xfer: &Transfer3d, data: &mut [u8]) -> i32 {
@@ -453,17 +455,16 @@ impl Renderer3d for GfxstreamRenderer {
     }
 
     fn capset_info(&mut self, index: u32) -> (u32, u32, u32) {
-        let id = GFXSTREAM_CAPSETS
-            .get(index as usize)
-            .copied()
-            .unwrap_or(0);
+        let id = GFXSTREAM_CAPSETS.get(index as usize).copied().unwrap_or(0);
         let (mut max_ver, mut max_size) = (0u32, 0u32);
         unsafe { ffi::stream_renderer_get_cap_set(id, &mut max_ver, &mut max_size) };
         (id, max_ver, max_size)
     }
 
     fn fill_caps(&mut self, capset_id: u32, version: u32, out: &mut [u8]) -> i32 {
-        unsafe { ffi::stream_renderer_fill_caps(capset_id, version, out.as_mut_ptr() as *mut c_void) };
+        unsafe {
+            ffi::stream_renderer_fill_caps(capset_id, version, out.as_mut_ptr() as *mut c_void)
+        };
         0
     }
 
@@ -521,7 +522,9 @@ impl Renderer3d for GfxstreamRenderer {
         // Safety: FFI into libgfxstream_backend. `layer_ptr` is a live, unretained CAMetalLayer*
         // owned by the display thread's NSView, published once at window creation and valid for the
         // whole run; the renderer only reads it (vkCreateMetalSurfaceEXT) and caches the surface.
-        unsafe { ffi::stream_renderer_present_to_metal_layer(resource_id, layer_ptr as *mut c_void) }
+        unsafe {
+            ffi::stream_renderer_present_to_metal_layer(resource_id, layer_ptr as *mut c_void)
+        }
     }
 }
 
@@ -589,24 +592,71 @@ use std::sync::{Arc, Mutex};
 /// One routed call recorded by [`MockRenderer`]. `PartialEq` so tests can assert exact routing.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Call {
-    ContextCreate { ctx_id: u32, context_init: u32, name: Vec<u8> },
-    ContextDestroy { ctx_id: u32 },
+    ContextCreate {
+        ctx_id: u32,
+        context_init: u32,
+        name: Vec<u8>,
+    },
+    ContextDestroy {
+        ctx_id: u32,
+    },
     ResourceCreate3d(ResourceCreate3d),
-    CtxAttach { ctx_id: u32, resource_id: u32 },
-    CtxDetach { ctx_id: u32, resource_id: u32 },
-    ResourceUnref { resource_id: u32 },
-    WaitSync { resource_id: u32 },
-    AttachBacking { resource_id: u32, len: usize },
-    DetachBacking { resource_id: u32 },
-    TransferToHost { ctx_id: u32, xfer: Transfer3d, len: usize },
-    TransferFromHost { ctx_id: u32, xfer: Transfer3d, len: usize },
-    CreateBlob { ctx_id: u32, blob: CreateBlob },
-    SubmitCmd { ctx_id: u32, bytes: Vec<u8> },
+    CtxAttach {
+        ctx_id: u32,
+        resource_id: u32,
+    },
+    CtxDetach {
+        ctx_id: u32,
+        resource_id: u32,
+    },
+    ResourceUnref {
+        resource_id: u32,
+    },
+    WaitSync {
+        resource_id: u32,
+    },
+    AttachBacking {
+        resource_id: u32,
+        len: usize,
+    },
+    DetachBacking {
+        resource_id: u32,
+    },
+    TransferToHost {
+        ctx_id: u32,
+        xfer: Transfer3d,
+        len: usize,
+    },
+    TransferFromHost {
+        ctx_id: u32,
+        xfer: Transfer3d,
+        len: usize,
+    },
+    CreateBlob {
+        ctx_id: u32,
+        blob: CreateBlob,
+    },
+    SubmitCmd {
+        ctx_id: u32,
+        bytes: Vec<u8>,
+    },
     CreateFence(FenceReq),
-    CapsetInfo { index: u32 },
-    FillCaps { capset_id: u32, version: u32 },
-    ReadPixels { resource_id: u32, w: u32, h: u32 },
-    PresentToLayer { resource_id: u32, layer_ptr: usize },
+    CapsetInfo {
+        index: u32,
+    },
+    FillCaps {
+        capset_id: u32,
+        version: u32,
+    },
+    ReadPixels {
+        resource_id: u32,
+        w: u32,
+        h: u32,
+    },
+    PresentToLayer {
+        resource_id: u32,
+        layer_ptr: usize,
+    },
 }
 
 /// Shared, cloneable log of routed [`Call`]s. Clone one before moving the [`MockRenderer`] into the
@@ -667,10 +717,16 @@ impl Renderer3d for MockRenderer {
         0
     }
     fn ctx_attach_resource(&mut self, ctx_id: u32, resource_id: u32) {
-        self.push(Call::CtxAttach { ctx_id, resource_id });
+        self.push(Call::CtxAttach {
+            ctx_id,
+            resource_id,
+        });
     }
     fn ctx_detach_resource(&mut self, ctx_id: u32, resource_id: u32) {
-        self.push(Call::CtxDetach { ctx_id, resource_id });
+        self.push(Call::CtxDetach {
+            ctx_id,
+            resource_id,
+        });
     }
     fn resource_unref(&mut self, resource_id: u32) {
         self.push(Call::ResourceUnref { resource_id });
@@ -709,7 +765,10 @@ impl Renderer3d for MockRenderer {
         0
     }
     fn create_blob(&mut self, ctx_id: u32, blob: &CreateBlob, _iovs: &[(u64, usize)]) -> i32 {
-        self.push(Call::CreateBlob { ctx_id, blob: *blob });
+        self.push(Call::CreateBlob {
+            ctx_id,
+            blob: *blob,
+        });
         0
     }
     fn resource_map(&mut self, _resource_id: u32) -> Option<(u64, u64)> {
@@ -755,7 +814,10 @@ impl Renderer3d for MockRenderer {
         0
     }
     fn present_to_layer(&mut self, resource_id: u32, layer_ptr: usize) -> i32 {
-        self.push(Call::PresentToLayer { resource_id, layer_ptr });
+        self.push(Call::PresentToLayer {
+            resource_id,
+            layer_ptr,
+        });
         self.present_rc
     }
 }

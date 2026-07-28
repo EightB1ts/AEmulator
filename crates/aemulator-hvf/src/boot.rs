@@ -257,10 +257,18 @@ fn build_fdt(
     fdt.property_array_u32(
         "interrupts",
         &[
-            GIC_FDT_IRQ_TYPE_PPI, 13, flags,
-            GIC_FDT_IRQ_TYPE_PPI, 14, flags,
-            GIC_FDT_IRQ_TYPE_PPI, 11, flags,
-            GIC_FDT_IRQ_TYPE_PPI, 10, flags,
+            GIC_FDT_IRQ_TYPE_PPI,
+            13,
+            flags,
+            GIC_FDT_IRQ_TYPE_PPI,
+            14,
+            flags,
+            GIC_FDT_IRQ_TYPE_PPI,
+            11,
+            flags,
+            GIC_FDT_IRQ_TYPE_PPI,
+            10,
+            flags,
         ],
     )?;
     fdt.property_null("always-on")?;
@@ -283,7 +291,10 @@ fn build_fdt(
         vec!["arm,pl011".to_string(), "arm,primecell".to_string()],
     )?;
     fdt.property_array_u64("reg", &[0x0900_0000, 0x1000])?;
-    fdt.property_array_u32("interrupts", &[GIC_FDT_IRQ_TYPE_SPI, 1, IRQ_TYPE_EDGE_RISING])?;
+    fdt.property_array_u32(
+        "interrupts",
+        &[GIC_FDT_IRQ_TYPE_SPI, 1, IRQ_TYPE_EDGE_RISING],
+    )?;
     fdt.property_array_u32("clocks", &[CLK_PHANDLE, CLK_PHANDLE])?;
     fdt.property_string_list(
         "clock-names",

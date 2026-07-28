@@ -182,7 +182,7 @@ impl PciDevice {
             super::VIRTIO_ID_NET => 0x02_0000,   // network controller
             super::VIRTIO_ID_BLOCK => 0x01_8000, // mass storage / other
             super::VIRTIO_ID_GPU => 0x03_8000,   // display controller / other
-            _ => 0xff_0000,                       // unclassified
+            _ => 0xff_0000,                      // unclassified
         }
     }
 
@@ -202,11 +202,11 @@ impl PciDevice {
         put16(&mut self.cfg, 0x02, device_id); // device id (modern)
         put16(&mut self.cfg, 0x04, 0x0000); // command (guest programs this)
         put16(&mut self.cfg, 0x06, 0x0010); // status: bit4 = capabilities list
-        // revision (0x01 = modern) + class code.
+                                            // revision (0x01 = modern) + class code.
         put32(&mut self.cfg, 0x08, (class << 8) | 0x01);
         self.cfg[0x0c] = 0; // cache line size
         self.cfg[0x0e] = 0x00; // header type 0 (single function)
-        // BAR0 (patched live in config_read).
+                               // BAR0 (patched live in config_read).
         put32(&mut self.cfg, 0x10, bar0 | 0x0);
         // BAR2/BAR3: the 64-bit prefetchable host-visible shared-memory window, when present.
         // Memory BAR encoding: bit0=0 (memory), bits2:1=10 (64-bit), bit3=1 (prefetchable) → 0x0C.
@@ -223,11 +223,39 @@ impl PciDevice {
 
         // Capability chain (virtio_pci_cap = 16 bytes; notify cap = 20 bytes).
         // 0x40 common, 0x50 notify, 0x64 isr, 0x74 device, [0x84 shared-memory (shmid 0) if a shm BAR].
-        self.write_virtio_cap(0x40, VIRTIO_PCI_CAP_COMMON_CFG, COMMON_CFG_OFF as u32, REGION_LEN, 0x50, None);
-        self.write_virtio_cap(0x50, VIRTIO_PCI_CAP_NOTIFY_CFG, NOTIFY_OFF as u32, REGION_LEN, 0x64, Some(0));
-        self.write_virtio_cap(0x64, VIRTIO_PCI_CAP_ISR_CFG, ISR_OFF as u32, REGION_LEN, 0x74, None);
+        self.write_virtio_cap(
+            0x40,
+            VIRTIO_PCI_CAP_COMMON_CFG,
+            COMMON_CFG_OFF as u32,
+            REGION_LEN,
+            0x50,
+            None,
+        );
+        self.write_virtio_cap(
+            0x50,
+            VIRTIO_PCI_CAP_NOTIFY_CFG,
+            NOTIFY_OFF as u32,
+            REGION_LEN,
+            0x64,
+            Some(0),
+        );
+        self.write_virtio_cap(
+            0x64,
+            VIRTIO_PCI_CAP_ISR_CFG,
+            ISR_OFF as u32,
+            REGION_LEN,
+            0x74,
+            None,
+        );
         let device_next = if self.shm_bar.is_some() { 0x84 } else { 0x00 };
-        self.write_virtio_cap(0x74, VIRTIO_PCI_CAP_DEVICE_CFG, DEVICE_CFG_OFF as u32, REGION_LEN, device_next, None);
+        self.write_virtio_cap(
+            0x74,
+            VIRTIO_PCI_CAP_DEVICE_CFG,
+            DEVICE_CFG_OFF as u32,
+            REGION_LEN,
+            device_next,
+            None,
+        );
         // The virtio shared-memory capability (virtio_pci_cap64, cfg_type=8) pointing at BAR2, shmid
         // 0 (host-visible), offset 0, length = the whole window. The guest's virtio-gpu driver reads
         // this to reserve its blob-map drm_mm allocator over `PCI_SHM_BASE`.
@@ -466,7 +494,8 @@ impl PciDevice {
                 if self.driver_feature_select == 0 {
                     self.driver_features = (self.driver_features & !0xffff_ffff) | v as u64;
                 } else {
-                    self.driver_features = (self.driver_features & 0xffff_ffff) | ((v as u64) << 32);
+                    self.driver_features =
+                        (self.driver_features & 0xffff_ffff) | ((v as u64) << 32);
                 }
             }
             0x14 => self.device_status = v as u8, // low byte; config_generation is RO
@@ -781,7 +810,10 @@ mod tests_shm {
     fn shm_bar2_reports_64bit_prefetchable_base_and_size() {
         let d = gpu_pci_dev_with_shm();
         // BAR2 low: base low | 0x0C (64-bit prefetchable memory BAR).
-        assert_eq!(d.config_read(0x18, 4) as u32, (PCI_SHM_BASE as u32 & 0xffff_fff0) | 0x0c);
+        assert_eq!(
+            d.config_read(0x18, 4) as u32,
+            (PCI_SHM_BASE as u32 & 0xffff_fff0) | 0x0c
+        );
         // BAR3 high: base high.
         assert_eq!(d.config_read(0x1c, 4) as u32, (PCI_SHM_BASE >> 32) as u32);
     }
@@ -801,7 +833,10 @@ mod tests_shm {
         // Restore the original base; sizing latch clears.
         d.config_write(0x18, (PCI_SHM_BASE as u32 & 0xffff_fff0) | 0x0c, 4);
         d.config_write(0x1c, (PCI_SHM_BASE >> 32) as u32, 4);
-        assert_eq!(d.config_read(0x18, 4) as u32, (PCI_SHM_BASE as u32 & 0xffff_fff0) | 0x0c);
+        assert_eq!(
+            d.config_read(0x18, 4) as u32,
+            (PCI_SHM_BASE as u32 & 0xffff_fff0) | 0x0c
+        );
         assert_eq!(d.config_read(0x1c, 4) as u32, (PCI_SHM_BASE >> 32) as u32);
     }
 
@@ -824,7 +859,11 @@ mod tests_shm {
             at = d.config_read((at + 1) as u16, 1) as usize;
         }
         let at = found.expect("a virtio shared-memory capability (cfg_type 8) must be present");
-        assert_eq!(d.config_read((at + 4) as u16, 1) as u8, 2, "shm cap must reference BAR2");
+        assert_eq!(
+            d.config_read((at + 4) as u16, 1) as u8,
+            2,
+            "shm cap must reference BAR2"
+        );
         assert_eq!(
             d.config_read((at + 5) as u16, 1) as u8,
             VIRTIO_GPU_SHM_ID_HOST_VISIBLE,

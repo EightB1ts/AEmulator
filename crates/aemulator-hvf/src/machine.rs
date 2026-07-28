@@ -233,17 +233,19 @@ fn boot_and_run(
         let env = secure_env::shared();
         for hvc in 0..12usize {
             let console = match hvc {
-                0 => Console::new(),                                   // hvc0: interactive console
-                2 => Console::log("[logcat] "),                        // hvc2: logd → host stdout
+                0 => Console::new(),            // hvc0: interactive console
+                2 => Console::log("[logcat] "), // hvc2: logd → host stdout
                 3 => Console::secure(SecChannel::Keymaster, env.clone()), // hvc3: keymaster
                 4 => Console::secure(SecChannel::Gatekeeper, env.clone()), // hvc4: gatekeeper
-                10 => Console::secure(SecChannel::Oemlock, env.clone()),   // hvc10: oemlock
-                11 => Console::secure(SecChannel::Keymint, env.clone()),   // hvc11: KeyMint (blocker)
-                _ => Console::sink(),                                   // hvc1/5/6/7/8/9: drain
+                10 => Console::secure(SecChannel::Oemlock, env.clone()), // hvc10: oemlock
+                11 => Console::secure(SecChannel::Keymint, env.clone()), // hvc11: KeyMint (blocker)
+                _ => Console::sink(),           // hvc1/5/6/7/8/9: drain
             };
             devs.push(pci_dev(Backend::Console(console), devs.len()));
         }
-        println!("[ok] virtio-pci consoles: 12 HVC channels (hvc0..hvc11); secure_env on hvc3/4/10/11");
+        println!(
+            "[ok] virtio-pci consoles: 12 HVC channels (hvc0..hvc11); secure_env on hvc3/4/10/11"
+        );
         // rng
         devs.push(pci_dev(Backend::Rng(Rng::new()), devs.len()));
         // composite GPT block (slot 3) — /dev/vda carrying the by-name partitions
@@ -418,7 +420,9 @@ fn build_net() -> Net {
             Net::with_slirp(NET_MAC, slirp)
         }
         Err(e) => {
-            eprintln!("[net][warn] slirp init failed ({e}); falling back to enumerate-only stub NIC");
+            eprintln!(
+                "[net][warn] slirp init failed ({e}); falling back to enumerate-only stub NIC"
+            );
             Net::new(NET_MAC)
         }
     }
@@ -498,8 +502,7 @@ fn boot_and_run_common(
         // bring-up script to the console on a timer, re-asserting the policy route/rule to beat
         // netd reconciliation. Disable with `AEMU_NET_AUTOCONF=0`. Pure-std, so the default
         // (non-`net`) build stays hermetic; a NIC-less run simply never spawns it.
-        let autoconf_on =
-            std::env::var_os("AEMU_NET_AUTOCONF").map_or(true, |v| v != "0");
+        let autoconf_on = std::env::var_os("AEMU_NET_AUTOCONF").map_or(true, |v| v != "0");
         if cfg.netdev && autoconf_on {
             spawn_net_autoconfig_thread(tx.clone());
         }
@@ -755,7 +758,12 @@ fn spawn_input_inject_thread(ctx: &Arc<VmContext>, rx: Receiver<InputFrame>) {
                     let t = &mut vt[idx];
                     (t.inject_input_events(&frame, &ctx.mem), t.intid)
                 } else {
-                    match ctx.pci.lock().unwrap().inject_input_events(&frame, &ctx.mem) {
+                    match ctx
+                        .pci
+                        .lock()
+                        .unwrap()
+                        .inject_input_events(&frame, &ctx.mem)
+                    {
                         Some(intid) => (true, intid),
                         None => (false, 0),
                     }

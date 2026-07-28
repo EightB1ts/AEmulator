@@ -217,7 +217,10 @@ impl Vcpu {
 
     fn get_sys(&self, reg: u16) -> Result<u64, String> {
         let mut v: u64 = 0;
-        hv_ok!("hv_vcpu_get_sys_reg", hv_vcpu_get_sys_reg(self.id, reg, &mut v));
+        hv_ok!(
+            "hv_vcpu_get_sys_reg",
+            hv_vcpu_get_sys_reg(self.id, reg, &mut v)
+        );
         Ok(v)
     }
 
@@ -272,9 +275,8 @@ impl Vcpu {
             // interrupt state on every run, so this must be re-evaluated each iteration.
             let pending = ctx.gic.lock().unwrap().has_pending(self.cpu_index);
             if pending {
-                let _ = unsafe {
-                    hv_vcpu_set_pending_interrupt(self.id, HV_INTERRUPT_TYPE_IRQ, true)
-                };
+                let _ =
+                    unsafe { hv_vcpu_set_pending_interrupt(self.id, HV_INTERRUPT_TYPE_IRQ, true) };
             }
 
             hv_ok!("hv_vcpu_run", hv_vcpu_run(self.id));
@@ -318,8 +320,8 @@ impl Vcpu {
             return;
         }
         let ctl = self.get_sys(HV_SYS_REG_CNTV_CTL_EL0).unwrap_or(0);
-        let firing =
-            (ctl & (TMR_CTL_ENABLE | TMR_CTL_IMASK | TMR_CTL_ISTATUS)) == (TMR_CTL_ENABLE | TMR_CTL_ISTATUS);
+        let firing = (ctl & (TMR_CTL_ENABLE | TMR_CTL_IMASK | TMR_CTL_ISTATUS))
+            == (TMR_CTL_ENABLE | TMR_CTL_ISTATUS);
         ctx.gic.lock().unwrap().inject_vtimer(self.cpu_index);
         if !firing {
             let _ = unsafe { hv_vcpu_set_vtimer_mask(self.id, false) };
@@ -343,11 +345,16 @@ impl Vcpu {
                 let srt = ((esr >> 16) & 0x1f) as u32;
                 let ipa = ex.physical_address;
 
-                let is_gic = Gic::dist_contains(ipa) || ctx.gic.lock().unwrap().redist_contains(ipa);
+                let is_gic =
+                    Gic::dist_contains(ipa) || ctx.gic.lock().unwrap().redist_contains(ipa);
                 let virtio_dev = virtio::locate(ipa, ctx.virtio.lock().unwrap().len());
                 if Pl011::contains(ipa) {
                     if iswrite {
-                        let val = if srt < 31 { self.get_reg(hv_reg_x(srt))? } else { 0 };
+                        let val = if srt < 31 {
+                            self.get_reg(hv_reg_x(srt))?
+                        } else {
+                            0
+                        };
                         ctx.pl011.lock().unwrap().write(ipa, val, len);
                     } else {
                         let val = ctx.pl011.lock().unwrap().read(ipa, len);
@@ -357,7 +364,11 @@ impl Vcpu {
                     }
                 } else if let Some((dev, off)) = virtio_dev {
                     if iswrite {
-                        let val = if srt < 31 { self.get_reg(hv_reg_x(srt))? } else { 0 };
+                        let val = if srt < 31 {
+                            self.get_reg(hv_reg_x(srt))?
+                        } else {
+                            0
+                        };
                         let needs_irq = {
                             let mut vt = ctx.virtio.lock().unwrap();
                             vt[dev].write(&ctx.mem, off, val, len)
@@ -377,7 +388,11 @@ impl Vcpu {
                     }
                 } else if is_gic {
                     if iswrite {
-                        let val = if srt < 31 { self.get_reg(hv_reg_x(srt))? } else { 0 };
+                        let val = if srt < 31 {
+                            self.get_reg(hv_reg_x(srt))?
+                        } else {
+                            0
+                        };
                         ctx.gic.lock().unwrap().mmio_write(ipa, val, len);
                     } else {
                         let val = ctx.gic.lock().unwrap().mmio_read(ipa, len);
@@ -388,7 +403,11 @@ impl Vcpu {
                 } else if PciBus::cam_contains(ipa) {
                     // PCI configuration space (CAM).
                     if iswrite {
-                        let val = if srt < 31 { self.get_reg(hv_reg_x(srt))? } else { 0 };
+                        let val = if srt < 31 {
+                            self.get_reg(hv_reg_x(srt))?
+                        } else {
+                            0
+                        };
                         ctx.pci.lock().unwrap().cfg_write(ipa, val, len);
                     } else {
                         let val = ctx.pci.lock().unwrap().cfg_read(ipa, len);
@@ -399,7 +418,11 @@ impl Vcpu {
                 } else if PciBus::mmio_contains(ipa) {
                     // virtio-PCI BAR MMIO (common-cfg / notify / ISR / device-cfg).
                     if iswrite {
-                        let val = if srt < 31 { self.get_reg(hv_reg_x(srt))? } else { 0 };
+                        let val = if srt < 31 {
+                            self.get_reg(hv_reg_x(srt))?
+                        } else {
+                            0
+                        };
                         let intid = ctx.pci.lock().unwrap().mmio_write(&ctx.mem, ipa, val, len);
                         if let Some(intid) = intid {
                             let target = ctx.gic.lock().unwrap().set_spi(intid);
@@ -476,8 +499,16 @@ impl Vcpu {
                 self.set_reg(hv_reg_x(rt), val)?;
             }
         } else {
-            let val = if rt < 31 { self.get_reg(hv_reg_x(rt))? } else { 0 };
-            let req = ctx.gic.lock().unwrap().sysreg_write(self.cpu_index, reg, val);
+            let val = if rt < 31 {
+                self.get_reg(hv_reg_x(rt))?
+            } else {
+                0
+            };
+            let req = ctx
+                .gic
+                .lock()
+                .unwrap()
+                .sysreg_write(self.cpu_index, reg, val);
             if let Some(SgiRequest::Sgi(targets)) = req {
                 for (cpu, intid) in targets {
                     ctx.gic.lock().unwrap().set_irq(cpu, intid);

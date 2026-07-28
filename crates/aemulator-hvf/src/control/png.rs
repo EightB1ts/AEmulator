@@ -10,7 +10,11 @@
 
 /// Encode `rgb` (`width*height*3` bytes, row-major, 8-bit R,G,B) as a PNG byte stream.
 pub fn encode_rgb(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
-    assert_eq!(rgb.len(), (width as usize) * (height as usize) * 3, "rgb size mismatch");
+    assert_eq!(
+        rgb.len(),
+        (width as usize) * (height as usize) * 3,
+        "rgb size mismatch"
+    );
 
     let mut out = Vec::with_capacity(rgb.len() + rgb.len() / 100 + 4096);
     // PNG signature.

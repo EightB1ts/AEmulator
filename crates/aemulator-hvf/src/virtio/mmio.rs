@@ -236,7 +236,8 @@ impl MmioTransport {
                 if self.driver_features_sel == 0 {
                     self.driver_features = (self.driver_features & !0xffff_ffff) | v as u64;
                 } else {
-                    self.driver_features = (self.driver_features & 0xffff_ffff) | ((v as u64) << 32);
+                    self.driver_features =
+                        (self.driver_features & 0xffff_ffff) | ((v as u64) << 32);
                 }
             }
             QUEUE_SEL => self.queue_sel = v,

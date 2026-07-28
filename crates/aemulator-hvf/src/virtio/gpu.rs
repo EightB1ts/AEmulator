@@ -12,8 +12,8 @@
 
 use super::{Mem, VIRTIO_F_VERSION_1};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use virtio_queue::{Queue, QueueT};
 use vm_memory::{Bytes, GuestAddress};
@@ -348,7 +348,10 @@ impl Gpu {
                 }
                 self.scanout_resource = resource_id;
                 #[allow(unused_mut)] // `dims` is only reassigned on the feature build (3D lookup).
-                let mut dims = self.resources.get(&resource_id).map(|r| (r.width, r.height));
+                let mut dims = self
+                    .resources
+                    .get(&resource_id)
+                    .map(|r| (r.width, r.height));
                 // Phase 3c: a virgl scanout resource lives in the renderer, not the 2D map.
                 if dims.is_none() {
                     dims = self.res3d.get(&resource_id).copied();
@@ -396,7 +399,10 @@ impl Gpu {
                     if let Some(r) = self.renderer.as_mut() {
                         let rc = r.attach_backing(id, &iovs);
                         if rc != 0 {
-                            eprintln!("[gpu3d] attach_backing res={id} entries={} -> rc={rc}", iovs.len());
+                            eprintln!(
+                                "[gpu3d] attach_backing res={id} entries={} -> rc={rc}",
+                                iovs.len()
+                            );
                             return ok(VIRTIO_GPU_RESP_ERR_UNSPEC);
                         }
                     }
@@ -456,7 +462,9 @@ impl Gpu {
                 self.flush(id);
                 ok(VIRTIO_GPU_RESP_OK_NODATA)
             }
-            VIRTIO_GPU_CMD_UPDATE_CURSOR | VIRTIO_GPU_CMD_MOVE_CURSOR => ok(VIRTIO_GPU_RESP_OK_NODATA),
+            VIRTIO_GPU_CMD_UPDATE_CURSOR | VIRTIO_GPU_CMD_MOVE_CURSOR => {
+                ok(VIRTIO_GPU_RESP_OK_NODATA)
+            }
             other => {
                 // Phase 3c: the 3D/virgl command block (0x02xx) + capset queries route into the
                 // gfxstream renderer when one is attached. Feature-off (or no renderer) ⇒ ERR_UNSPEC,
@@ -474,7 +482,11 @@ impl Gpu {
 
     fn resp_display_info(&self, flags: u32, fence: u64) -> Vec<u8> {
         let mut buf = vec![0u8; CTRL_HDR_LEN + VIRTIO_GPU_MAX_SCANOUTS * 24];
-        buf[..CTRL_HDR_LEN].copy_from_slice(&resp_hdr(VIRTIO_GPU_RESP_OK_DISPLAY_INFO, flags, fence));
+        buf[..CTRL_HDR_LEN].copy_from_slice(&resp_hdr(
+            VIRTIO_GPU_RESP_OK_DISPLAY_INFO,
+            flags,
+            fence,
+        ));
         // pmodes[0] = { rect{0,0,W,H}, enabled=1, flags=0 }.
         let base = CTRL_HDR_LEN;
         buf[base + 8..base + 12].copy_from_slice(&self.default_width.to_le_bytes());
@@ -622,7 +634,8 @@ impl Gpu {
                     nr_samples: read_le(cmd, 60, 4) as u32,
                     flags: read_le(cmd, 64, 4) as u32,
                 };
-                self.res3d.insert(args.resource_id, (args.width, args.height));
+                self.res3d
+                    .insert(args.resource_id, (args.width, args.height));
                 let rc = self.renderer.as_mut().unwrap().resource_create_3d(&args);
                 warn_rc(rc, "resource_create_3d", args.resource_id);
                 self.route_header_fence(cmd, flags, fence, ctx_id);
@@ -668,7 +681,11 @@ impl Gpu {
                 let start: usize = 32; // hdr(24) + size(4) + padding(4)
                 let end = start.saturating_add(size).min(cmd.len());
                 let mut payload = cmd.get(start..end).unwrap_or(&[]).to_vec();
-                let rc = self.renderer.as_mut().unwrap().submit_cmd(ctx_id, &mut payload);
+                let rc = self
+                    .renderer
+                    .as_mut()
+                    .unwrap()
+                    .submit_cmd(ctx_id, &mut payload);
                 warn_rc(rc, "submit_cmd", ctx_id);
                 self.route_header_fence(cmd, flags, fence, ctx_id);
                 Some(nodata(VIRTIO_GPU_RESP_OK_NODATA))
@@ -777,8 +794,11 @@ impl Gpu {
                 let (id, max_ver, max_size) = self.renderer.as_mut().unwrap().capset_info(index);
                 self.capset_size.insert(id, max_size);
                 let mut buf = vec![0u8; CTRL_HDR_LEN + 16];
-                buf[..CTRL_HDR_LEN]
-                    .copy_from_slice(&resp_hdr(VIRTIO_GPU_RESP_OK_CAPSET_INFO, flags, fence));
+                buf[..CTRL_HDR_LEN].copy_from_slice(&resp_hdr(
+                    VIRTIO_GPU_RESP_OK_CAPSET_INFO,
+                    flags,
+                    fence,
+                ));
                 buf[CTRL_HDR_LEN..CTRL_HDR_LEN + 4].copy_from_slice(&id.to_le_bytes());
                 buf[CTRL_HDR_LEN + 4..CTRL_HDR_LEN + 8].copy_from_slice(&max_ver.to_le_bytes());
                 buf[CTRL_HDR_LEN + 8..CTRL_HDR_LEN + 12].copy_from_slice(&max_size.to_le_bytes());
@@ -794,8 +814,11 @@ impl Gpu {
                     .unwrap()
                     .fill_caps(capset_id, version, &mut caps);
                 let mut buf = vec![0u8; CTRL_HDR_LEN + size];
-                buf[..CTRL_HDR_LEN]
-                    .copy_from_slice(&resp_hdr(VIRTIO_GPU_RESP_OK_CAPSET, flags, fence));
+                buf[..CTRL_HDR_LEN].copy_from_slice(&resp_hdr(
+                    VIRTIO_GPU_RESP_OK_CAPSET,
+                    flags,
+                    fence,
+                ));
                 buf[CTRL_HDR_LEN..].copy_from_slice(&caps);
                 Some(buf)
             }
@@ -898,7 +921,11 @@ impl Gpu {
         // pattern while the rest of the frame is correct.
         self.renderer.as_mut().unwrap().wait_sync(rid);
         let mut tmp = vec![0u8; (w * h * BPP) as usize];
-        let rc = self.renderer.as_mut().unwrap().read_pixels(rid, w, h, &mut tmp);
+        let rc = self
+            .renderer
+            .as_mut()
+            .unwrap()
+            .read_pixels(rid, w, h, &mut tmp);
         if rc == 0 {
             let mut fb = self.scanout.fb.lock().unwrap();
             let n = fb.bytes.len().min(tmp.len());
@@ -916,12 +943,16 @@ impl Gpu {
         use crate::virtio::pci::{PCI_SHM_BASE, PCI_SHM_SIZE};
         let err = |t: u32| resp_hdr(t, flags, fence).to_vec();
 
-        let Some((host_ptr, size)) = self.renderer.as_mut().unwrap().resource_map(resource_id) else {
+        let Some((host_ptr, size)) = self.renderer.as_mut().unwrap().resource_map(resource_id)
+        else {
             eprintln!("[gpu3d] map_blob res={resource_id}: stream_renderer_resource_map failed");
             return err(VIRTIO_GPU_RESP_ERR_UNSPEC);
         };
         let ipa = PCI_SHM_BASE + offset;
-        if offset.checked_add(size).is_none_or(|end| end > PCI_SHM_SIZE) {
+        if offset
+            .checked_add(size)
+            .is_none_or(|end| end > PCI_SHM_SIZE)
+        {
             eprintln!(
                 "[gpu3d] map_blob res={resource_id} offset={offset:#x} size={size:#x} exceeds the {PCI_SHM_SIZE:#x} shmem window"
             );
@@ -940,7 +971,12 @@ impl Gpu {
         }
         let rw = crate::HV_MEMORY_READ | crate::HV_MEMORY_WRITE;
         let rc = unsafe {
-            crate::hv_vm_map(host_ptr as *mut std::os::raw::c_void, ipa, size as usize, rw)
+            crate::hv_vm_map(
+                host_ptr as *mut std::os::raw::c_void,
+                ipa,
+                size as usize,
+                rw,
+            )
         };
         if rc != crate::HV_SUCCESS {
             eprintln!(
@@ -952,7 +988,11 @@ impl Gpu {
             return err(VIRTIO_GPU_RESP_ERR_UNSPEC);
         }
         self.blob_maps.insert(resource_id, (offset, size));
-        let map_info = self.renderer.as_mut().unwrap().resource_map_info(resource_id);
+        let map_info = self
+            .renderer
+            .as_mut()
+            .unwrap()
+            .resource_map_info(resource_id);
         println!(
             "[gpu3d] map_blob res={resource_id} -> ipa {ipa:#x} size {size:#x} map_info {map_info:#x} (host-visible ASG ring live)"
         );
@@ -1069,7 +1109,10 @@ fn scatter_backing(mem: &Mem, entries: &[(u64, u32)], src: &[u8]) {
             break;
         }
         let n = (len as usize).min(src.len() - off);
-        if mem.write_slice(&src[off..off + n], GuestAddress(addr)).is_err() {
+        if mem
+            .write_slice(&src[off..off + n], GuestAddress(addr))
+            .is_err()
+        {
             break;
         }
         off += n;
@@ -1079,7 +1122,10 @@ fn scatter_backing(mem: &Mem, entries: &[(u64, u32)], src: &[u8]) {
 /// Split a descriptor chain into (device-readable bytes, device-writable (addr,len) list). The
 /// device-readable descriptors carry the command struct (+ any trailing mem entries); the
 /// device-writable ones receive the response.
-fn split_chain(mem: &Mem, chain: virtio_queue::DescriptorChain<&Mem>) -> (Vec<u8>, Vec<(u64, u32)>) {
+fn split_chain(
+    mem: &Mem,
+    chain: virtio_queue::DescriptorChain<&Mem>,
+) -> (Vec<u8>, Vec<(u64, u32)>) {
     let descs: Vec<(u64, u32, bool)> = chain
         .map(|d| (d.addr().0, d.len(), d.is_write_only()))
         .collect();
@@ -1121,7 +1167,10 @@ fn write_scatter(mem: &Mem, writable: &[(u64, u32)], bytes: &[u8]) -> u32 {
             break;
         }
         let n = (len as usize).min(bytes.len() - off);
-        if mem.write_slice(&bytes[off..off + n], GuestAddress(addr)).is_ok() {
+        if mem
+            .write_slice(&bytes[off..off + n], GuestAddress(addr))
+            .is_ok()
+        {
             off += n;
         } else {
             break;
@@ -1199,7 +1248,8 @@ fn build_edid(width: u32, height: u32, dpi: u32) -> [u8; 128] {
     }
     // Detailed timing descriptor 1: 1024x768@60 (65.00 MHz pixel clock), physical mm from dpi.
     let dtd1: [u8; 18] = [
-        0x64, 0x19, // pixel clock 6500 (65.00 MHz)
+        0x64,
+        0x19, // pixel clock 6500 (65.00 MHz)
         0x00, // hactive low  (1024 & 0xff)
         0x40, // hblank low   (320 & 0xff)
         0x41, // hactive/hblank high nibbles (4,1)
@@ -1274,7 +1324,7 @@ mod tests {
         let resp = gpu.resp_edid(0, 0);
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_OK_EDID as u64);
         assert_eq!(read_le(&resp, CTRL_HDR_LEN as usize, 4), 128); // size field
-        // EDID payload begins at hdr(24)+size(4)+padding(4) = 32, with the header magic.
+                                                                   // EDID payload begins at hdr(24)+size(4)+padding(4) = 32, with the header magic.
         assert_eq!(resp[32], 0x00);
         assert_eq!(resp[33], 0xFF);
     }
@@ -1307,7 +1357,7 @@ mod tests {
         cmd.extend_from_slice(&1u32.to_le_bytes()); // format
         cmd.extend_from_slice(&64u32.to_le_bytes()); // width
         cmd.extend_from_slice(&64u32.to_le_bytes()); // height
-        // dispatch needs a Mem; craft a tiny one.
+                                                     // dispatch needs a Mem; craft a tiny one.
         let mem = vm_memory::GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
         let resp = gpu.dispatch(&mem, &cmd);
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_OK_NODATA as u64);
@@ -1323,7 +1373,8 @@ mod tests {
     #[test]
     fn transfer_and_flush_move_pixels_to_framebuffer() {
         let mut gpu = Gpu::new(2, 2);
-        let mem = vm_memory::GuestMemoryMmap::from_ranges(&[(GuestAddress(0x1000), 0x1000)]).unwrap();
+        let mem =
+            vm_memory::GuestMemoryMmap::from_ranges(&[(GuestAddress(0x1000), 0x1000)]).unwrap();
         // A 2x2 BGRA image = 16 bytes of guest backing at 0x1000.
         let pixels: [u8; 16] = [
             0x11, 0x22, 0x33, 0xff, 0x44, 0x55, 0x66, 0xff, 0x77, 0x88, 0x99, 0xff, 0xaa, 0xbb,
@@ -1511,20 +1562,40 @@ mod tests_3d {
         flush.extend_from_slice(&0u32.to_le_bytes());
         gpu.dispatch(&mem, &flush);
 
-        assert_eq!(handle.generation(), before + 1, "3D flush must bump the scanout generation");
+        assert_eq!(
+            handle.generation(),
+            before + 1,
+            "3D flush must bump the scanout generation"
+        );
         {
             let fb = handle.fb.lock().unwrap();
-            assert_eq!((fb.width, fb.height), (32, 32), "scanout resized to the 3D resource");
-            assert!(fb.non_zero_bytes() > 0, "read_pixels must fill the presented scanout");
+            assert_eq!(
+                (fb.width, fb.height),
+                (32, 32),
+                "scanout resized to the 3D resource"
+            );
+            assert!(
+                fb.non_zero_bytes() > 0,
+                "read_pixels must fill the presented scanout"
+            );
         }
 
         let calls = log.lock().unwrap();
         assert!(
-            calls.iter().any(|c| matches!(c, Call::ResourceCreate3d(a) if a.resource_id == 10 && a.width == 32)),
+            calls.iter().any(
+                |c| matches!(c, Call::ResourceCreate3d(a) if a.resource_id == 10 && a.width == 32)
+            ),
             "RESOURCE_CREATE_3D did not route: {calls:?}"
         );
         assert!(
-            calls.iter().any(|c| matches!(c, Call::ReadPixels { resource_id: 10, w: 32, h: 32 })),
+            calls.iter().any(|c| matches!(
+                c,
+                Call::ReadPixels {
+                    resource_id: 10,
+                    w: 32,
+                    h: 32
+                }
+            )),
             "RESOURCE_FLUSH did not read the 3D resource back for presenting: {calls:?}"
         );
     }
@@ -1593,12 +1664,18 @@ mod tests_3d {
         let (mock, log) = MockRenderer::with_present_rc(1);
         let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
         let mem = mem();
-        gpu.handle().metal_layer.store(0xBEEF_0000, Ordering::Release);
+        gpu.handle()
+            .metal_layer
+            .store(0xBEEF_0000, Ordering::Release);
 
         let before = gpu.handle().generation();
         let handle = flush_scanout_3d(&mut gpu, &mem, 10, 32, 32);
 
-        assert_eq!(handle.generation(), before + 1, "a dropped frame still advances the generation");
+        assert_eq!(
+            handle.generation(),
+            before + 1,
+            "a dropped frame still advances the generation"
+        );
         let calls = log.lock().unwrap();
         assert!(
             !calls.iter().any(|c| matches!(c, Call::ReadPixels { .. })),
@@ -1614,22 +1691,40 @@ mod tests_3d {
         let (mock, log) = MockRenderer::with_present_rc(-4);
         let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
         let mem = mem();
-        gpu.handle().metal_layer.store(0xDEAD_0000, Ordering::Release);
+        gpu.handle()
+            .metal_layer
+            .store(0xDEAD_0000, Ordering::Release);
 
         let handle = flush_scanout_3d(&mut gpu, &mem, 10, 32, 32);
 
         {
             let fb = handle.fb.lock().unwrap();
             assert_eq!((fb.width, fb.height), (32, 32));
-            assert!(fb.non_zero_bytes() > 0, "the fallback must fill the CPU scanout");
+            assert!(
+                fb.non_zero_bytes() > 0,
+                "the fallback must fill the CPU scanout"
+            );
         }
         let calls = log.lock().unwrap();
         assert!(
-            calls.iter().any(|c| matches!(c, Call::PresentToLayer { resource_id: 10, .. })),
+            calls.iter().any(|c| matches!(
+                c,
+                Call::PresentToLayer {
+                    resource_id: 10,
+                    ..
+                }
+            )),
             "the in-Vulkan present must be attempted before falling back: {calls:?}"
         );
         assert!(
-            calls.iter().any(|c| matches!(c, Call::ReadPixels { resource_id: 10, w: 32, h: 32 })),
+            calls.iter().any(|c| matches!(
+                c,
+                Call::ReadPixels {
+                    resource_id: 10,
+                    w: 32,
+                    h: 32
+                }
+            )),
             "a negative present status must fall back to stream_renderer_transfer_read: {calls:?}"
         );
     }
@@ -1699,11 +1794,15 @@ mod tests_3d {
 
         let calls = log.lock().unwrap();
         assert!(
-            calls.iter().any(|c| matches!(c, Call::DetachBacking { resource_id: 10 })),
+            calls
+                .iter()
+                .any(|c| matches!(c, Call::DetachBacking { resource_id: 10 })),
             "unref must drop the iovecs gfxstream holds into guest memory: {calls:?}"
         );
         assert!(
-            calls.iter().any(|c| matches!(c, Call::ResourceUnref { resource_id: 10 })),
+            calls
+                .iter()
+                .any(|c| matches!(c, Call::ResourceUnref { resource_id: 10 })),
             "unref must reach stream_renderer_resource_unref: {calls:?}"
         );
     }
@@ -1732,7 +1831,9 @@ mod tests_3d {
 
         let calls = log.lock().unwrap();
         assert!(
-            calls.iter().any(|c| matches!(c, Call::DetachBacking { resource_id: 11 })),
+            calls
+                .iter()
+                .any(|c| matches!(c, Call::DetachBacking { resource_id: 11 })),
             "DETACH_BACKING did not route into stream_renderer_resource_detach_iov: {calls:?}"
         );
     }
@@ -1789,8 +1890,15 @@ mod tests_3d {
             c.extend_from_slice(&id.to_le_bytes());
             c.extend_from_slice(&0u32.to_le_bytes());
             let resp = gpu.dispatch(&mem, &c);
-            assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_OK_RESOURCE_UUID as u64);
-            assert_eq!(resp.len(), CTRL_HDR_LEN + 16, "uuid response is hdr + 16 bytes");
+            assert_eq!(
+                read_le(&resp, 0, 4),
+                VIRTIO_GPU_RESP_OK_RESOURCE_UUID as u64
+            );
+            assert_eq!(
+                resp.len(),
+                CTRL_HDR_LEN + 16,
+                "uuid response is hdr + 16 bytes"
+            );
             resp[CTRL_HDR_LEN..].to_vec()
         };
 

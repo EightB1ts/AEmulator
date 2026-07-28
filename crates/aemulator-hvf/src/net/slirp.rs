@@ -193,7 +193,11 @@ impl SlirpNet {
     /// Run the slirp poll pump until `done` is set. `on_rx_ready` is invoked after each pump tick so
     /// the caller can flush any freshly-arrived RX frames into the guest receiveq + raise the IRQ.
     /// Blocks — call from a dedicated thread.
-    pub fn run_poll_thread<F: FnMut()>(self: &Arc<Self>, done: Arc<AtomicBool>, mut on_rx_ready: F) {
+    pub fn run_poll_thread<F: FnMut()>(
+        self: &Arc<Self>,
+        done: Arc<AtomicBool>,
+        mut on_rx_ready: F,
+    ) {
         while !done.load(Ordering::Relaxed) {
             // Fill (locked) → capture fds ptr + count + timeout.
             let (fds_ptr, nfds, timeout_ms) = {
@@ -224,7 +228,7 @@ impl SlirpNet {
                 if g.0.is_null() {
                     break;
                 }
-                unsafe { aemu_slirp_poll_result(g.0, if ret < 0 { 1 } else { 0}) };
+                unsafe { aemu_slirp_poll_result(g.0, if ret < 0 { 1 } else { 0 }) };
             }
 
             // Deliver whatever landed in the RX buffer.

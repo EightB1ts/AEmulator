@@ -14,7 +14,9 @@ fn main() {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        eprintln!("aemulator-hvf: requires macOS + Apple Hypervisor.framework (this host is not macOS).");
+        eprintln!(
+            "aemulator-hvf: requires macOS + Apple Hypervisor.framework (this host is not macOS)."
+        );
         std::process::exit(2);
     }
 }
@@ -106,7 +108,10 @@ mod macos {
                 }
             }
             Err(e) => {
-                eprintln!("[client] connect {}: {e} — is `aemulator-hvf control` running?", sock.display());
+                eprintln!(
+                    "[client] connect {}: {e} — is `aemulator-hvf control` running?",
+                    sock.display()
+                );
                 1
             }
         }
@@ -436,12 +441,22 @@ mod macos {
             Part("super.raw.img", "super", false, false),
             Part("vbmeta.img", "vbmeta_a", false, false),
             Part("vbmeta_system.img", "vbmeta_system_a", false, false),
-            Part("vbmeta_vendor_dlkm.img", "vbmeta_vendor_dlkm_a", false, false),
+            Part(
+                "vbmeta_vendor_dlkm.img",
+                "vbmeta_vendor_dlkm_a",
+                false,
+                false,
+            ),
             // The 64-bit-only android16 image (aosp_cf_arm64_only_phone) adds a `vbmeta_system_dlkm`
             // chained vbmeta; its first-stage `BlockDevInitializer` blocks 10s then fatal-reboots when
             // `/dev/block/by-name/vbmeta_system_dlkm_a` is absent. Skip-if-missing keeps the older
             // dual-ABI aosp_cf_arm64_phone image (no such file) unaffected.
-            Part("vbmeta_system_dlkm.img", "vbmeta_system_dlkm_a", false, false),
+            Part(
+                "vbmeta_system_dlkm.img",
+                "vbmeta_system_dlkm_a",
+                false,
+                false,
+            ),
             Part("boot.img", "boot_a", false, false),
             Part("init_boot.img", "init_boot_a", false, false),
             Part("vendor_boot.img", "vendor_boot_a", false, false),
@@ -623,7 +638,9 @@ mod macos {
                     // it, so /data mounts read-only and keystore2's DB + `vdc cryptfs init_user0` +
                     // apexd's decompression all fail. Grow it to a usable size so /data can format.
                     match ensure_size(&path, 6 * 1024 * 1024 * 1024) {
-                        Ok(true) => println!("[android] grew userdata → 6144 MiB (formattable /data)"),
+                        Ok(true) => {
+                            println!("[android] grew userdata → 6144 MiB (formattable /data)")
+                        }
                         Ok(false) => {}
                         Err(e) => return err(&format!("size {path:?}: {e}")),
                     }
@@ -639,7 +656,9 @@ mod macos {
                             println!("[android] vbmeta_a: VERIFICATION_DISABLED (flag=2) → {p:?}");
                             path = p;
                         }
-                        Err(e) => println!("[android][warn] vbmeta patch failed ({e}); using original"),
+                        Err(e) => {
+                            println!("[android][warn] vbmeta patch failed ({e}); using original")
+                        }
                     }
                 }
                 parts.push(PartitionSpec {
@@ -843,7 +862,10 @@ mod macos {
                 make_empty(path, bytes)?;
                 return Ok(true);
             }
-            let f = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+            let f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)?;
             let cur = f.metadata()?.len();
             if cur < bytes {
                 f.set_len(bytes)?;
@@ -856,7 +878,10 @@ mod macos {
         /// (flags = 2) set in its header, so libavb short-circuits verification and fs_mgr mounts the
         /// partitions without dm-verity. The `flags` field is a **big-endian u32 at offset 120** of
         /// `AvbVBMetaImageHeader`. Returns the patched copy's path (`vbmeta.verifydisabled.img`).
-        fn patch_vbmeta_verification_disabled(src: &Path, img_dir: &Path) -> std::io::Result<PathBuf> {
+        fn patch_vbmeta_verification_disabled(
+            src: &Path,
+            img_dir: &Path,
+        ) -> std::io::Result<PathBuf> {
             let mut data = std::fs::read(src)?;
             if data.len() < 124 || &data[0..4] != b"AVB0" {
                 return Err(std::io::Error::new(

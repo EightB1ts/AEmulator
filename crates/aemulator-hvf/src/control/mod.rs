@@ -97,9 +97,23 @@ impl Controller {
     /// A single tap: touch-down at (x,y), brief hold, touch-up.
     fn tap(&self, exec: &Exec, x: i64, y: i64) {
         let (ax, ay) = self.map_abs(x, y);
-        self.send(exec, vec![(EV_ABS, ABS_X, ax), (EV_ABS, ABS_Y, ay), (EV_KEY, BTN_TOUCH, 1)]);
+        self.send(
+            exec,
+            vec![
+                (EV_ABS, ABS_X, ax),
+                (EV_ABS, ABS_Y, ay),
+                (EV_KEY, BTN_TOUCH, 1),
+            ],
+        );
         std::thread::sleep(Duration::from_millis(60));
-        self.send(exec, vec![(EV_ABS, ABS_X, ax), (EV_ABS, ABS_Y, ay), (EV_KEY, BTN_TOUCH, 0)]);
+        self.send(
+            exec,
+            vec![
+                (EV_ABS, ABS_X, ax),
+                (EV_ABS, ABS_Y, ay),
+                (EV_KEY, BTN_TOUCH, 0),
+            ],
+        );
     }
 
     /// A directional drag from (x1,y1) to (x2,y2) over `ms` milliseconds (interpolated moves).
@@ -108,7 +122,14 @@ impl Controller {
         let (ax2, ay2) = self.map_abs(x2, y2);
         let steps: i64 = 24;
         let step_ms = (ms / steps as u64).max(4);
-        self.send(exec, vec![(EV_ABS, ABS_X, ax1), (EV_ABS, ABS_Y, ay1), (EV_KEY, BTN_TOUCH, 1)]);
+        self.send(
+            exec,
+            vec![
+                (EV_ABS, ABS_X, ax1),
+                (EV_ABS, ABS_Y, ay1),
+                (EV_KEY, BTN_TOUCH, 1),
+            ],
+        );
         std::thread::sleep(Duration::from_millis(step_ms));
         for s in 1..=steps {
             let ax = ax1 + ((ax2 - ax1) as i64 * s / steps) as i32;
@@ -116,7 +137,14 @@ impl Controller {
             self.send(exec, vec![(EV_ABS, ABS_X, ax), (EV_ABS, ABS_Y, ay)]);
             std::thread::sleep(Duration::from_millis(step_ms));
         }
-        self.send(exec, vec![(EV_ABS, ABS_X, ax2), (EV_ABS, ABS_Y, ay2), (EV_KEY, BTN_TOUCH, 0)]);
+        self.send(
+            exec,
+            vec![
+                (EV_ABS, ABS_X, ax2),
+                (EV_ABS, ABS_Y, ay2),
+                (EV_KEY, BTN_TOUCH, 0),
+            ],
+        );
     }
 
     /// Inject a single evdev key (press then release).
@@ -176,7 +204,11 @@ impl Controller {
     fn fb_hash(&self) -> (u64, u64, usize) {
         let gen = self.scanout.generation();
         let fb = self.scanout.fb.lock().unwrap();
-        (fnv1a(&fb.bytes), gen, fb.bytes.iter().filter(|b| **b != 0).count())
+        (
+            fnv1a(&fb.bytes),
+            gen,
+            fb.bytes.iter().filter(|b| **b != 0).count(),
+        )
     }
 
     /// Poll the framebuffer until its content-hash holds steady for `stable_ticks` consecutive
@@ -234,7 +266,15 @@ impl Controller {
             Ok(()) => {
                 let gen = self.scanout.generation();
                 let nz = rgb.iter().filter(|b| **b != 0).count();
-                format!("OK {} {}x{} gen={} nonzero={} bytes={}", path.display(), w, h, gen, nz, png.len())
+                format!(
+                    "OK {} {}x{} gen={} nonzero={} bytes={}",
+                    path.display(),
+                    w,
+                    h,
+                    gen,
+                    nz,
+                    png.len()
+                )
             }
             Err(e) => format!("ERR write {}: {e}", path.display()),
         }
@@ -454,14 +494,20 @@ pub fn run_control(bridge: DisplayBridge, opts: ControlOpts) {
 
     let stop = Arc::new(AtomicBool::new(false));
     let controller = Arc::new(Controller {
-        inner: Mutex::new(Exec { input_tx, console_tx }),
+        inner: Mutex::new(Exec {
+            input_tx,
+            console_tx,
+        }),
         scanout,
         width,
         height,
         stop: stop.clone(),
     });
 
-    let socket_path = opts.socket.clone().unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET));
+    let socket_path = opts
+        .socket
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET));
     // Fresh socket each run.
     let _ = std::fs::remove_file(&socket_path);
     let listener = match UnixListener::bind(&socket_path) {
@@ -471,7 +517,10 @@ pub fn run_control(bridge: DisplayBridge, opts: ControlOpts) {
             Some(l)
         }
         Err(e) => {
-            eprintln!("[control] could not bind {}: {e} (socket transport disabled)", socket_path.display());
+            eprintln!(
+                "[control] could not bind {}: {e} (socket transport disabled)",
+                socket_path.display()
+            );
             None
         }
     };
@@ -623,7 +672,9 @@ pub fn client_send(socket: &Path, command: &str) -> std::io::Result<String> {
 }
 
 fn parse_ints(s: &str) -> Vec<i64> {
-    s.split_whitespace().filter_map(|t| t.parse::<i64>().ok()).collect()
+    s.split_whitespace()
+        .filter_map(|t| t.parse::<i64>().ok())
+        .collect()
 }
 
 /// Write a frame so a concurrent reader can NEVER observe a partial one.
@@ -778,15 +829,56 @@ fn char_to_key(ch: char) -> Option<(u16, bool)> {
     let lower = ch.to_ascii_lowercase();
     let shift = ch.is_ascii_uppercase() || "~!@#$%^&*()_+{}|:\"<>?".contains(ch);
     let code: u16 = match lower {
-        'a' => 30, 'b' => 48, 'c' => 46, 'd' => 32, 'e' => 18, 'f' => 33, 'g' => 34, 'h' => 35,
-        'i' => 23, 'j' => 36, 'k' => 37, 'l' => 38, 'm' => 50, 'n' => 49, 'o' => 24, 'p' => 25,
-        'q' => 16, 'r' => 19, 's' => 31, 't' => 20, 'u' => 22, 'v' => 47, 'w' => 17, 'x' => 45,
-        'y' => 21, 'z' => 44,
-        '1' | '!' => 2, '2' | '@' => 3, '3' | '#' => 4, '4' | '$' => 5, '5' | '%' => 6,
-        '6' | '^' => 7, '7' | '&' => 8, '8' | '*' => 9, '9' | '(' => 10, '0' | ')' => 11,
-        '-' | '_' => 12, '=' | '+' => 13, '[' | '{' => 26, ']' | '}' => 27, '\\' | '|' => 43,
-        ';' | ':' => 39, '\'' | '"' => 40, '`' | '~' => 41, ',' | '<' => 51, '.' | '>' => 52,
-        '/' | '?' => 53, ' ' => 57, '\n' => 28, '\t' => 15,
+        'a' => 30,
+        'b' => 48,
+        'c' => 46,
+        'd' => 32,
+        'e' => 18,
+        'f' => 33,
+        'g' => 34,
+        'h' => 35,
+        'i' => 23,
+        'j' => 36,
+        'k' => 37,
+        'l' => 38,
+        'm' => 50,
+        'n' => 49,
+        'o' => 24,
+        'p' => 25,
+        'q' => 16,
+        'r' => 19,
+        's' => 31,
+        't' => 20,
+        'u' => 22,
+        'v' => 47,
+        'w' => 17,
+        'x' => 45,
+        'y' => 21,
+        'z' => 44,
+        '1' | '!' => 2,
+        '2' | '@' => 3,
+        '3' | '#' => 4,
+        '4' | '$' => 5,
+        '5' | '%' => 6,
+        '6' | '^' => 7,
+        '7' | '&' => 8,
+        '8' | '*' => 9,
+        '9' | '(' => 10,
+        '0' | ')' => 11,
+        '-' | '_' => 12,
+        '=' | '+' => 13,
+        '[' | '{' => 26,
+        ']' | '}' => 27,
+        '\\' | '|' => 43,
+        ';' | ':' => 39,
+        '\'' | '"' => 40,
+        '`' | '~' => 41,
+        ',' | '<' => 51,
+        '.' | '>' => 52,
+        '/' | '?' => 53,
+        ' ' => 57,
+        '\n' => 28,
+        '\t' => 15,
         _ => return None,
     };
     Some((code, shift))
@@ -803,10 +895,7 @@ mod tests {
         // stale file forever with no error anywhere.
         let p = "/Users/cam/Library/Application Support/com.avnir.aemulator-studio/instances/x/live.raw";
         assert_eq!(parse_frame_args(p), (p, None));
-        assert_eq!(
-            parse_frame_args(&format!("{p} since=42")),
-            (p, Some(42))
-        );
+        assert_eq!(parse_frame_args(&format!("{p} since=42")), (p, Some(42)));
     }
 
     /// The `ERR write …/live.raw: No such file or directory (os error 2)` regression, reproduced
@@ -837,24 +926,34 @@ mod tests {
         let mut handles = Vec::new();
         for t in 0..6 {
             // Half the threads target `live.raw`, half `live.png` — the stem-collision case.
-            let (path, payload) =
-                if t % 2 == 0 { (raw.clone(), big.clone()) } else { (png.clone(), small.clone()) };
+            let (path, payload) = if t % 2 == 0 {
+                (raw.clone(), big.clone())
+            } else {
+                (png.clone(), small.clone())
+            };
             let (raw_len, png_len) = (big.len(), small.len());
             let errors = errors.clone();
             handles.push(std::thread::spawn(move || {
                 for _ in 0..40 {
                     if let Err(e) = write_frame_atomic(&path, &payload) {
-                        errors.lock().unwrap().push(format!("{}: {e}", path.display()));
+                        errors
+                            .lock()
+                            .unwrap()
+                            .push(format!("{}: {e}", path.display()));
                     }
                     // Any successful read must see one writer's complete payload, never a mix.
                     if let Ok(got) = std::fs::read(&path) {
-                        let expected =
-                            if path.extension().unwrap() == "raw" { raw_len } else { png_len };
+                        let expected = if path.extension().unwrap() == "raw" {
+                            raw_len
+                        } else {
+                            png_len
+                        };
                         if got.len() != expected {
-                            errors
-                                .lock()
-                                .unwrap()
-                                .push(format!("{}: torn read {} != {expected}", path.display(), got.len()));
+                            errors.lock().unwrap().push(format!(
+                                "{}: torn read {} != {expected}",
+                                path.display(),
+                                got.len()
+                            ));
                         }
                     }
                 }
@@ -865,7 +964,12 @@ mod tests {
         }
 
         let errs = errors.lock().unwrap();
-        assert!(errs.is_empty(), "concurrent writes must not collide, got {} error(s): {:?}", errs.len(), &errs[..errs.len().min(5)]);
+        assert!(
+            errs.is_empty(),
+            "concurrent writes must not collide, got {} error(s): {:?}",
+            errs.len(),
+            &errs[..errs.len().min(5)]
+        );
 
         // No temp files may survive a clean run.
         let leftovers: Vec<_> = std::fs::read_dir(&dir)
@@ -881,18 +985,31 @@ mod tests {
 
     #[test]
     fn fnv1a_distinguishes_content() {
-        assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325, "empty input is the FNV offset basis");
+        assert_eq!(
+            fnv1a(b""),
+            0xcbf2_9ce4_8422_2325,
+            "empty input is the FNV offset basis"
+        );
         assert_ne!(fnv1a(b"a"), fnv1a(b"b"));
     }
 
     #[test]
     fn frame_args_edge_cases() {
         assert_eq!(parse_frame_args("/tmp/a.raw"), ("/tmp/a.raw", None));
-        assert_eq!(parse_frame_args("/tmp/a.raw since=7"), ("/tmp/a.raw", Some(7)));
+        assert_eq!(
+            parse_frame_args("/tmp/a.raw since=7"),
+            ("/tmp/a.raw", Some(7))
+        );
         // A trailing token that merely looks like a flag is part of the path.
-        assert_eq!(parse_frame_args("/tmp/since=7.raw"), ("/tmp/since=7.raw", None));
+        assert_eq!(
+            parse_frame_args("/tmp/since=7.raw"),
+            ("/tmp/since=7.raw", None)
+        );
         // Malformed generation → treated as absent, path still intact.
-        assert_eq!(parse_frame_args("/tmp/a.raw since=xx"), ("/tmp/a.raw", None));
+        assert_eq!(
+            parse_frame_args("/tmp/a.raw since=xx"),
+            ("/tmp/a.raw", None)
+        );
         // No path at all → caller must reject.
         assert_eq!(parse_frame_args("since=3"), ("", Some(3)));
         assert_eq!(parse_frame_args(""), ("", None));

@@ -26,7 +26,9 @@ fn gfxstream_build_host() -> PathBuf {
     if let Some(dir) = std::env::var_os("GFXSTREAM_BUILD_HOST") {
         return PathBuf::from(dir);
     }
-    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is always set by cargo"));
+    let manifest = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is always set by cargo"),
+    );
     // <repo-root>/crates/aemulator-hvf → <repo-root>
     manifest
         .parent()
@@ -59,7 +61,8 @@ fn main() {
     // <prefix>/include/slirp, dylib under <prefix>/lib (glib is pulled transitively via
     // libslirp.dylib's own install-name dependency).
     if target_os == "macos" {
-        let slirp_prefix = brew_prefix("libslirp").unwrap_or_else(|| "/opt/homebrew/opt/libslirp".to_string());
+        let slirp_prefix =
+            brew_prefix("libslirp").unwrap_or_else(|| "/opt/homebrew/opt/libslirp".to_string());
         if !std::path::Path::new(&format!("{slirp_prefix}/lib")).exists() {
             panic!(
                 "libslirp not found at {slirp_prefix} — networking is a hard requirement of this \
@@ -87,7 +90,10 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GFXSTREAM_BUILD_HOST");
     let gfxstream_build_host = gfxstream_build_host();
     let gfxstream_build_host = gfxstream_build_host.display();
-    if !std::path::Path::new(&gfxstream_build_host.to_string()).join("libgfxstream_backend.dylib").exists() {
+    if !std::path::Path::new(&gfxstream_build_host.to_string())
+        .join("libgfxstream_backend.dylib")
+        .exists()
+    {
         panic!(
             "libgfxstream_backend.dylib not found in {gfxstream_build_host} — the GPU path is a hard \
              requirement of this VMM, not an optional feature. Build the host renderer first:\n  \
@@ -129,7 +135,10 @@ fn main() {
 
 /// `brew --prefix` (the Homebrew root, no formula). `None` if brew is absent.
 fn brew_prefix_root() -> Option<String> {
-    let out = std::process::Command::new("brew").arg("--prefix").output().ok()?;
+    let out = std::process::Command::new("brew")
+        .arg("--prefix")
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }

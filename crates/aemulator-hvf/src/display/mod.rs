@@ -27,9 +27,7 @@
 pub mod metal;
 
 use crate::machine::DisplayBridge;
-use crate::virtio::input::{
-    ABS_MAX, ABS_X, ABS_Y, BTN_LEFT, BTN_TOUCH, EV_ABS, EV_KEY,
-};
+use crate::virtio::input::{ABS_MAX, ABS_X, ABS_Y, BTN_LEFT, BTN_TOUCH, EV_ABS, EV_KEY};
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
@@ -201,7 +199,12 @@ pub fn run_event_loop(bridge: DisplayBridge) {
             // Phase 2 — prove touch on the running launcher: swipe up from the hotseat to open the
             // all-apps drawer (a visible UI change distinct from the home screen).
             std::thread::sleep(Duration::from_secs(4));
-            drag((ABS_MAX as i32) * 97 / 100, (ABS_MAX as i32) * 20 / 100, 20, 12);
+            drag(
+                (ABS_MAX as i32) * 97 / 100,
+                (ABS_MAX as i32) * 20 / 100,
+                20,
+                12,
+            );
             eprintln!("[display] touch-prove: app-drawer swipe-up injected");
         });
     }

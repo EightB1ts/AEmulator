@@ -203,7 +203,6 @@ impl Net {
         }
         used
     }
-
 }
 
 /// Scatter-write `hdr` followed by `frame` across the writable descriptor `targets` (addr, len) of a

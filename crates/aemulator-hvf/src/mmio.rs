@@ -118,7 +118,8 @@ impl Pl011 {
                 let _ = out.flush();
             }
             UARTIMSC => self.imsc = val as u32,
-            UARTICR => { /* interrupts are level-derived from the FIFO; nothing latched to clear */ }
+            UARTICR => { /* interrupts are level-derived from the FIFO; nothing latched to clear */
+            }
             _ => {}
         }
     }

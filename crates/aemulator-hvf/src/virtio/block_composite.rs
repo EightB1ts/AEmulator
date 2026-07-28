@@ -121,7 +121,9 @@ impl CompositeBlock {
                 .write(spec.writable)
                 .open(&spec.path)?;
             let file_len = file.metadata()?.len();
-            let length = file_len.next_multiple_of(PARTITION_ALIGN).max(PARTITION_ALIGN);
+            let length = file_len
+                .next_multiple_of(PARTITION_ALIGN)
+                .max(PARTITION_ALIGN);
             let offset = next_offset;
 
             // Write this partition's GPT entry.
@@ -565,7 +567,10 @@ fn write_gpt_header(
 ) {
     let primary_lba: u64 = 1;
     let secondary_lba: u64 = disk_size / SECTOR_SIZE - 1;
-    debug_assert_eq!(secondary_lba, (secondary_table_offset + GPT_END_SIZE) / SECTOR_SIZE - 1);
+    debug_assert_eq!(
+        secondary_lba,
+        (secondary_table_offset + GPT_END_SIZE) / SECTOR_SIZE - 1
+    );
 
     let mut h = [0u8; GPT_HEADER_SIZE as usize];
     h[0..8].copy_from_slice(b"EFI PART");
@@ -573,8 +578,16 @@ fn write_gpt_header(
     h[12..16].copy_from_slice(&GPT_HEADER_SIZE.to_le_bytes());
     // h[16..20] header_crc32 — filled after CRC.
     // h[20..24] reserved = 0.
-    let current = if secondary { secondary_lba } else { primary_lba };
-    let backup = if secondary { primary_lba } else { secondary_lba };
+    let current = if secondary {
+        secondary_lba
+    } else {
+        primary_lba
+    };
+    let backup = if secondary {
+        primary_lba
+    } else {
+        secondary_lba
+    };
     h[24..32].copy_from_slice(&current.to_le_bytes());
     h[32..40].copy_from_slice(&backup.to_le_bytes());
     h[40..48].copy_from_slice(&(GPT_BEGINNING_SIZE / SECTOR_SIZE).to_le_bytes()); // first usable
@@ -646,7 +659,11 @@ mod tests {
             0,
             "VIRTIO_BLK_F_FLUSH must be advertised or the guest never sends barriers"
         );
-        assert_ne!(feats & VIRTIO_F_VERSION_1, 0, "VERSION_1 must stay advertised");
+        assert_ne!(
+            feats & VIRTIO_F_VERSION_1,
+            0,
+            "VERSION_1 must stay advertised"
+        );
     }
 
     /// A guest barrier must reach the kernel. `flush_all` is the fdatasync path; a no-op flush (the
@@ -655,12 +672,21 @@ mod tests {
     #[test]
     fn flush_all_succeeds_over_mixed_writable_components() {
         let specs = vec![
-            PartitionSpec { label: "super".into(), path: tmp_img("fl-ro", 4096), writable: false },
-            PartitionSpec { label: "userdata".into(), path: tmp_img("fl-rw", 4096), writable: true },
+            PartitionSpec {
+                label: "super".into(),
+                path: tmp_img("fl-ro", 4096),
+                writable: false,
+            },
+            PartitionSpec {
+                label: "userdata".into(),
+                path: tmp_img("fl-rw", 4096),
+                writable: true,
+            },
         ];
         let mut cd = CompositeBlock::new(&specs).unwrap();
         // Read-only components are skipped; syncing them would fail on an O_RDONLY fd.
-        cd.flush_all().expect("flush over mixed rw/ro components must succeed");
+        cd.flush_all()
+            .expect("flush over mixed rw/ro components must succeed");
     }
 
     fn tmp_img(name: &str, bytes: u64) -> PathBuf {
@@ -706,7 +732,11 @@ mod tests {
         let stored_crc = u32::from_le_bytes(hdr[16..20].try_into().unwrap());
         let mut h2 = hdr;
         h2[16..20].copy_from_slice(&[0, 0, 0, 0]);
-        assert_eq!(crc32(&h2), stored_crc, "primary header CRC32 self-consistent");
+        assert_eq!(
+            crc32(&h2),
+            stored_crc,
+            "primary header CRC32 self-consistent"
+        );
 
         // Partition-array CRC in header must match the array actually written at LBA 2.
         let entries_crc = u32::from_le_bytes(hdr[88..92].try_into().unwrap());
@@ -720,7 +750,11 @@ mod tests {
             .collect();
         assert_eq!(String::from_utf16(&name).unwrap(), "super");
         let first_lba = u64::from_le_bytes(arr[32..40].try_into().unwrap());
-        assert_eq!(first_lba, GPT_BEGINNING_SIZE / SECTOR_SIZE, "super first LBA");
+        assert_eq!(
+            first_lba,
+            GPT_BEGINNING_SIZE / SECTOR_SIZE,
+            "super first LBA"
+        );
 
         // --- Backup GPT header at the very last sector. ---
         let mut bhdr = [0u8; 92];
@@ -742,6 +776,9 @@ mod tests {
         // Reading past a file's real length inside its aligned slot returns zeros (5000→8192).
         let mut tail = [0xffu8; 16];
         cd.read_at(boot_off + 5000, &mut tail).unwrap();
-        assert!(tail.iter().all(|&b| b == 0), "alignment tail is zero-filled");
+        assert!(
+            tail.iter().all(|&b| b == 0),
+            "alignment tail is zero-filled"
+        );
     }
 }

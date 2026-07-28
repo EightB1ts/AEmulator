@@ -24,7 +24,9 @@ fn main() {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        eprintln!("hvf-midr-probe: requires macOS + Apple Hypervisor.framework (this host is not macOS).");
+        eprintln!(
+            "hvf-midr-probe: requires macOS + Apple Hypervisor.framework (this host is not macOS)."
+        );
         std::process::exit(2);
     }
 }
@@ -72,7 +74,10 @@ mod macos {
         let page = host_page_size();
         println!("== hvf-midr-probe ==");
         println!("host page size: {} bytes", page);
-        println!("fake MIDR we will set: 0x{FAKE_QUALCOMM_MIDR:016x}  (implementer 0x{:02x})", (FAKE_QUALCOMM_MIDR >> 24) & 0xff);
+        println!(
+            "fake MIDR we will set: 0x{FAKE_QUALCOMM_MIDR:016x}  (implementer 0x{:02x})",
+            (FAKE_QUALCOMM_MIDR >> 24) & 0xff
+        );
 
         // --- 1. Create the VM (needs the hypervisor entitlement). ---
         hv_try!("hv_vm_create", hv_vm_create(ptr::null_mut()));
@@ -115,10 +120,11 @@ mod macos {
         }
 
         let flags = HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC;
-        hv_try!("hv_vm_map", hv_vm_map(host as *mut c_void, CODE_IPA, page, flags));
-        println!(
-            "[ok] hv_vm_map: host {host:p} -> IPA 0x{CODE_IPA:x} size {page} flags RWX"
+        hv_try!(
+            "hv_vm_map",
+            hv_vm_map(host as *mut c_void, CODE_IPA, page, flags)
         );
+        println!("[ok] hv_vm_map: host {host:p} -> IPA 0x{CODE_IPA:x} size {page} flags RWX");
 
         // --- 4. Create the vCPU on this thread. ---
         let mut vcpu: u64 = 0;
@@ -171,10 +177,7 @@ mod macos {
         );
 
         // --- Program the reset state: PC=code, x1=scratch IPA, CPSR=EL1h. ---
-        hv_try!(
-            "set PC",
-            hv_vcpu_set_reg(vcpu, HV_REG_PC, CODE_IPA)
-        );
+        hv_try!("set PC", hv_vcpu_set_reg(vcpu, HV_REG_PC, CODE_IPA));
         hv_try!(
             "set X1 (scratch IPA)",
             hv_vcpu_set_reg(vcpu, HV_REG_X1, CODE_IPA + SCRATCH_OFF)
@@ -251,7 +254,10 @@ mod macos {
         let real_impl = (real_midr >> 24) & 0xff;
         println!("\n---------------- VERDICT ----------------");
         println!("set_sys_reg success:  {set_ok}");
-        println!("we asked for:         0x{FAKE_QUALCOMM_MIDR:016x}  (impl 0x{:02x} Qualcomm)", (FAKE_QUALCOMM_MIDR >> 24) & 0xff);
+        println!(
+            "we asked for:         0x{FAKE_QUALCOMM_MIDR:016x}  (impl 0x{:02x} Qualcomm)",
+            (FAKE_QUALCOMM_MIDR >> 24) & 0xff
+        );
         println!("real Apple MIDR:      0x{real_midr:016x}  (impl 0x{real_impl:02x} Apple)");
         println!("guest actually saw:   0x{observed:016x}  (impl 0x{observed_impl:02x})");
         if observed == FAKE_QUALCOMM_MIDR {
@@ -259,7 +265,9 @@ mod macos {
         } else if observed_impl == 0x51 {
             println!("RESULT: SPOOF WORKS (implementer) — guest read a 0x51/Qualcomm implementer, value 0x{observed:016x}.");
         } else if observed == real_midr || observed_impl == real_impl {
-            println!("RESULT: SPOOF FAILS — guest read the REAL Apple MIDR; HVF ignored our write.");
+            println!(
+                "RESULT: SPOOF FAILS — guest read the REAL Apple MIDR; HVF ignored our write."
+            );
         } else {
             println!("RESULT: INCONCLUSIVE — guest read 0x{observed:016x}, neither our fake nor the plain Apple default.");
         }

@@ -237,7 +237,9 @@ impl Gic {
                     .and_then(|q| q.pop_front())
                     .unwrap_or(GIC_INTID_SPURIOUS) as u64,
             ),
-            SYSREG_ICC_PMR_EL1 | SYSREG_ICC_BPR1_EL1 | SYSREG_ICC_AP1R0_EL1
+            SYSREG_ICC_PMR_EL1
+            | SYSREG_ICC_BPR1_EL1
+            | SYSREG_ICC_AP1R0_EL1
             | SYSREG_ICC_IGRPEN1_EL1 => Some(0),
             SYSREG_ICC_SRE_EL1 => Some(0x7), // SRE | DFB | DIB — system-register interface enabled
             SYSREG_ICC_CTLR_EL1 => Some(
@@ -413,11 +415,7 @@ impl Gic {
                 self.gicr_waker = v;
             }
             // IGROUPR0/ISENABLER0/ICENABLER0/ICACTIVER0/IPRIORITYR/ICFGR1: accepted as no-ops.
-            GICR_IGROUPR0
-            | GICR_ISENABLER0
-            | GICR_ICENABLER0
-            | GICR_ICACTIVER0
-            | GICR_ICFGR1 => {}
+            GICR_IGROUPR0 | GICR_ISENABLER0 | GICR_ICENABLER0 | GICR_ICACTIVER0 | GICR_ICFGR1 => {}
             _ if (GICR_IPRIORITYR..GICR_IPRIORITYR + 0x400).contains(&off) => {}
             _ => {}
         }
@@ -481,7 +479,10 @@ mod tests {
         let mut gic = Gic::new(1);
         gic.set_irq(0, VTIMER_IRQ);
         assert!(gic.has_pending(0));
-        assert_eq!(gic.sysreg_read(0, SYSREG_ICC_IAR1_EL1), Some(VTIMER_IRQ as u64));
+        assert_eq!(
+            gic.sysreg_read(0, SYSREG_ICC_IAR1_EL1),
+            Some(VTIMER_IRQ as u64)
+        );
         assert!(!gic.has_pending(0));
         assert_eq!(gic.sysreg_read(0, SYSREG_ICC_IAR1_EL1), Some(1023));
     }

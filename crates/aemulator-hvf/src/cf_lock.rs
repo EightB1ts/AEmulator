@@ -130,10 +130,16 @@ mod tests {
             err.contains(&format!("pid {}", std::process::id())),
             "refusal should name the holder pid, got: {err}"
         );
-        assert!(err.contains("corrupt"), "refusal should say why, got: {err}");
+        assert!(
+            err.contains("corrupt"),
+            "refusal should say why, got: {err}"
+        );
 
         drop(held);
-        assert!(probe(&dir).is_none(), "probe must see the lock as free after release");
+        assert!(
+            probe(&dir).is_none(),
+            "probe must see the lock as free after release"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

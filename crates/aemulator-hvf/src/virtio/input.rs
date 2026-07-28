@@ -356,8 +356,16 @@ mod tests {
         }
         // INPUT_PROP_DIRECT is bit 1 → byte 0, mask 0x02 (touchscreen, not touchpad).
         assert!(!prop.is_empty());
-        assert_ne!(prop[0] & (1 << INPUT_PROP_DIRECT), 0, "must advertise INPUT_PROP_DIRECT");
-        assert_eq!(prop[0] & 0x01, 0, "must NOT advertise INPUT_PROP_POINTER (bit 0)");
+        assert_ne!(
+            prop[0] & (1 << INPUT_PROP_DIRECT),
+            0,
+            "must advertise INPUT_PROP_DIRECT"
+        );
+        assert_eq!(
+            prop[0] & 0x01,
+            0,
+            "must NOT advertise INPUT_PROP_POINTER (bit 0)"
+        );
     }
 
     #[test]

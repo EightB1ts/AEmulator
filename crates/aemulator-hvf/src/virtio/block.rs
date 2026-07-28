@@ -125,7 +125,11 @@ impl Block {
     }
 
     fn do_read(&mut self, mem: &Mem, sector: u64, data: &[(u64, u32, bool)]) -> (u8, u32) {
-        if self.file.seek(SeekFrom::Start(sector * SECTOR_SIZE)).is_err() {
+        if self
+            .file
+            .seek(SeekFrom::Start(sector * SECTOR_SIZE))
+            .is_err()
+        {
             return (VIRTIO_BLK_S_IOERR, 0);
         }
         let mut total = 0u32;
@@ -150,7 +154,11 @@ impl Block {
     }
 
     fn do_write(&mut self, mem: &Mem, sector: u64, data: &[(u64, u32, bool)]) -> u8 {
-        if self.file.seek(SeekFrom::Start(sector * SECTOR_SIZE)).is_err() {
+        if self
+            .file
+            .seek(SeekFrom::Start(sector * SECTOR_SIZE))
+            .is_err()
+        {
             return VIRTIO_BLK_S_IOERR;
         }
         for &(addr, len, write_only) in data {
