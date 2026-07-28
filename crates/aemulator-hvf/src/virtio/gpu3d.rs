@@ -147,11 +147,20 @@ pub struct CreateBlob {
 ///   * **outbound** — a guest fence request parsed out of a control command's ctrl header, handed to
 ///     [`Renderer3d::create_fence`];
 ///   * **inbound** — the completion gfxstream reports through
-///     [`on_fence_complete`], forwarded to the VMM's fence thread, which uses
-///     `(ctx_id, ring_idx, fence_id)` to find the guest command that was waiting on it.
+///     [`on_fence_complete`], forwarded to the VMM's fence thread, which derives the fence's timeline
+///     from it to find the guest command that was waiting on it.
 ///
 /// `ring_idx` is the per-context timeline (`VIRTIO_GPU_FLAG_INFO_RING_IDX`); Mesa asks for two rings
 /// and submits real queue work on ring 1, so it is part of the key, not decoration.
+///
+/// **The two directions are not symmetric, and assuming they were cost 17 watchdog firings per boot.**
+/// `flags` is authoritative in both, but `ctx_id`/`ring_idx` are only meaningful when
+/// `STREAM_RENDERER_FLAG_FENCE_RING_IDX` (`== VIRTIO_GPU_FLAG_INFO_RING_IDX`, both `1 << 1`) is set.
+/// Outbound, gfxstream reads that bit to choose `VirtioGpuRingContextSpecific{ctx_id, ring_idx}` or
+/// the device-wide `VirtioGpuRingGlobal`. Inbound, it rebuilds the struct **from the timeline**
+/// (`VirtioGpuFrontend::init`'s `fenceCompletionCallback`) starting from `= {0}`, so a global fence's
+/// completion reports `ctx_id = 0` and `ring_idx = 0` regardless of which context requested it. The
+/// timeline, not the tuple, is the identity — see `gpu::FenceTimeline`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FenceReq {
     pub flags: u32,

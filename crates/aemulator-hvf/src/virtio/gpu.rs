@@ -291,37 +291,103 @@ impl ReqHdr {
         self.flags & VIRTIO_GPU_FLAG_FENCE != 0
     }
 
-    /// The `(ctx_id, ring_idx, fence_id)` identity of this command's fence.
+    /// The timeline + id this command's fence will be reported on.
     fn fence_key(&self) -> FenceKey {
         FenceKey {
-            ctx_id: self.ctx_id,
-            ring_idx: self.ring_idx,
+            timeline: FenceTimeline::of(self.flags, self.ctx_id, self.ring_idx),
             fence_id: self.fence_id,
         }
     }
 }
 
-/// Identity of one in-flight fence. `ring_idx` is part of it, not an afterthought: two rings of the
-/// same context carry independent, independently-ordered fence streams.
+/// Which of the host renderer's fence timelines a fence lives on.
+///
+/// **This is the fix for the 2 s watchdog storm, and it is not cosmetic.** gfxstream keys fences by
+/// *timeline*, and it has exactly two kinds (`VirtioGpuRing` in `VirtioGpuTimelines.h`):
+///
+///   * `VirtioGpuRingGlobal` — one queue for the whole device, chosen by
+///     `stream_renderer_create_fence` whenever `STREAM_RENDERER_FLAG_FENCE_RING_IDX` is **absent**;
+///   * `VirtioGpuRingContextSpecific{ctx_id, ring_idx}` — chosen when it is present.
+///
+/// The completion callback is built from the timeline, not from the request
+/// (`VirtioGpuFrontend::init`'s `fenceCompletionCallback`): it starts as
+/// `stream_renderer_fence fence = {0}`, sets `fence_id` + `STREAM_RENDERER_FLAG_FENCE`, and only
+/// fills in `ctx_id`/`ring_idx` (plus the `_RING_IDX` flag) for the context-specific arm. So a fence
+/// the guest requested on context 13 **without** `VIRTIO_GPU_FLAG_INFO_RING_IDX` comes back reported
+/// as `ctx_id = 0`.
+///
+/// Filing the pending command under the *request's* `ctx_id` therefore filed it under a key no
+/// callback would ever carry. Measured over one Android boot (`AEMU_FENCE_TRACE=1`): 68 completions
+/// arrived with `flags=0x1`, **all 68** reporting `ctx_id=0`, against 24 commands filed with
+/// `flags=0x1` and a non-zero `ctx_id` — and exactly those 24 produced the 24 `matched=0` callbacks
+/// and the 18 watchdog firings. (24 filed vs 18 stalls: six were rescued late by a *different*,
+/// context-specific fence on the same `(ctx, ring)` sweeping them via `fence_id <=`.) The reason it
+/// looked like "most fences work" is that Linux only sets `INFO_RING_IDX` for fences on a
+/// userspace-requested ring context (`virtio_gpu_fence_alloc`'s `emit_fence_info`), so the
+/// overwhelmingly common `SUBMIT_3D`-on-ring-0 case is context-specific and matched fine, while every
+/// driver-internal fence on a 3D context (`RESOURCE_CREATE_3D`, `TRANSFER_*_3D`, the ASG handshake
+/// submits) is global and did not.
+///
+/// Modelling it as an enum rather than "normalise `ctx_id` to 0" is deliberate: `Global` and
+/// `Ring { ctx_id: 0, ring_idx: 0 }` are *different* timelines in gfxstream, so collapsing them into
+/// the same `(0, 0)` tuple would let a global completion retire a context-0 ring fence and vice
+/// versa. The type makes that unrepresentable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+enum FenceTimeline {
+    /// `VirtioGpuRingGlobal`. Also the timeline of every 2D command, whose header `ctx_id` is 0.
+    #[default]
+    Global,
+    /// `VirtioGpuRingContextSpecific`.
+    Ring { ctx_id: u32, ring_idx: u8 },
+}
+
+impl FenceTimeline {
+    /// Decide the timeline from the `flags` word, which is the **same bit** on both sides of the FFI:
+    /// `VIRTIO_GPU_FLAG_INFO_RING_IDX` and `STREAM_RENDERER_FLAG_FENCE_RING_IDX` are both `1 << 1`,
+    /// and `route_header_fence` hands the guest's `flags` to `stream_renderer_create_fence`
+    /// unmodified. So the request and the completion are classified by the identical predicate, which
+    /// is what makes the two keys agree by construction rather than by coincidence.
+    fn of(flags: u32, ctx_id: u32, ring_idx: u8) -> Self {
+        if flags & VIRTIO_GPU_FLAG_INFO_RING_IDX != 0 {
+            Self::Ring { ctx_id, ring_idx }
+        } else {
+            Self::Global
+        }
+    }
+}
+
+impl std::fmt::Display for FenceTimeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Global => write!(f, "global"),
+            Self::Ring { ctx_id, ring_idx } => write!(f, "ctx={ctx_id} ring={ring_idx}"),
+        }
+    }
+}
+
+/// Identity of one in-flight fence: **which ordered timeline** it is on, plus its id on that
+/// timeline. Two rings of the same context, and the device's global timeline, all carry independent
+/// streams, so the timeline is part of the key rather than decoration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 struct FenceKey {
-    ctx_id: u32,
-    ring_idx: u8,
+    timeline: FenceTimeline,
     fence_id: u64,
 }
 
 impl FenceKey {
+    /// The key a completion gfxstream reported belongs to. Classified from the **callback's** flags,
+    /// which is the only field that says which timeline signalled — see [`FenceTimeline`].
     fn of(fence: &FenceReq) -> Self {
         Self {
-            ctx_id: fence.ctx_id,
-            ring_idx: fence.ring_idx,
+            timeline: FenceTimeline::of(fence.flags, fence.ctx_id, fence.ring_idx),
             fence_id: fence.fence_id,
         }
     }
 
-    /// Same context + same ring — i.e. the same ordered fence timeline.
-    fn same_ring(&self, other: &Self) -> bool {
-        self.ctx_id == other.ctx_id && self.ring_idx == other.ring_idx
+    /// Same ordered fence timeline — the precondition for the `fence_id <=` sweep in
+    /// [`Gpu::complete_fence`], which is only valid *within* one timeline.
+    fn same_timeline(&self, other: &Self) -> bool {
+        self.timeline == other.timeline
     }
 }
 
@@ -774,24 +840,46 @@ impl Gpu {
     /// `vp_interrupt` reads it first and returns `IRQ_NONE` when it is zero, so an SPI raised without
     /// it is dropped on the floor.
     ///
-    /// `fence_id <= ` rather than `==` on purpose. Fences on one `(ctx_id, ring_idx)` timeline
-    /// complete **in order**, and the guest's fence ids are a single monotonic counter
-    /// (`drv->current_fence_id`), so a completion at id N implies everything earlier on that ring is
-    /// done. Keying strictly on equality would leave an earlier command wedged forever if gfxstream
-    /// ever coalesced or dropped a callback — a permanent guest hang recoverable only by the watchdog.
+    /// `fence_id <= ` rather than `==` on purpose. Fences on one [`FenceTimeline`] complete **in
+    /// order** (gfxstream's `VirtioGpuTimelines::poll_locked` drains one ring's queue front-to-back),
+    /// and the guest's fence ids are a single monotonic counter (`drv->current_fence_id`), so a
+    /// completion at id N implies everything earlier on that timeline is done. Keying strictly on
+    /// equality would leave an earlier command wedged forever if gfxstream ever coalesced or dropped a
+    /// callback — a permanent guest hang recoverable only by the watchdog.
+    ///
+    /// It is scoped to `same_timeline` for the same reason: the `<=` implication holds *within* a
+    /// timeline and nowhere else. Before [`FenceTimeline`] existed this loop was the only thing
+    /// keeping the guest alive on the mis-keyed global fences — an unrelated context-specific fence
+    /// would eventually sweep them by id — which is exactly why the bug read as an intermittent
+    /// 2 s stall instead of an immediate hang.
     pub fn complete_fence(&mut self, mem: &Mem, queue: &mut Queue, fence: &FenceReq) -> bool {
         let signalled = FenceKey::of(fence);
         let mut published = false;
+        let mut matched = 0usize;
         let mut i = 0;
         while i < self.pending_fences.len() {
             let (key, _) = &self.pending_fences[i];
-            if key.same_ring(&signalled) && key.fence_id <= signalled.fence_id {
+            if key.same_timeline(&signalled) && key.fence_id <= signalled.fence_id {
                 let (_, p) = self.pending_fences.remove(i);
                 Self::publish(mem, queue, &p);
                 published = true;
+                matched += 1;
             } else {
                 i += 1;
             }
+        }
+        if fence_trace() {
+            eprintln!(
+                "[fence-trace] CB   key=({} id={}) cb=(flags={:#x} ctx={} ring={} id={}) \
+                 matched={matched} still_pending={}",
+                signalled.timeline,
+                signalled.fence_id,
+                fence.flags,
+                fence.ctx_id,
+                fence.ring_idx,
+                fence.fence_id,
+                self.pending_fences.len()
+            );
         }
         published
     }
@@ -824,10 +912,11 @@ impl Gpu {
         if let Some((key, waited)) = first {
             eprintln!(
                 "[gpu3d] fence WATCHDOG: {swept} guest command(s) force-completed; the oldest \
-                 (ctx={} ring={} fence_id={}) had waited {waited:?}, past the {FENCE_DEADLINE:?} \
-                 deadline. The host renderer has stopped signalling fences — the control ring is \
-                 being kept moving at the cost of torn or stale frames.",
-                key.ctx_id, key.ring_idx, key.fence_id
+                 ({} fence_id={}) had waited {waited:?}, past the {FENCE_DEADLINE:?} deadline. The \
+                 host renderer has stopped signalling fences — the control ring is being kept \
+                 moving at the cost of torn or stale frames. Re-run with {FENCE_TRACE_ENV}=1 to see \
+                 the filed and delivered keys for every fence.",
+                key.timeline, key.fence_id
             );
         }
         swept > 0
@@ -912,10 +1001,21 @@ impl Gpu {
             }
             return Disposition::Complete(resp);
         }
-        Disposition::Deferred {
-            key: req.fence_key(),
-            resp,
+        let key = req.fence_key();
+        if fence_trace() {
+            eprintln!(
+                "[fence-trace] FILE key=({} id={}) req=(flags={:#x} ctx={} ring={} id={}) \
+                 cmd={:#06x}",
+                key.timeline,
+                key.fence_id,
+                req.flags,
+                req.ctx_id,
+                req.ring_idx,
+                req.fence_id,
+                req.cmd_type
+            );
         }
+        Disposition::Deferred { key, resp }
     }
 
     /// Dispatch a command whose header has already been parsed, returning the response bytes.
@@ -1551,6 +1651,12 @@ impl Gpu {
     /// from ten of them, so `RESOURCE_MAP_BLOB`, `RESOURCE_ASSIGN_UUID`, `GET_CAPSET_INFO`,
     /// `GET_CAPSET` and every 2D command created no host fence even with `FLAG_FENCE` set — harmless
     /// while responses were synchronous, a guaranteed guest hang the moment they are not.
+    ///
+    /// `flags` is forwarded **unmodified**, and that is load-bearing rather than lazy: bit 1 is
+    /// `VIRTIO_GPU_FLAG_INFO_RING_IDX` on the guest's side and `STREAM_RENDERER_FLAG_FENCE_RING_IDX`
+    /// on gfxstream's, and it is what `stream_renderer_create_fence` branches on to pick a
+    /// context-specific timeline over the global one. [`FenceTimeline::of`] classifies the request and
+    /// the completion with that same bit, which is why the filed key and the delivered key agree.
     fn route_header_fence(&mut self, req: &ReqHdr) -> bool {
         if !req.fenced() {
             return false;
@@ -2073,6 +2179,20 @@ fn sync_fences_forced() -> bool {
 /// process environment (which no test can do safely while the others run in parallel).
 fn sync_fences_requested(v: Option<&std::ffi::OsStr>) -> bool {
     v.is_some_and(|v| v != "0")
+}
+
+/// Environment variable that turns on per-fence tracing: one line for every deferred command's filed
+/// key and one for every completion gfxstream delivers.
+///
+/// Off by default and *very* loud when on (thousands of lines per boot). It exists because the only
+/// way to see a fence-key mismatch is to print both keys — the watchdog can only ever report the
+/// filed one, so a boot log without this shows a stall and gives no clue why.
+const FENCE_TRACE_ENV: &str = "AEMU_FENCE_TRACE";
+
+/// Whether per-fence tracing was requested. Cached like [`sync_fences_forced`].
+fn fence_trace() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os(FENCE_TRACE_ENV).is_some_and(|v| v != "0"))
 }
 
 /// Read a little-endian value of `len` ∈ {1,2,4,8} bytes at `off`, zero-extended, bounds-safe.
@@ -3608,7 +3728,9 @@ mod tests_3d {
     /// rather than by `process_controlq` — the presents, the generation bumps and the per-chain
     /// responses are all unchanged, only the moment of publication moved. That is exercised directly
     /// by `a_fenced_command_is_not_completed_until_the_host_fence_fires`; here it just means the
-    /// fences have to be fired before the used ring is inspected.
+    /// fences have to be fired before the used ring is inspected. `fenced_flush_cmd` asks for a fence
+    /// *without* `INFO_RING_IDX`, so these three are **global**-timeline fences and are fired with
+    /// [`global_fence_of`], not [`fence_of`] — see [`FenceTimeline`].
     #[test]
     fn at_most_one_present_runs_per_controlq_batch() {
         use super::super::testkit::TestQueue;
@@ -3636,7 +3758,7 @@ mod tests_3d {
         gpu.process_controlq(&tq.mem, &mut tq.queue);
         for i in 0..3u64 {
             assert!(
-                gpu.complete_fence(&tq.mem, &mut tq.queue, &fence_of(0, 0, 0x100 + i)),
+                gpu.complete_fence(&tq.mem, &mut tq.queue, &global_fence_of(0x100 + i)),
                 "each host fence must publish its own chain"
             );
         }
@@ -3680,13 +3802,32 @@ mod tests_3d {
     // fence at all — invisible while responses were synchronous, a guaranteed hang once they are not.
     // =============================================================================================
 
-    /// The `(ctx_id, ring_idx, fence_id)` a host fence completion carries.
+    /// A completion for a **context-specific** host fence, exactly as gfxstream builds one: the
+    /// `_RING_IDX` flag set, `ctx_id`/`ring_idx` echoed from the timeline it signalled on
+    /// (`VirtioGpuFrontend::init`'s `fenceCompletionCallback`, `VirtioGpuRingContextSpecific` arm).
     fn fence_of(ctx_id: u32, ring_idx: u8, fence_id: u64) -> super::super::gpu3d::FenceReq {
         super::super::gpu3d::FenceReq {
             flags: VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX,
             fence_id,
             ctx_id,
             ring_idx,
+        }
+    }
+
+    /// A completion for a **global** host fence, exactly as gfxstream builds one: `fence = {0}` plus
+    /// `fence_id` and the bare `FENCE` flag, i.e. **`ctx_id` and `ring_idx` are zero no matter which
+    /// context the guest asked from** (`VirtioGpuFrontend::init`'s `fenceCompletionCallback`, which
+    /// only enters the `ctx_id`-filling arm for `VirtioGpuRingContextSpecific`).
+    ///
+    /// This is the shape that produced 17 watchdog firings per boot: a `TRANSFER_TO_HOST_3D` on
+    /// context 13 with `FLAG_FENCE` but no `INFO_RING_IDX` was filed under `ctx_id = 13` and came back
+    /// as `ctx_id = 0`.
+    fn global_fence_of(fence_id: u64) -> super::super::gpu3d::FenceReq {
+        super::super::gpu3d::FenceReq {
+            flags: VIRTIO_GPU_FLAG_FENCE,
+            fence_id,
+            ctx_id: 0,
+            ring_idx: 0,
         }
     }
 
@@ -3701,6 +3842,23 @@ mod tests_3d {
         c[8..16].copy_from_slice(&fence_id.to_le_bytes());
         c[16..20].copy_from_slice(&ctx_id.to_le_bytes());
         c[20] = ring_idx;
+        c
+    }
+
+    /// A command whose ctrl header asks for a fence **without** `INFO_RING_IDX` while still naming a
+    /// real 3D context — the exact shape Linux emits for every driver-internal fence on a 3D context
+    /// (`virtio_gpu_fence_alloc` leaves `emit_fence_info` false unless userspace asked for a ring
+    /// context, and `virtio_gpu_fence_emit` only writes `ring_idx` + the flag when it is true).
+    ///
+    /// Byte 20 is set to a non-zero value on purpose: with `INFO_RING_IDX` clear it is
+    /// `padding[0]`, not `ring_idx`, so it must not reach the fence key.
+    fn globally_fenced_cmd(cmd_type: u32, ctx_id: u32, fence_id: u64) -> Vec<u8> {
+        let mut c = vec![0u8; CTRL_HDR_LEN + 128];
+        c[0..4].copy_from_slice(&cmd_type.to_le_bytes());
+        c[4..8].copy_from_slice(&VIRTIO_GPU_FLAG_FENCE.to_le_bytes());
+        c[8..16].copy_from_slice(&fence_id.to_le_bytes());
+        c[16..20].copy_from_slice(&ctx_id.to_le_bytes());
+        c[20] = 7;
         c
     }
 
@@ -4183,6 +4341,209 @@ mod tests_3d {
         assert_eq!(tq.used().len(), 4);
         assert_eq!(read_le(&tq.resp_bytes(ring0), 8, 8), 0x13);
         assert_eq!(&tq.resp_bytes(ring0)[16..21], &[1, 0, 0, 0, 0]);
+    }
+
+    // =============================================================================================
+    // The 2 s-watchdog regression: fences are keyed by TIMELINE, not by the requesting context.
+    //
+    // Deferral shipped keying `(ctx_id, ring_idx, fence_id)` straight off the guest's ctrl header. For
+    // a fence created *without* `INFO_RING_IDX` gfxstream builds a `VirtioGpuRingGlobal` timeline and
+    // reports the completion with `ctx_id = 0` — so a `TRANSFER_TO_HOST_3D` on context 13 was filed
+    // under 13 and came back as 0, matching nothing. One instrumented Android boot
+    // (`AEMU_FENCE_TRACE=1`): 411 fenced commands, 68 completions with `flags=0x1`, **every one**
+    // reporting `ctx_id=0`, 24 commands filed with `flags=0x1` and a non-zero ctx, 24 `matched=0`
+    // callbacks, 18 watchdog firings — the 6 remaining were rescued late by an unrelated
+    // context-specific fence sweeping them via `fence_id <=`, which is why it read as an intermittent
+    // 2 s stall rather than a hang.
+    // =============================================================================================
+
+    /// The regression test for the watchdog storm. A fence the guest asked for on context 13 with no
+    /// `INFO_RING_IDX` must be published by the **global** completion gfxstream actually sends
+    /// (`ctx_id = 0`), and must *not* be published by a context-13 ring completion — the accidental
+    /// `fence_id <=` rescue that masked the bug is not allowed to be what makes this work.
+    #[test]
+    fn a_global_fence_is_published_by_the_completion_gfxstream_actually_sends() {
+        use super::super::testkit::TestQueue;
+
+        let (mock, log) = MockRenderer::new();
+        let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+        let mut tq = TestQueue::new(0x8000);
+
+        let head = tq.push_chain(
+            &globally_fenced_cmd(gpu3d::VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, 13, 204),
+            &[CTRL_HDR_LEN as u32],
+        );
+        gpu.process_controlq(&tq.mem, &mut tq.queue);
+        assert_eq!(gpu.pending_fence_count(), 1, "it must still be deferred");
+
+        assert_eq!(
+            fences_created(&log),
+            vec![super::super::gpu3d::FenceReq {
+                flags: VIRTIO_GPU_FLAG_FENCE,
+                fence_id: 204,
+                ctx_id: 13,
+                ring_idx: 7,
+            }],
+            "the guest's flags reach stream_renderer_create_fence unmodified — that bit is what \
+             selects VirtioGpuRingGlobal, so it is also what has to classify the completion"
+        );
+
+        // A context-specific completion naming the same ctx and a LATER id: under the old key this
+        // published the chain (that is the accident that hid the bug). It must not now.
+        assert!(
+            !gpu.complete_fence(&tq.mem, &mut tq.queue, &fence_of(13, 0, 300)),
+            "a context-13 ring fence is a different timeline and must not retire a global fence"
+        );
+        assert!(tq.used().is_empty());
+        assert_eq!(gpu.pending_fence_count(), 1);
+
+        // The completion gfxstream really sends for it.
+        assert!(gpu.complete_fence(&tq.mem, &mut tq.queue, &global_fence_of(204)));
+        assert_eq!(
+            tq.used(),
+            vec![(u32::from(head), CTRL_HDR_LEN as u32)],
+            "the global completion must publish the command that asked for it"
+        );
+        assert_eq!(read_le(&tq.resp_bytes(head), 8, 8), 204);
+        assert_eq!(
+            gpu.pending_fence_count(),
+            0,
+            "nothing may be left for the watchdog — the watchdog firing at all is the bug"
+        );
+    }
+
+    /// Pins the normalization itself, in both directions, over the two arms gfxstream has. This is the
+    /// property the boot depends on: the key filed from the **request** and the key derived from the
+    /// **callback** must be equal for the same fence, and unequal for fences on different timelines —
+    /// including the `Global` vs `Ring { ctx_id: 0, ring_idx: 0 }` pair, which a naive "zero the ctx"
+    /// normalization would have merged.
+    #[test]
+    fn the_key_filed_from_a_request_equals_the_key_gfxstream_reports_back() {
+        // (a) Global: the request names ctx 13, the callback names ctx 0, and they must agree.
+        let req = ReqHdr {
+            cmd_type: gpu3d::VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D,
+            flags: VIRTIO_GPU_FLAG_FENCE,
+            fence_id: 204,
+            ctx_id: 13,
+            ring_idx: 7, // padding when INFO_RING_IDX is clear
+        };
+        assert_eq!(
+            req.fence_key(),
+            FenceKey {
+                timeline: FenceTimeline::Global,
+                fence_id: 204
+            }
+        );
+        assert_eq!(
+            req.fence_key(),
+            FenceKey::of(&global_fence_of(204)),
+            "a global fence's filed key must equal the key its completion carries — this equality \
+             failing is the entire 2 s-watchdog bug"
+        );
+
+        // (b) Context-specific: every field of the request survives into the key and back out.
+        let ring_req = ReqHdr {
+            flags: VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX,
+            ctx_id: 13,
+            ring_idx: 1,
+            ..req
+        };
+        assert_eq!(
+            ring_req.fence_key(),
+            FenceKey {
+                timeline: FenceTimeline::Ring {
+                    ctx_id: 13,
+                    ring_idx: 1
+                },
+                fence_id: 204
+            }
+        );
+        assert_eq!(ring_req.fence_key(), FenceKey::of(&fence_of(13, 1, 204)));
+
+        // (c) The two are distinct timelines even when every number matches.
+        let ctx0 = ReqHdr {
+            flags: VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX,
+            ctx_id: 0,
+            ring_idx: 0,
+            ..req
+        };
+        assert_ne!(
+            ctx0.fence_key(),
+            FenceKey::of(&global_fence_of(204)),
+            "Global and Ring{{0,0}} are different timelines in gfxstream; collapsing them would let \
+             a global completion retire a context-0 ring fence"
+        );
+        assert!(!ctx0
+            .fence_key()
+            .same_timeline(&FenceKey::of(&global_fence_of(204))));
+
+        // (d) `ring_idx` differences still separate timelines, and `same_timeline` ignores the id.
+        assert!(
+            FenceKey::of(&fence_of(13, 0, 1)).same_timeline(&FenceKey::of(&fence_of(13, 0, 999))),
+            "same timeline, different ids — this is what the `fence_id <=` sweep ranges over"
+        );
+        assert!(
+            !FenceKey::of(&fence_of(13, 0, 1)).same_timeline(&FenceKey::of(&fence_of(13, 1, 1)))
+        );
+
+        // (e) The bit is the same number on both sides of the FFI. If gfxstream ever renumbered
+        // STREAM_RENDERER_FLAG_FENCE_RING_IDX, `route_header_fence`'s straight `flags` pass-through
+        // would silently start creating the wrong kind of fence.
+        assert_eq!(
+            VIRTIO_GPU_FLAG_INFO_RING_IDX,
+            crate::gfxstream::ffi::STREAM_RENDERER_FLAG_FENCE_RING_IDX
+        );
+        assert_eq!(
+            VIRTIO_GPU_FLAG_FENCE,
+            crate::gfxstream::ffi::STREAM_RENDERER_FLAG_FENCE
+        );
+    }
+
+    /// The whole global-fence class must survive a mixed batch without the watchdog: interleave global
+    /// and context-specific fences from several contexts the way a boot does, complete each with the
+    /// completion gfxstream would send, and require the pending map to end empty.
+    #[test]
+    fn a_mixed_batch_of_global_and_ring_fences_leaves_nothing_for_the_watchdog() {
+        use super::super::testkit::TestQueue;
+
+        let (mock, _log) = MockRenderer::new();
+        let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+        let mut tq = TestQueue::new(0x8000);
+
+        // ids are one monotonic guest counter across both timelines, as `drv->current_fence_id` is.
+        for cmd in [
+            globally_fenced_cmd(gpu3d::VIRTIO_GPU_CMD_RESOURCE_CREATE_3D, 0, 1),
+            globally_fenced_cmd(gpu3d::VIRTIO_GPU_CMD_SUBMIT_3D, 6, 2),
+            fenced_cmd(gpu3d::VIRTIO_GPU_CMD_SUBMIT_3D, 6, 0, 3),
+            globally_fenced_cmd(gpu3d::VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, 15, 4),
+            fenced_cmd(gpu3d::VIRTIO_GPU_CMD_SUBMIT_3D, 15, 1, 5),
+        ] {
+            tq.push_chain(&cmd, &[CTRL_HDR_LEN as u32]);
+        }
+        gpu.process_controlq(&tq.mem, &mut tq.queue);
+        assert_eq!(gpu.pending_fence_count(), 5);
+
+        // The global timeline signals in id order; each ring timeline signals its own.
+        assert!(gpu.complete_fence(&tq.mem, &mut tq.queue, &global_fence_of(1)));
+        assert!(gpu.complete_fence(&tq.mem, &mut tq.queue, &global_fence_of(2)));
+        assert!(gpu.complete_fence(&tq.mem, &mut tq.queue, &fence_of(6, 0, 3)));
+        assert!(gpu.complete_fence(&tq.mem, &mut tq.queue, &global_fence_of(4)));
+        assert!(gpu.complete_fence(&tq.mem, &mut tq.queue, &fence_of(15, 1, 5)));
+
+        assert_eq!(
+            gpu.pending_fence_count(),
+            0,
+            "every fenced command must be published by its own completion"
+        );
+        assert_eq!(tq.used().len(), 5);
+        assert!(
+            !gpu.sweep_stale_fences(
+                &tq.mem,
+                &mut tq.queue,
+                Instant::now() + FENCE_DEADLINE + Duration::from_secs(1)
+            ),
+            "the watchdog must have nothing to do — it is a safety net, not load-bearing"
+        );
     }
 
     /// `drain_fences` is what the `gpu-fence` thread actually calls: it must pick the **control**
