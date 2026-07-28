@@ -1,0 +1,16 @@
+[package]
+name = "aemulator-adb"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+rust-version = { workspace = true }
+repository = { workspace = true }
+description = "Real (non-mock) device backends for AEmulator: a live AdbController + an HVF Android launcher that boots and drives an actual ARM64 Android VM."
+
+[dependencies]
+aemulator-control = { path = "../aemulator-control" }
+aemulator-supervisor = { path = "../aemulator-supervisor" }
+aemulator-identity = { path = "../aemulator-identity" }
+aemulator-vmm = { path = "../aemulator-vmm" }
+regex = { workspace = true }
+log = { workspace = true }

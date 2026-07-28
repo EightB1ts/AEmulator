@@ -1,0 +1,13 @@
+[package]
+name = "aemulator-supervisor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Device lifecycle + orchestration wiring the VMM and the control plane."
+
+[dependencies]
+aemulator-identity = { path = "../aemulator-identity" }
+aemulator-vmm = { path = "../aemulator-vmm" }
+aemulator-control = { path = "../aemulator-control" }
+thiserror = { workspace = true }

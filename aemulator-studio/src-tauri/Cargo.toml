@@ -1,0 +1,43 @@
+[package]
+name = "aemulator-studio"
+version = "0.1.0"
+description = "AEmulator Studio — Mac-native GUI to manage aemulator-hvf Android emulators"
+authors = ["Avnir"]
+edition = "2021"
+rust-version = "1.96"
+
+# STANDALONE crate — deliberately kept OUT of the AEmulator Cargo workspace
+# (listed under `exclude` in ../../Cargo.toml, mirroring aemulator-hvf) so the
+# large Tauri/wry dependency tree never touches the hermetic default
+# `cargo build`/`cargo test`. Build from this directory (or via `pnpm tauri:dev`).
+
+# App logic lives in a library crate so main.rs can stay a thin shim (the proven
+# app_frontend/desktop pattern). A future secondary entry point can reuse it.
+[lib]
+name = "aemulator_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+# Session/liveness plumbing: flock(2) on the cf-dir lock + kill(pid, 0) liveness.
+# Both are POSIX syscalls with no safe std equivalent (std has no advisory-lock API).
+libc = "0.2"
+# uuid v4 = the EmulatorId assigned at create time.
+uuid = { version = "1", features = ["v4"] }
+
+# NOTE (later builds): the Studio reuses workspace crates via path deps —
+# aemulator-supervisor (VmState machine), aemulator-control (UiTree/Observation/
+# Action + MockController), aemulator-identity/-vmm (DeviceProfile → cmdline).
+# Wired once the spawn/control paths go live. BUILD 1 is self-contained stubs.
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

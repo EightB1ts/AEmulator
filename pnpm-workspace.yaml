@@ -1,0 +1,12 @@
+# AEmulator is a subtree of the avnir-beta monorepo (see .github/workflows/aemulator-ci.yml).
+# This file exists so pnpm STOPS here when resolving a workspace root instead of climbing into
+# that parent monorepo and resolving its workspace/lockfile for our scripts.
+#
+# `packages: []` is deliberate: aemulator-studio declares its OWN pnpm-workspace.yaml and owns its
+# node_modules/lockfile. It is not a member here — the root scripts delegate into it with
+# `pnpm -C aemulator-studio`, which keeps that isolation intact.
+packages: []
+
+# The root package has no dependencies of its own, so there is nothing to verify before running a
+# script. Skipping the check also avoids the implicit pre-run install (see .npmrc).
+verifyDepsBeforeRun: false

@@ -1,0 +1,46 @@
+# Rust build output. Unanchored: `crates/aemulator-hvf` and `aemulator-studio/src-tauri` are
+# workspace-EXCLUDED (see the note in Cargo.toml), so each builds into its own `target/` rather
+# than the workspace root's. Anchoring this to `/target` would leave those two committable.
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Run logs. Nothing in this tree authors a `.log`; every one is emulator/build output.
+*.log
+
+# Test-workload APKs — fetched, not authored (3DMarkandroid is 335 MB).
+*.apk
+
+# Built / downloaded disk images and firmware (never commit multi-GB blobs)
+*.img
+*.img.*
+*.dtb
+*.qcow2
+*.raw
+
+# Oracle downloaded assets (Cuttlefish images, GSIs, kernels, build.prop dumps)
+/oracle/assets/
+/oracle/downloads/
+/oracle/**/*.zip
+/oracle/**/*.tar.*
+
+# Out-of-tree build dependencies. third_party/bootstrap.sh clones gfxstream, aemu and mesa here at
+# the SHAs third_party/MANIFEST.sh pins, then builds them in place (~1.2GB of source + build dirs +
+# a python venv + install prefixes). Only the manifest, the resolver, the bootstrap and our patch
+# series are tracked; everything else is reproducible from them.
+#
+# Ignore the DIRECTORY CONTENTS and re-admit the tracked files by name, rather than listing each
+# checkout: git cannot un-ignore a file whose parent directory is ignored, so a new dep appearing
+# under third_party/ must default to ignored — otherwise the first bootstrap on a fresh clone offers
+# a vendored source tree for commit.
+/third_party/*
+!/third_party/MANIFEST.sh
+!/third_party/paths.sh
+!/third_party/bootstrap.sh
+!/third_party/patches/
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/

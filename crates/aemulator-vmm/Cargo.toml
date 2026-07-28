@@ -1,0 +1,26 @@
+[package]
+name = "aemulator-vmm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Platform-independent identity injection + launcher-arg generation (HVF dev backend; KVM/crosvm seam behind the `kvm` feature)."
+
+[dependencies]
+aemulator-identity = { path = "../aemulator-identity" }
+aemulator-dtb = { path = "../aemulator-dtb" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Test-only: the adversary's-eye blocklist, so the launcher-arg tests assert the generated command
+# line carries none of the emulator/VM tells the CI merge-gate greps built images for. Leaf crate
+# (serde + regex only) → no dependency cycle.
+aemulator-detection = { path = "../aemulator-detection" }
+regex = { workspace = true }
+
+[features]
+default = []
+# The Linux/KVM crosvm backend. Off by default so the macOS dev build never pulls Linux-only
+# crosvm crates. The `crosvm_backend` module is ALSO cfg(target_os = "linux")-gated, so even with
+# this feature on, a non-Linux build compiles cleanly (the module is simply absent).
+kvm = []

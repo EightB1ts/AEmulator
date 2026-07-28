@@ -1,0 +1,13 @@
+# Isolate AEmulator Studio as its own pnpm root so pnpm resolves THIS
+# package.json instead of climbing into the parent avnir-beta monorepo workspace.
+packages: []
+
+allowBuilds:
+  esbuild: set this to true or false
+
+# Skip the implicit pre-run `pnpm install` before `pnpm dev` / `pnpm build`
+# (Tauri before-dev/before-build hooks). In this environment a global
+# supply-chain policy force-ignores esbuild build scripts and makes that implicit
+# install exit non-zero; esbuild still works via its installed platform binary,
+# so the pre-run check is pure friction here.
+verifyDepsBeforeRun: false

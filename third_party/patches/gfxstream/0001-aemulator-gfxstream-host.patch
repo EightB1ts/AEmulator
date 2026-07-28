@@ -1,0 +1,1697 @@
+diff --git a/host/GfxStreamAgents.cpp b/host/GfxStreamAgents.cpp
+index df2a10b63..2a5184765 100644
+--- a/host/GfxStreamAgents.cpp
++++ b/host/GfxStreamAgents.cpp
+@@ -466,17 +466,17 @@ static const QAndroidVmOperations sQAndroidVmOperations =
+ namespace android {
+ namespace emulation {
+ 
+-const QAndroidVmOperations* const
++const QAndroidVmOperations*
+ GfxStreamGraphicsAgentFactory::android_get_QAndroidVmOperations() const {
+     return &sQAndroidVmOperations;
+ }
+ 
+-const QAndroidMultiDisplayAgent* const
++const QAndroidMultiDisplayAgent*
+ GfxStreamGraphicsAgentFactory::android_get_QAndroidMultiDisplayAgent() const {
+     return &sMultiDisplayAgent;
+ }
+ 
+-const QAndroidEmulatorWindowAgent* const
++const QAndroidEmulatorWindowAgent*
+ GfxStreamGraphicsAgentFactory::android_get_QAndroidEmulatorWindowAgent()
+         const {
+     return &sQAndroidEmulatorWindowAgent;
+diff --git a/host/GfxStreamAgents.h b/host/GfxStreamAgents.h
+index 864d3ddec..47f26b013 100644
+--- a/host/GfxStreamAgents.h
++++ b/host/GfxStreamAgents.h
+@@ -26,13 +26,13 @@ namespace emulation {
+ // access to additional agents.
+ class GfxStreamGraphicsAgentFactory : public GraphicsAgentFactory {
+ public:
+-    const QAndroidVmOperations* const android_get_QAndroidVmOperations()
++    const QAndroidVmOperations* android_get_QAndroidVmOperations()
+             const override;
+ 
+-    const QAndroidMultiDisplayAgent* const
++    const QAndroidMultiDisplayAgent*
+     android_get_QAndroidMultiDisplayAgent() const override;
+ 
+-    const QAndroidEmulatorWindowAgent* const
++    const QAndroidEmulatorWindowAgent*
+     android_get_QAndroidEmulatorWindowAgent() const override;
+ };
+ 
+diff --git a/host/gl/gl-host-common/opengl/emugl_config.cpp b/host/gl/gl-host-common/opengl/emugl_config.cpp
+index d8f3f1601..89b7c9167 100644
+--- a/host/gl/gl-host-common/opengl/emugl_config.cpp
++++ b/host/gl/gl-host-common/opengl/emugl_config.cpp
+@@ -393,7 +393,26 @@ bool emuglConfig_init(EmuglConfig* config,
+ 
+ void emuglConfig_setupEnv(const EmuglConfig* config) {
+     if (config->use_host_vulkan) {
++#if defined(__APPLE__)
++        // AEmulator: on macOS the "host GPU Vulkan" backend is Mesa KosmicKrisp (Metal); there is
++        // no native Vulkan ICD. Upstream blanks ANDROID_EMU_VK_ICD here, which would make
++        // VulkanDispatch::getPossibleLoaderPaths() fall back to a bare dyld search for
++        // libvulkan.dylib instead of the staged <programDir>/lib64/vulkan/ loader. Force the
++        // kosmickrisp token instead, unless the caller explicitly asked for swiftshader.
++        //
++        // ORDERING NOTE: this runs AFTER vkDispatch() — virtio-gpu-gfxstream-renderer.cpp calls
++        // vkDispatch(false) at stream_renderer_opengles_init before emuglConfig_setupEnv, and
++        // VulkanDispatchImpl::initialize is one-shot. So this does NOT choose the ICD file;
++        // initIcdPaths already did that from the process environment. It only preserves the
++        // selection for later readers.
++        const std::string existingIcd =
++            android::base::getEnvironmentVariable("ANDROID_EMU_VK_ICD");
++        if (existingIcd != "swiftshader") {
++            android::base::setEnvironmentVariable("ANDROID_EMU_VK_ICD", "kosmickrisp");
++        }
++#else
+         android::base::setEnvironmentVariable("ANDROID_EMU_VK_ICD", "");
++#endif
+     } else if (sCurrentRenderer == SELECTED_RENDERER_SWIFTSHADER_INDIRECT) {
+         // Use Swiftshader vk icd if using swiftshader_indirect
+         android::base::setEnvironmentVariable("ANDROID_EMU_VK_ICD", "swiftshader");
+diff --git a/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h b/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
+index eadee8d67..a5c86f3aa 100644
+--- a/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
++++ b/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
+@@ -70,6 +70,25 @@ VG_EXPORT void gfxstream_backend_setup_window(void* native_window_handle, int32_
+                                               int32_t window_height, int32_t fb_width,
+                                               int32_t fb_height);
+ 
++// Avnir in-Vulkan present (Apache-2.0). Present the scanout ColorBuffer `res_handle` (the virtio-gpu
++// COLOR_BUFFER resource id, which equals the gfxstream ColorBuffer handle) directly into the host
++// CAMetalLayer `ca_metal_layer`, entirely inside Vulkan: vkCreateMetalSurfaceEXT + VK_KHR_swapchain +
++// vkCmdBlitImage + vkQueuePresentKHR. No pixels and no Metal objects cross this boundary.
++//
++// `ca_metal_layer` is an unretained `CAMetalLayer*` owned by the caller; it must stay alive until
++// stream_renderer_teardown(). The surface and swapchain are created lazily on the first call for a
++// given layer, cached, and recreated automatically on resize / VK_ERROR_OUT_OF_DATE_KHR /
++// VK_SUBOPTIMAL_KHR. Safe to call from any thread; calls are serialized internally.
++//
++// Returns:
++//    0  presented.
++//    1  frame intentionally dropped (no swapchain image became available in time, or the swapchain
++//       is being recreated). The present path is healthy; the caller should NOT fall back.
++//   <0  hard failure (no Vulkan emulation, unknown ColorBuffer, VK_EXT_metal_surface unavailable,
++//       surface/swapchain creation failed, format cannot be blitted). The caller should fall back
++//       to the CPU readback present path.
++VG_EXPORT int stream_renderer_present_to_metal_layer(uint32_t res_handle, void* ca_metal_layer);
++
+ VG_EXPORT void stream_renderer_flush(uint32_t res_handle);
+ 
+ // Platform resources and contexts support
+diff --git a/host/virtio-gpu-gfxstream-renderer.cpp b/host/virtio-gpu-gfxstream-renderer.cpp
+index 9f105497a..44826a277 100644
+--- a/host/virtio-gpu-gfxstream-renderer.cpp
++++ b/host/virtio-gpu-gfxstream-renderer.cpp
+@@ -33,6 +33,8 @@
+ #include "host-common/refcount-pipe.h"
+ #include "host-common/vm_operations.h"
+ #include "vulkan/VulkanDispatch.h"
++#include "vulkan/VkCommonOperations.h"
++#include "vulkan/MetalLayerPresenterVk.h"
+ #include "render-utils/RenderLib.h"
+ #include "vk_util.h"
+ 
+@@ -1002,7 +1004,29 @@ VG_EXPORT void gfxstream_backend_setup_window(void* native_window_handle, int32_
+                                window_height, fb_width, fb_height, 1.0f, 0, false, false);
+ }
+ 
++// Avnir in-Vulkan present (Apache-2.0). Present the scanout ColorBuffer straight into the VMM's
++// CAMetalLayer without any pixel or Metal object crossing this boundary: vkCreateMetalSurfaceEXT +
++// VK_KHR_swapchain + vkCmdBlitImage(ColorBuffer -> swapchain image) + vkQueuePresentKHR, all inside
++// the host renderer. Supersedes stream_renderer_get_color_buffer_mtl_texture, whose
++// VK_EXT_metal_objects export exists only on MoltenVK.
++//
++// `res_handle` is the virtio-gpu resource id, which for a COLOR_BUFFER resource equals the gfxstream
++// ColorBuffer handle (see VirtioGpuResource::Create). Returns 0 presented, 1 frame dropped (healthy),
++// negative on hard failure (caller falls back to the CPU readback present path).
++VG_EXPORT int stream_renderer_present_to_metal_layer(uint32_t res_handle, void* ca_metal_layer) {
++#if defined(__APPLE__)
++    return gfxstream::vk::presentColorBufferToMetalLayer(res_handle, ca_metal_layer);
++#else
++    (void)res_handle;
++    (void)ca_metal_layer;
++    return -100;
++#endif
++}
++
+ VG_EXPORT void stream_renderer_teardown() {
++#if defined(__APPLE__)
++    gfxstream::vk::teardownMetalLayerPresenters();
++#endif
+     sFrontend()->teardown();
+ 
+     android_finishOpenglesRenderer();
+diff --git a/host/vulkan/Android.bp b/host/vulkan/Android.bp
+index a9364228d..ccf46fa30 100644
+--- a/host/vulkan/Android.bp
++++ b/host/vulkan/Android.bp
+@@ -58,6 +58,7 @@ cc_library_static {
+         "DeviceLostHelper.cpp",
+         "DeviceOpTracker.cpp",
+         "DisplaySurfaceVk.cpp",
++        "MetalLayerPresenterVk.cpp",
+         "DisplayVk.cpp",
+         "PostWorkerVk.cpp",
+         "RenderThreadInfoVk.cpp",
+diff --git a/host/vulkan/BUILD.bazel b/host/vulkan/BUILD.bazel
+index dc9de3d73..9fff67f87 100644
+--- a/host/vulkan/BUILD.bazel
++++ b/host/vulkan/BUILD.bazel
+@@ -9,6 +9,7 @@ cc_library(
+         "DeviceLostHelper.cpp",
+         "DeviceOpTracker.cpp",
+         "DisplaySurfaceVk.cpp",
++        "MetalLayerPresenterVk.cpp",
+         "DisplayVk.cpp",
+         "PostWorkerVk.cpp",
+         "RenderThreadInfoVk.cpp",
+diff --git a/host/vulkan/CMakeLists.txt b/host/vulkan/CMakeLists.txt
+index a3151b0b2..fb072f9ae 100644
+--- a/host/vulkan/CMakeLists.txt
++++ b/host/vulkan/CMakeLists.txt
+@@ -15,6 +15,7 @@ add_library(gfxstream-vulkan-server
+             DeviceOpTracker.cpp
+             DisplayVk.cpp
+             DisplaySurfaceVk.cpp
++            MetalLayerPresenterVk.cpp
+             DebugUtilsHelper.cpp
+             PostWorkerVk.cpp
+             SwapChainStateVk.cpp
+diff --git a/host/vulkan/DisplaySurfaceVk.cpp b/host/vulkan/DisplaySurfaceVk.cpp
+index 4228b3eb8..32d3a0877 100644
+--- a/host/vulkan/DisplaySurfaceVk.cpp
++++ b/host/vulkan/DisplaySurfaceVk.cpp
+@@ -37,13 +37,36 @@ std::unique_ptr<DisplaySurfaceVk> DisplaySurfaceVk::create(const VulkanDispatch&
+         .hwnd = window,
+     };
+     VK_CHECK(vk.vkCreateWin32SurfaceKHR(instance, &surfaceCi, nullptr, &surface));
++#elif defined(__APPLE__)
++    // On macOS `window` is a CAMetalLayer* (FBNativeWindowType is void* here). In a non-Objective-C
++    // translation unit vulkan_metal.h typedefs CAMetalLayer to void, so pLayer is just const void*.
++    if (!vk.vkCreateMetalSurfaceEXT) {
++        ERR("VK_EXT_metal_surface is not available; cannot create a VkSurfaceKHR.");
++        return nullptr;
++    }
++    const VkMetalSurfaceCreateInfoEXT surfaceCi = {
++        .sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT,
++        .pNext = nullptr,
++        .flags = 0,
++        .pLayer = reinterpret_cast<const CAMetalLayer*>(window),
++    };
++    const VkResult res = vk.vkCreateMetalSurfaceEXT(instance, &surfaceCi, nullptr, &surface);
++    if (res != VK_SUCCESS) {
++        ERR("vkCreateMetalSurfaceEXT failed: %d", static_cast<int>(res));
++        return nullptr;
++    }
+ #else
+     GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+         << "Unimplemented.";
+ #endif
+     if (surface == VK_NULL_HANDLE) {
++#if defined(__APPLE__)
++        ERR("No VkSurfaceKHR created for the CAMetalLayer.");
++        return nullptr;
++#else
+         GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+             << "No VkSurfaceKHR created?";
++#endif
+     }
+ 
+     return std::unique_ptr<DisplaySurfaceVk>(new DisplaySurfaceVk(vk, instance, surface));
+diff --git a/host/vulkan/MetalLayerPresenterVk.cpp b/host/vulkan/MetalLayerPresenterVk.cpp
+new file mode 100644
+index 000000000..dafa3afa4
+--- /dev/null
++++ b/host/vulkan/MetalLayerPresenterVk.cpp
+@@ -0,0 +1,536 @@
++// Copyright (C) 2024 The Android Open Source Project
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Avnir in-Vulkan present (Apache-2.0).
++//
++// Presents a gfxstream scanout ColorBuffer straight into a host CAMetalLayer using nothing but core
++// Vulkan plus VK_EXT_metal_surface and VK_KHR_swapchain:
++//
++//     vkCreateMetalSurfaceEXT(CAMetalLayer*)         -> VkSurfaceKHR
++//     SwapChainStateVk                               -> VK_KHR_swapchain (B8G8R8A8_UNORM, FIFO)
++//     vkCmdBlitImage(ColorBuffer -> swapchain image)
++//     vkQueuePresentKHR
++//
++// This supersedes the MoltenVK-only VK_EXT_metal_objects export (getColorBufferMetalTexture +
++// the VMM's aemu_metal_present_texture). That path cannot exist on LunarG KosmicKrisp: it does not
++// implement VK_EXT_metal_objects at all, and its VK_EXT_external_memory_metal exports only
++// VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT, so there is no way to obtain an id<MTLTexture> for
++// a ColorBuffer. Nothing below is driver-specific, so it runs unchanged on MoltenVK.
++//
++// vkCmdBlitImage rather than vkCmdCopyImage is deliberate: the ColorBuffer is typically
++// R8G8B8A8_UNORM at the guest resolution while the swapchain is B8G8R8A8_UNORM at the window's
++// physical resolution. Blit performs the channel reorder AND the scale in one command; copy
++// requires identical formats and identical extents.
++
++#include "MetalLayerPresenterVk.h"
++
++#if defined(__APPLE__)
++
++#include <vulkan/vk_enum_string_helper.h>
++
++#include <memory>
++#include <mutex>
++#include <unordered_map>
++#include <vector>
++
++#include "DisplaySurfaceVk.h"
++#include "SwapChainStateVk.h"
++#include "VkCommonOperations.h"
++#include "aemu/base/synchronization/Lock.h"
++#include "host-common/logging.h"
++#include "vk_util.h"
++
++// logging.h has no once-only variant; DisplayVk.cpp defines its own the same way.
++#define PRESENTER_ERR_ONCE(fmt, ...)                    \
++    do {                                                \
++        static bool presenterVkInternalLogged = false;  \
++        if (!presenterVkInternalLogged) {               \
++            ERR(fmt, ##__VA_ARGS__);                    \
++            presenterVkInternalLogged = true;           \
++        }                                               \
++    } while (0)
++
++namespace gfxstream {
++namespace vk {
++namespace {
++
++// vkAcquireNextImageKHR budget. FIFO backpressure is desirable in principle (it throttles a guest
++// rendering faster than the display), but this runs on the vCPU thread inside
++// VIRTIO_GPU_CMD_RESOURCE_FLUSH, so an unbounded wait would stall the guest behind a stuck
++// compositor. On VK_TIMEOUT we drop the frame (kMetalPresentDropped) — the swapchain is healthy, so
++// falling back to a CPU readback would be strictly worse.
++constexpr uint64_t kAcquireTimeoutNs = 100ULL * 1000ULL * 1000ULL;        // 100 ms
++constexpr uint64_t kFenceTimeoutNs = 5ULL * 1000ULL * 1000ULL * 1000ULL;  // 5 s
++
++VkFormatFeatureFlags formatFeaturesOf(VkEmulation* emu, VkFormat format, VkImageTiling tiling) {
++    VkFormatProperties props = {};
++    emu->ivk->vkGetPhysicalDeviceFormatProperties(emu->physdev, format, &props);
++    return tiling == VK_IMAGE_TILING_LINEAR ? props.linearTilingFeatures
++                                            : props.optimalTilingFeatures;
++}
++
++// One CAMetalLayer's worth of presentation state. Never touched concurrently: the owning map's
++// mutex is held for the whole of present().
++class MetalLayerPresenter {
++   public:
++    static std::unique_ptr<MetalLayerPresenter> create(VkEmulation* emu, void* layer) {
++        auto surface = DisplaySurfaceVk::create(*emu->ivk, emu->instance,
++                                                static_cast<FBNativeWindowType>(layer));
++        if (!surface) {
++            ERR("MetalLayerPresenter: vkCreateMetalSurfaceEXT failed for layer %p", layer);
++            return nullptr;
++        }
++        if (!SwapChainStateVk::validateQueueFamilyProperties(
++                *emu->ivk, emu->physdev, surface->getSurface(), emu->queueFamilyIndex)) {
++            ERR("MetalLayerPresenter: queue family %u cannot present to this surface.",
++                emu->queueFamilyIndex);
++            return nullptr;
++        }
++
++        const VkCommandPoolCreateInfo poolCi = {
++            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
++            .pNext = nullptr,
++            .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
++            .queueFamilyIndex = emu->queueFamilyIndex,
++        };
++        VkCommandPool pool = VK_NULL_HANDLE;
++        if (emu->dvk->vkCreateCommandPool(emu->device, &poolCi, nullptr, &pool) != VK_SUCCESS) {
++            ERR("MetalLayerPresenter: vkCreateCommandPool failed.");
++            return nullptr;
++        }
++
++        return std::unique_ptr<MetalLayerPresenter>(
++            new MetalLayerPresenter(emu, layer, std::move(surface), pool));
++    }
++
++    ~MetalLayerPresenter() {
++        waitIdle();
++        destroySwapchainResources();
++        mEmu->dvk->vkDestroyCommandPool(mEmu->device, mCommandPool, nullptr);
++        mSurface.reset();
++    }
++
++    // Records + submits the blit and presents. Returns a kMetalPresent* code.
++    int present(const VkEmulation::ColorBufferInfo& cb, VkImageLayout cbLayout) {
++        auto* dvk = mEmu->dvk;
++
++        for (int attempt = 0; attempt < 2; ++attempt) {
++            if (mNeedsRecreate || !mSwapChain) {
++                if (!recreateSwapchain()) return kMetalPresentNoSwapchain;
++            }
++
++            Frame& frame = mFrames[mFrameIndex];
++            if (frame.submitted) {
++                VkResult wr =
++                    dvk->vkWaitForFences(mEmu->device, 1, &frame.fence, VK_TRUE, kFenceTimeoutNs);
++                if (wr != VK_SUCCESS) {
++                    ERR("MetalLayerPresenter: vkWaitForFences -> %s", string_VkResult(wr));
++                    return kMetalPresentDeviceError;
++                }
++            }
++
++            uint32_t imageIndex = 0;
++            VkResult ar = dvk->vkAcquireNextImageKHR(mEmu->device, mSwapChain->getSwapChain(),
++                                                     kAcquireTimeoutNs, frame.acquireSemaphore,
++                                                     VK_NULL_HANDLE, &imageIndex);
++            if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_SUBOPTIMAL_KHR) {
++                mNeedsRecreate = true;
++                continue;  // retry once with a fresh swapchain
++            }
++            if (ar == VK_TIMEOUT || ar == VK_NOT_READY) {
++                // No image acquired, semaphore untouched (spec guarantee). Drop the frame.
++                return kMetalPresentDropped;
++            }
++            if (ar != VK_SUCCESS) {
++                ERR("MetalLayerPresenter: vkAcquireNextImageKHR -> %s", string_VkResult(ar));
++                return kMetalPresentDeviceError;
++            }
++
++            VK_CHECK(dvk->vkResetFences(mEmu->device, 1, &frame.fence));
++            frame.submitted = false;
++
++            recordBlit(frame.commandBuffer, cb, cbLayout, imageIndex);
++
++            const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
++            const VkSubmitInfo submitInfo = {
++                .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
++                .pNext = nullptr,
++                .waitSemaphoreCount = 1,
++                .pWaitSemaphores = &frame.acquireSemaphore,
++                .pWaitDstStageMask = &waitStage,
++                .commandBufferCount = 1,
++                .pCommandBuffers = &frame.commandBuffer,
++                .signalSemaphoreCount = 1,
++                .pSignalSemaphores = &mImageReleaseSemaphores[imageIndex],
++            };
++
++            VkSwapchainKHR swapchain = mSwapChain->getSwapChain();
++            const VkPresentInfoKHR presentInfo = {
++                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
++                .pNext = nullptr,
++                .waitSemaphoreCount = 1,
++                .pWaitSemaphores = &mImageReleaseSemaphores[imageIndex],
++                .swapchainCount = 1,
++                .pSwapchains = &swapchain,
++                .pImageIndices = &imageIndex,
++                .pResults = nullptr,
++            };
++
++            VkResult pr;
++            {
++                android::base::AutoLock lock(*mEmu->queueLock);
++                VkResult sr = dvk->vkQueueSubmit(mEmu->queue, 1, &submitInfo, frame.fence);
++                if (sr != VK_SUCCESS) {
++                    ERR("MetalLayerPresenter: vkQueueSubmit -> %s", string_VkResult(sr));
++                    return kMetalPresentDeviceError;
++                }
++                pr = dvk->vkQueuePresentKHR(mEmu->queue, &presentInfo);
++            }
++            frame.submitted = true;
++            mFrameIndex = (mFrameIndex + 1) % mFrames.size();
++
++            if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
++                // The frame did reach the presentation engine; just rebuild before the next one.
++                mNeedsRecreate = true;
++                return kMetalPresentOk;
++            }
++            if (pr != VK_SUCCESS) {
++                ERR("MetalLayerPresenter: vkQueuePresentKHR -> %s", string_VkResult(pr));
++                return kMetalPresentDeviceError;
++            }
++            return kMetalPresentOk;
++        }
++        return kMetalPresentDropped;
++    }
++
++   private:
++    struct Frame {
++        VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
++        VkFence fence = VK_NULL_HANDLE;
++        VkSemaphore acquireSemaphore = VK_NULL_HANDLE;
++        bool submitted = false;
++    };
++
++    MetalLayerPresenter(VkEmulation* emu, void* layer, std::unique_ptr<DisplaySurfaceVk> surface,
++                        VkCommandPool pool)
++        : mEmu(emu), mLayer(layer), mSurface(std::move(surface)), mCommandPool(pool) {}
++
++    void waitIdle() {
++        android::base::AutoLock lock(*mEmu->queueLock);
++        mEmu->dvk->vkDeviceWaitIdle(mEmu->device);
++    }
++
++    void destroySwapchainResources() {
++        auto* dvk = mEmu->dvk;
++        for (auto& frame : mFrames) {
++            if (frame.commandBuffer != VK_NULL_HANDLE) {
++                dvk->vkFreeCommandBuffers(mEmu->device, mCommandPool, 1, &frame.commandBuffer);
++            }
++            if (frame.fence != VK_NULL_HANDLE) {
++                dvk->vkDestroyFence(mEmu->device, frame.fence, nullptr);
++            }
++            if (frame.acquireSemaphore != VK_NULL_HANDLE) {
++                dvk->vkDestroySemaphore(mEmu->device, frame.acquireSemaphore, nullptr);
++            }
++        }
++        mFrames.clear();
++        for (VkSemaphore sem : mImageReleaseSemaphores) {
++            dvk->vkDestroySemaphore(mEmu->device, sem, nullptr);
++        }
++        mImageReleaseSemaphores.clear();
++        mSwapChain.reset();
++        mFrameIndex = 0;
++    }
++
++    bool recreateSwapchain() {
++        auto* dvk = mEmu->dvk;
++        waitIdle();
++        destroySwapchainResources();
++        mNeedsRecreate = false;
++
++        // The layer's current size is authoritative; the VMM re-sets drawableSize on window resize
++        // and the driver reports it back through currentExtent.
++        VkSurfaceCapabilitiesKHR caps = {};
++        VkResult cr = mEmu->ivk->vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
++            mEmu->physdev, mSurface->getSurface(), &caps);
++        if (cr != VK_SUCCESS) {
++            ERR("MetalLayerPresenter: vkGetPhysicalDeviceSurfaceCapabilitiesKHR -> %s",
++                string_VkResult(cr));
++            return false;
++        }
++        uint32_t width = caps.currentExtent.width;
++        uint32_t height = caps.currentExtent.height;
++        if (width == UINT32_MAX || height == UINT32_MAX || width == 0 || height == 0) {
++            width = caps.minImageExtent.width;
++            height = caps.minImageExtent.height;
++        }
++        if (width == 0 || height == 0) {
++            // Minimized / zero-sized layer: nothing to present into.
++            return false;
++        }
++
++        auto ci = SwapChainStateVk::createSwapChainCi(*mEmu->ivk, mSurface->getSurface(),
++                                                      mEmu->physdev, width, height,
++                                                      {mEmu->queueFamilyIndex});
++        if (!ci) {
++            ERR("MetalLayerPresenter: createSwapChainCi failed (%ux%u).", width, height);
++            return false;
++        }
++        mSwapChain = SwapChainStateVk::createSwapChainVk(*dvk, mEmu->device, ci->mCreateInfo);
++        if (!mSwapChain) {
++            ERR("MetalLayerPresenter: createSwapChainVk failed.");
++            return false;
++        }
++
++        const size_t imageCount = mSwapChain->getVkImages().size();
++        const VkSemaphoreCreateInfo semCi = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, nullptr, 0};
++
++        // One release semaphore per swapchain image: an image cannot be re-acquired until its
++        // previous presentation completed, so indexing by image index is the safe recycling rule.
++        mImageReleaseSemaphores.resize(imageCount, VK_NULL_HANDLE);
++        for (size_t i = 0; i < imageCount; ++i) {
++            VK_CHECK(
++                dvk->vkCreateSemaphore(mEmu->device, &semCi, nullptr, &mImageReleaseSemaphores[i]));
++        }
++
++        // One frame slot more than there are images, so the CPU can stay a frame ahead. The slot's
++        // fence gates reuse of both its command buffer and its acquire semaphore.
++        const size_t frameCount = imageCount + 1;
++        mFrames.resize(frameCount);
++        const VkFenceCreateInfo fenceCi = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, nullptr, 0};
++        for (auto& frame : mFrames) {
++            const VkCommandBufferAllocateInfo cbAi = {
++                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
++                .pNext = nullptr,
++                .commandPool = mCommandPool,
++                .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
++                .commandBufferCount = 1,
++            };
++            VK_CHECK(dvk->vkAllocateCommandBuffers(mEmu->device, &cbAi, &frame.commandBuffer));
++            VK_CHECK(dvk->vkCreateFence(mEmu->device, &fenceCi, nullptr, &frame.fence));
++            VK_CHECK(dvk->vkCreateSemaphore(mEmu->device, &semCi, nullptr, &frame.acquireSemaphore));
++            frame.submitted = false;
++        }
++
++        INFO("MetalLayerPresenter: swapchain %ux%u, %zu images, layer %p", width, height, imageCount,
++             mLayer);
++        return true;
++    }
++
++    void recordBlit(VkCommandBuffer cb, const VkEmulation::ColorBufferInfo& cbInfo,
++                    VkImageLayout cbLayout, uint32_t imageIndex) {
++        auto* dvk = mEmu->dvk;
++        VkImage swapImage = mSwapChain->getVkImages()[imageIndex];
++
++        VK_CHECK(dvk->vkResetCommandBuffer(cb, 0));
++        const VkCommandBufferBeginInfo beginInfo = {
++            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
++            .pNext = nullptr,
++            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
++            .pInheritanceInfo = nullptr,
++        };
++        VK_CHECK(dvk->vkBeginCommandBuffer(cb, &beginInfo));
++
++        const VkImageSubresourceRange colorRange = {
++            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
++            .baseMipLevel = 0,
++            .levelCount = 1,
++            .baseArrayLayer = 0,
++            .layerCount = 1,
++        };
++
++        // VK_QUEUE_FAMILY_IGNORED on both sides, matching every other host-side ColorBuffer
++        // operation in this tree (see readColorBufferToBytesLocked): the image is EXCLUSIVE and we
++        // submit on sVkEmulation->queue, the same family that owns it.
++        const VkImageMemoryBarrier preBarriers[2] = {
++            {
++                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++                .pNext = nullptr,
++                .srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
++                .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
++                .oldLayout = cbLayout,
++                .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++                .image = cbInfo.image,
++                .subresourceRange = colorRange,
++            },
++            {
++                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++                .pNext = nullptr,
++                .srcAccessMask = 0,
++                .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
++                .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++                .image = swapImage,
++                .subresourceRange = colorRange,
++            },
++        };
++        dvk->vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2,
++                                  preBarriers);
++
++        const VkExtent2D dstExtent = mSwapChain->getImageExtent();
++        const VkImageBlit region = {
++            .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
++                               .mipLevel = 0,
++                               .baseArrayLayer = 0,
++                               .layerCount = 1},
++            .srcOffsets = {{0, 0, 0},
++                           {static_cast<int32_t>(cbInfo.imageCreateInfoShallow.extent.width),
++                            static_cast<int32_t>(cbInfo.imageCreateInfoShallow.extent.height), 1}},
++            .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
++                               .mipLevel = 0,
++                               .baseArrayLayer = 0,
++                               .layerCount = 1},
++            .dstOffsets = {{0, 0, 0},
++                           {static_cast<int32_t>(dstExtent.width),
++                            static_cast<int32_t>(dstExtent.height), 1}},
++        };
++
++        // VUID-vkCmdBlitImage-filter-02001: LINEAR needs SAMPLED_IMAGE_FILTER_LINEAR on the source.
++        const VkFormatFeatureFlags srcFeatures = formatFeaturesOf(
++            mEmu, cbInfo.imageCreateInfoShallow.format, cbInfo.imageCreateInfoShallow.tiling);
++        const VkFilter filter = (srcFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)
++                                    ? VK_FILTER_LINEAR
++                                    : VK_FILTER_NEAREST;
++
++        dvk->vkCmdBlitImage(cb, cbInfo.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapImage,
++                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, filter);
++
++        const VkImageMemoryBarrier postBarriers[2] = {
++            {
++                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++                .pNext = nullptr,
++                .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
++                .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
++                .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                .newLayout = cbLayout,  // restore; never PRESENT_SRC_KHR, never UNDEFINED
++                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++                .image = cbInfo.image,
++                .subresourceRange = colorRange,
++            },
++            {
++                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++                .pNext = nullptr,
++                .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++                .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
++                .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++                .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
++                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++                .image = swapImage,
++                .subresourceRange = colorRange,
++            },
++        };
++        dvk->vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                                  VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 2,
++                                  postBarriers);
++
++        VK_CHECK(dvk->vkEndCommandBuffer(cb));
++    }
++
++    VkEmulation* const mEmu;
++    void* const mLayer;
++    std::unique_ptr<DisplaySurfaceVk> mSurface;
++    VkCommandPool mCommandPool = VK_NULL_HANDLE;
++    std::unique_ptr<SwapChainStateVk> mSwapChain;
++    std::vector<VkSemaphore> mImageReleaseSemaphores;  // indexed by swapchain image index
++    std::vector<Frame> mFrames;
++    size_t mFrameIndex = 0;
++    bool mNeedsRecreate = true;
++};
++
++std::mutex sPresentersMutex;
++std::unordered_map<void*, std::unique_ptr<MetalLayerPresenter>> sPresenters;
++
++}  // namespace
++
++int presentColorBufferToMetalLayer(uint32_t colorBufferHandle, void* caMetalLayer) {
++    if (caMetalLayer == nullptr) return kMetalPresentNoLayer;
++
++    VkEmulation* emu = getGlobalVkEmulation();
++    if (!emu || emu->device == VK_NULL_HANDLE || !emu->dvk || !emu->ivk || !emu->queueLock) {
++        return kMetalPresentNoEmulation;
++    }
++    if (!emu->instanceSupportsMetalSurface || !emu->ivk->vkCreateMetalSurfaceEXT ||
++        !emu->dvk->vkCreateSwapchainKHR || !emu->dvk->vkAcquireNextImageKHR ||
++        !emu->dvk->vkQueuePresentKHR) {
++        PRESENTER_ERR_ONCE(
++            "In-Vulkan present unavailable: VK_EXT_metal_surface / VK_KHR_swapchain "
++            "entrypoints missing.");
++        return kMetalPresentNoExtension;
++    }
++
++    // Settle any host GPU work still outstanding on this ColorBuffer. Done BEFORE taking
++    // sPresentersMutex: waitSyncVkColorBuffer holds sVkEmulationLock while it polls.
++    (void)waitSyncVkColorBuffer(colorBufferHandle);
++
++    VkEmulation::ColorBufferInfo cbInfo = getColorBufferInfo(colorBufferHandle);
++    if (cbInfo.image == VK_NULL_HANDLE) {
++        return kMetalPresentNoColorBuffer;
++    }
++    if (!(formatFeaturesOf(emu, cbInfo.imageCreateInfoShallow.format,
++                           cbInfo.imageCreateInfoShallow.tiling) &
++          VK_FORMAT_FEATURE_BLIT_SRC_BIT)) {
++        PRESENTER_ERR_ONCE(
++            "In-Vulkan present: ColorBuffer format %s (%s) lacks "
++            "VK_FORMAT_FEATURE_BLIT_SRC_BIT (VUID-vkCmdBlitImage-srcImage-01999).",
++            string_VkFormat(cbInfo.imageCreateInfoShallow.format),
++            string_VkImageTiling(cbInfo.imageCreateInfoShallow.tiling));
++        return kMetalPresentUnblittable;
++    }
++
++    // Never transition FROM VK_IMAGE_LAYOUT_UNDEFINED: some drivers really do discard the contents
++    // (see the go/ahb-vkimagelayout note in readColorBufferToBytesLocked). Mirror that function:
++    // treat UNDEFINED as already-TRANSFER_SRC_OPTIMAL and publish that as the tracked layout.
++    VkImageLayout cbLayout = cbInfo.currentLayout;
++    if (cbLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
++        cbLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
++        setColorBufferCurrentLayout(colorBufferHandle, cbLayout);
++    }
++
++    std::lock_guard<std::mutex> guard(sPresentersMutex);
++    auto it = sPresenters.find(caMetalLayer);
++    if (it == sPresenters.end()) {
++        auto presenter = MetalLayerPresenter::create(emu, caMetalLayer);
++        if (!presenter) return kMetalPresentNoSurface;
++        it = sPresenters.emplace(caMetalLayer, std::move(presenter)).first;
++    }
++    return it->second->present(cbInfo, cbLayout);
++}
++
++void teardownMetalLayerPresenters() {
++    std::lock_guard<std::mutex> guard(sPresentersMutex);
++    sPresenters.clear();
++}
++
++}  // namespace vk
++}  // namespace gfxstream
++
++#else  // !__APPLE__
++
++namespace gfxstream {
++namespace vk {
++
++int presentColorBufferToMetalLayer(uint32_t, void*) { return kMetalPresentNoExtension; }
++void teardownMetalLayerPresenters() {}
++
++}  // namespace vk
++}  // namespace gfxstream
++
++#endif  // __APPLE__
+diff --git a/host/vulkan/MetalLayerPresenterVk.h b/host/vulkan/MetalLayerPresenterVk.h
+new file mode 100644
+index 000000000..e096a30bf
+--- /dev/null
++++ b/host/vulkan/MetalLayerPresenterVk.h
+@@ -0,0 +1,46 @@
++// Copyright (C) 2024 The Android Open Source Project
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#pragma once
++
++#include <cstdint>
++
++namespace gfxstream {
++namespace vk {
++
++// Return codes for presentColorBufferToMetalLayer(). Mirrored verbatim by
++// stream_renderer_present_to_metal_layer() and by the VMM's Renderer3d::present_to_layer().
++enum : int {
++    kMetalPresentOk = 0,           // presented
++    kMetalPresentDropped = 1,      // no image available in time / swapchain being recreated
++    kMetalPresentNoLayer = -1,     // ca_metal_layer was null
++    kMetalPresentNoEmulation = -2, // no live VkEmulation
++    kMetalPresentNoColorBuffer = -3,  // unknown handle, or the ColorBuffer has no VkImage
++    kMetalPresentNoExtension = -4, // VK_EXT_metal_surface / VK_KHR_swapchain entrypoints missing
++    kMetalPresentNoSurface = -5,   // vkCreateMetalSurfaceEXT failed
++    kMetalPresentNoSwapchain = -6, // swapchain creation / negotiation failed
++    kMetalPresentNoPresentQueue = -7,  // the emulation queue family cannot present to this surface
++    kMetalPresentDeviceError = -8, // acquire/submit/present returned a hard Vulkan error
++    kMetalPresentUnblittable = -9, // the ColorBuffer format cannot be a vkCmdBlitImage source
++};
++
++// Present ColorBuffer `colorBufferHandle` into `caMetalLayer` (an unretained CAMetalLayer*).
++// See stream_renderer_present_to_metal_layer() for the full contract. Thread-safe.
++int presentColorBufferToMetalLayer(uint32_t colorBufferHandle, void* caMetalLayer);
++
++// Destroy every cached surface/swapchain. Must be called while the VkDevice is still alive.
++void teardownMetalLayerPresenters();
++
++}  // namespace vk
++}  // namespace gfxstream
+diff --git a/host/vulkan/VkAndroidNativeBuffer.cpp b/host/vulkan/VkAndroidNativeBuffer.cpp
+index 05de21d07..8fee5d709 100644
+--- a/host/vulkan/VkAndroidNativeBuffer.cpp
++++ b/host/vulkan/VkAndroidNativeBuffer.cpp
+@@ -185,8 +185,8 @@ VkResult prepareAndroidNativeBufferImage(VulkanDispatch* vk, VkDevice device,
+         };
+ 
+ #if defined(__APPLE__)
+-        if (emu->instanceSupportsMoltenVK) {
+-            // Change handle type requested to metal handle
++        if (emu->useMetalExternalMemory) {
++            // macOS: external images are backed by MTLHeap handles.
+             extImageCi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
+         }
+ #endif
+diff --git a/host/vulkan/VkCommonOperations.cpp b/host/vulkan/VkCommonOperations.cpp
+index 717a2130a..e68a69472 100644
+--- a/host/vulkan/VkCommonOperations.cpp
++++ b/host/vulkan/VkCommonOperations.cpp
+@@ -26,6 +26,7 @@
+ #include <unordered_set>
+ 
+ #include "ExternalObjectManager.h"
++#include "MetalLayerPresenterVk.h"
+ #include "VkDecoderGlobalState.h"
+ #include "VkEmulatedPhysicalDeviceMemory.h"
+ #include "VkFormatUtils.h"
+@@ -50,7 +51,6 @@
+ 
+ #ifdef __APPLE__
+ #include <CoreFoundation/CoreFoundation.h>
+-#include <vulkan/vulkan_beta.h>  // for MoltenVK portability extensions
+ #endif
+ 
+ namespace gfxstream {
+@@ -352,7 +352,7 @@ static bool getImageFormatExternalMemorySupportInfo(VulkanDispatch* vk, VkPhysic
+         VK_EXT_MEMORY_HANDLE_TYPE_BIT,
+     };
+ #if defined(__APPLE__)
+-    if (sVkEmulation->instanceSupportsMoltenVK) {
++    if (sVkEmulation->useMetalExternalMemory) {
+         // Using a different handle type when in MoltenVK mode
+         extInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
+     }
+@@ -424,7 +424,7 @@ static bool getImageFormatExternalMemorySupportInfo(VulkanDispatch* vk, VkPhysic
+ 
+     VkExternalMemoryHandleTypeFlags handleTypeNeeded = VK_EXT_MEMORY_HANDLE_TYPE_BIT;
+ #if defined(__APPLE__)
+-    if (sVkEmulation->instanceSupportsMoltenVK) {
++    if (sVkEmulation->useMetalExternalMemory) {
+         // Using a different handle type when in MoltenVK mode
+         handleTypeNeeded = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
+     }
+@@ -762,25 +762,16 @@ VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk,
+         VK_QNX_EXTERNAL_MEMORY_SCREEN_BUFFER_EXTENSION_NAME,
+         VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,
+ #elif defined(__APPLE__)
+-        // VK_EXT_metal_objects will be added if host MoltenVK is enabled,
+-        // otherwise VK_KHR_external_memory_fd will be used
++        // macOS hard cutover: MTLHeap handles are the ONLY external-memory transport. There is no
++        // VK_KHR_external_memory_fd and no VK_EXT_metal_objects on the host driver (Mesa
++        // KosmicKrisp). vkGetMemoryMetalHandleEXT / VkImportMemoryMetalHandleInfoEXT /
++        // VkMemoryGetMetalHandleInfoEXT all belong to VK_EXT_external_memory_metal.
++        VK_EXT_EXTERNAL_MEMORY_METAL_EXTENSION_NAME,
+ #else
+         VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+ #endif
+     };
+ 
+-#if defined(__APPLE__)
+-    std::vector<const char*> moltenVkInstanceExtNames = {
+-        VK_MVK_MACOS_SURFACE_EXTENSION_NAME,
+-        VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
+-    };
+-    std::vector<const char*> moltenVkDeviceExtNames = {
+-        VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
+-        VK_EXT_METAL_OBJECTS_EXTENSION_NAME,
+-        VK_EXT_EXTERNAL_MEMORY_METAL_EXTENSION_NAME,
+-    };
+-#endif
+-
+     uint32_t instanceExtCount = 0;
+     gvk->vkEnumerateInstanceExtensionProperties(nullptr, &instanceExtCount, nullptr);
+     std::vector<VkExtensionProperties>& instanceExts = sVkEmulation->instanceExtensions;
+@@ -797,15 +788,14 @@ VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk,
+         extensionsSupported(instanceExts, externalFenceInstanceExtNames);
+     bool surfaceSupported = extensionsSupported(instanceExts, surfaceInstanceExtNames);
+ #if defined(__APPLE__)
+-    const std::string vulkanIcd = android::base::getEnvironmentVariable("ANDROID_EMU_VK_ICD");
+-    const bool moltenVKEnabled = (vulkanIcd == "moltenvk");
+-    const bool moltenVKSupported = extensionsSupported(instanceExts, moltenVkInstanceExtNames);
+-    if (moltenVKEnabled && !moltenVKSupported) {
+-        // This might happen if the user manually changes moltenvk ICD library
+-        ERR("MoltenVK requested, but the required extensions are not supported.");
+-        GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER)) << "MoltenVK requested, but the required extensions are not supported.";
+-    }
+-    const bool useMoltenVK = moltenVKEnabled && moltenVKSupported;
++    // Avnir in-Vulkan present: VK_EXT_metal_surface + VK_KHR_swapchain is how a scanout ColorBuffer
++    // reaches the VMM's CAMetalLayer now that the MoltenVK-only VK_EXT_metal_objects texture export
++    // is gone. Requested unconditionally when advertised — NOT behind VulkanNativeSwapchain (which
++    // also turns on the host compositor/subwindow) and NOT behind the MoltenVK block (KosmicKrisp
++    // must get it too).
++    const bool metalSurfaceSupported =
++        surfaceSupported &&
++        extensionsSupported(instanceExts, {VK_EXT_METAL_SURFACE_EXTENSION_NAME});
+ #endif
+ 
+     VkInstanceCreateInfo instCi = {
+@@ -855,21 +845,20 @@ VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk,
+         }
+     }
+ 
+-    if (sVkEmulation->features.VulkanNativeSwapchain.enabled) {
+-        for (auto extension : SwapChainStateVk::getRequiredInstanceExtensions()) {
+-            selectedInstanceExtensionNames.emplace(extension);
+-        }
++#if defined(__APPLE__)
++    if (metalSurfaceSupported) {
++        selectedInstanceExtensionNames.emplace(VK_EXT_METAL_SURFACE_EXTENSION_NAME);
++    } else {
++        WARN("%s is not supported; in-Vulkan present to a CAMetalLayer will be unavailable.",
++             VK_EXT_METAL_SURFACE_EXTENSION_NAME);
+     }
++#endif
+ 
+-#if defined(__APPLE__)
+-    if (useMoltenVK) {
+-        INFO("MoltenVK is supported, enabling Vulkan portability.");
+-        instCi.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+-        for (auto extension : moltenVkInstanceExtNames) {
++    if (sVkEmulation->features.VulkanNativeSwapchain.enabled) {
++        for (auto extension : SwapChainStateVk::getRequiredInstanceExtensions()) {
+             selectedInstanceExtensionNames.emplace(extension);
+         }
+     }
+-#endif
+ 
+     std::vector<const char*> selectedInstanceExtensionNames_(selectedInstanceExtensionNames.begin(),
+                                                              selectedInstanceExtensionNames.end());
+@@ -965,7 +954,8 @@ VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk,
+     sVkEmulation->instanceSupportsExternalFenceCapabilities = externalFenceCapabilitiesSupported;
+     sVkEmulation->instanceSupportsSurface = surfaceSupported;
+ #if defined(__APPLE__)
+-    sVkEmulation->instanceSupportsMoltenVK = useMoltenVK;
++    // useMetalExternalMemory is derived from the SELECTED physical device's capabilities, below.
++    sVkEmulation->instanceSupportsMetalSurface = metalSurfaceSupported;
+ #endif
+ 
+     if (sVkEmulation->instanceSupportsGetPhysicalDeviceProperties2) {
+@@ -985,17 +975,6 @@ VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk,
+         }
+     }
+ 
+-#if defined(__APPLE__)
+-    if (sVkEmulation->instanceSupportsMoltenVK) {
+-        // Enable some specific extensions on MacOS when moltenVK is used.
+-        externalMemoryDeviceExtNames.push_back(VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
+-        externalMemoryDeviceExtNames.push_back(VK_EXT_EXTERNAL_MEMORY_METAL_EXTENSION_NAME);
+-    } else {
+-        // When MoltenVK is not used(e.g. SwiftShader), use memory fd extension for external memory.
+-        externalMemoryDeviceExtNames.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+-    }
+-#endif
+-
+     uint32_t physdevCount = 0;
+     ivk->vkEnumeratePhysicalDevices(sVkEmulation->instance, &physdevCount, nullptr);
+     std::vector<VkPhysicalDevice> physdevs(physdevCount);
+@@ -1031,13 +1010,6 @@ VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk,
+         deviceInfos[i].supportsExternalMemoryExport = false;
+         deviceInfos[i].glInteropSupported = 0;  // set later
+ 
+-#if defined(__APPLE__)
+-        if (useMoltenVK && !extensionsSupported(deviceExts, moltenVkDeviceExtNames)) {
+-            VK_EMU_INIT_RETURN_OR_ABORT_ON_ERROR(
+-                ABORT_REASON_OTHER,
+-                "MoltenVK enabled but necessary device extensions are not supported.");
+-        }
+-#endif
+ 
+         if (sVkEmulation->instanceSupportsExternalMemoryCapabilities) {
+             deviceInfos[i].supportsExternalMemoryExport =
+@@ -1212,6 +1184,24 @@ VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk,
+     sVkEmulation->deviceInfo = deviceInfos[selectedGpuIndex];
+     // Postcondition: sVkEmulation has valid device support info
+ 
++#if defined(__APPLE__)
++    // Hard cutover: on macOS the only external-memory transport is Metal MTLHeap handles via
++    // VK_EXT_external_memory_metal. Derive this from the SELECTED physical device's capability
++    // rather than from ANDROID_EMU_VK_ICD, so it is true for any conformant Metal driver.
++    // ORDERING: must be assigned before the getImageFormatExternalMemorySupportInfo() loop
++    // immediately below, which reads it (see getImageFormatExternalMemorySupportInfo).
++    sVkEmulation->useMetalExternalMemory = extensionsSupported(
++        sVkEmulation->deviceInfo.extensions, {VK_EXT_EXTERNAL_MEMORY_METAL_EXTENSION_NAME});
++    if (!sVkEmulation->useMetalExternalMemory) {
++        VK_EMU_INIT_RETURN_OR_ABORT_ON_ERROR(
++            ABORT_REASON_OTHER,
++            "Selected Vulkan device '%s' does not support %s. A Metal Vulkan driver exposing it "
++            "(Mesa KosmicKrisp) is required on macOS; there is no fallback.",
++            sVkEmulation->deviceInfo.physdevProps.deviceName,
++            VK_EXT_EXTERNAL_MEMORY_METAL_EXTENSION_NAME);
++    }
++#endif
++
+     // Collect image support info of the selected device
+     sVkEmulation->imageSupportInfo = getBasicImageSupportList();
+     for (size_t i = 0; i < sVkEmulation->imageSupportInfo.size(); ++i) {
+@@ -1288,14 +1278,6 @@ VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk,
+         selectedDeviceExtensionNames_.emplace(VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
+     }
+ 
+-#if defined(__APPLE__)
+-    if (useMoltenVK) {
+-        for (auto extension : moltenVkDeviceExtNames) {
+-            selectedDeviceExtensionNames_.emplace(extension);
+-        }
+-    }
+-#endif
+-
+     std::vector<const char*> selectedDeviceExtensionNames(selectedDeviceExtensionNames_.begin(),
+                                                           selectedDeviceExtensionNames_.end());
+ 
+@@ -1360,11 +1342,13 @@ VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk,
+             "VK_NV_device_diagnostic_checkpoints extension is not supported.");
+     }
+ 
+-    ivk->vkCreateDevice(sVkEmulation->physdev, &dCi, nullptr, &sVkEmulation->device);
++    VkResult deviceCreateRes =
++        ivk->vkCreateDevice(sVkEmulation->physdev, &dCi, nullptr, &sVkEmulation->device);
+ 
+-    if (res != VK_SUCCESS) {
+-        VK_EMU_INIT_RETURN_OR_ABORT_ON_ERROR(res, "Failed to create Vulkan device. Error %s.",
+-                                             string_VkResult(res));
++    if (deviceCreateRes != VK_SUCCESS) {
++        VK_EMU_INIT_RETURN_OR_ABORT_ON_ERROR(deviceCreateRes,
++                                             "Failed to create Vulkan device. Error %s.",
++                                             string_VkResult(deviceCreateRes));
+     }
+ 
+     // device created; populate dispatch table
+@@ -1409,22 +1393,23 @@ VkEmulation* createGlobalVkEmulation(VulkanDispatch* vk,
+             VK_EMU_INIT_RETURN_OR_ABORT_ON_ERROR(ABORT_REASON_OTHER,
+                                                  "Cannot find vkGetMemoryWin32HandleKHR");
+         }
++#elif defined(__APPLE__)
++        // macOS: MTLHeap handles only. getMtlResourceFromVkDeviceMemory() calls
++        // vkGetMemoryMetalHandleEXT directly, so getMemoryHandleFunc stays null. Guaranteed
++        // reachable-and-correct by the useMetalExternalMemory invariant established at device
++        // selection. There is no vkGetMemoryFdKHR on this platform's driver.
++        sVkEmulation->deviceInfo.getMemoryHandleFunc = nullptr;
++        if (!dvk->vkGetDeviceProcAddr(sVkEmulation->device, "vkGetMemoryMetalHandleEXT")) {
++            VK_EMU_INIT_RETURN_OR_ABORT_ON_ERROR(ABORT_REASON_OTHER,
++                                                 "Cannot find vkGetMemoryMetalHandleEXT");
++        }
+ #else
+-        if (sVkEmulation->instanceSupportsMoltenVK) {
+-            // We'll use vkGetMemoryMetalHandleEXT, no need to save into getMemoryHandleFunc
+-            sVkEmulation->deviceInfo.getMemoryHandleFunc = nullptr;
+-            if (!dvk->vkGetDeviceProcAddr(sVkEmulation->device, "vkGetMemoryMetalHandleEXT")) {
+-                VK_EMU_INIT_RETURN_OR_ABORT_ON_ERROR(ABORT_REASON_OTHER,
+-                                                     "Cannot find vkGetMemoryMetalHandleEXT");
+-            }
+-        } else {
+-            // Use vkGetMemoryFdKHR
+-            sVkEmulation->deviceInfo.getMemoryHandleFunc = reinterpret_cast<PFN_vkGetMemoryFdKHR>(
+-                dvk->vkGetDeviceProcAddr(sVkEmulation->device, "vkGetMemoryFdKHR"));
+-            if (!sVkEmulation->deviceInfo.getMemoryHandleFunc) {
+-                VK_EMU_INIT_RETURN_OR_ABORT_ON_ERROR(ABORT_REASON_OTHER,
+-                                                     "Cannot find vkGetMemoryFdKHR");
+-            }
++        // Use vkGetMemoryFdKHR
++        sVkEmulation->deviceInfo.getMemoryHandleFunc = reinterpret_cast<PFN_vkGetMemoryFdKHR>(
++            dvk->vkGetDeviceProcAddr(sVkEmulation->device, "vkGetMemoryFdKHR"));
++        if (!sVkEmulation->deviceInfo.getMemoryHandleFunc) {
++            VK_EMU_INIT_RETURN_OR_ABORT_ON_ERROR(ABORT_REASON_OTHER,
++                                                 "Cannot find vkGetMemoryFdKHR");
+         }
+ #endif
+     }
+@@ -1657,6 +1642,10 @@ void teardownGlobalVkEmulation() {
+     // Don't try to tear down something that did not set up completely; too risky
+     if (!sVkEmulation->live) return;
+ 
++    // Avnir in-Vulkan present: destroy any CAMetalLayer swapchains/surfaces while the VkDevice and
++    // VkInstance are still alive.
++    teardownMetalLayerPresenters();
++
+     sVkEmulation->compositorVk.reset();
+     sVkEmulation->displayVk.reset();
+ 
+@@ -1715,9 +1704,12 @@ static MTLResource_id getMtlResourceFromVkDeviceMemory(VulkanDispatch* vk, VkDev
+     };
+ 
+     MTLResource_id outputHandle = nullptr;
+-    vk->vkGetMemoryMetalHandleEXT(sVkEmulation->device, &getMetalHandleInfo, &outputHandle);
+-    if (outputHandle == nullptr) {
+-        ERR("vkGetMemoryMetalHandleEXT returned null");
++    VkResult metalHandleRes =
++        vk->vkGetMemoryMetalHandleEXT(sVkEmulation->device, &getMetalHandleInfo, &outputHandle);
++    if (metalHandleRes != VK_SUCCESS || outputHandle == nullptr) {
++        ERR("vkGetMemoryMetalHandleEXT failed: %s (handle=%p)", string_VkResult(metalHandleRes),
++            outputHandle);
++        return nullptr;
+     }
+     return outputHandle;
+ }
+@@ -1753,7 +1745,7 @@ bool allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalMemoryInfo* in
+ 
+     if (sVkEmulation->deviceInfo.supportsExternalMemoryExport && actuallyExternal) {
+ #ifdef __APPLE__
+-        if (sVkEmulation->instanceSupportsMoltenVK) {
++        if (sVkEmulation->useMetalExternalMemory) {
+             // Change handle type for metal resources
+             exportAi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
+         }
+@@ -1865,7 +1857,7 @@ bool allocExternalMemory(VulkanDispatch* vk, VkEmulation::ExternalMemoryInfo* in
+ 
+     bool opaqueFd = true;
+ #if defined(__APPLE__)
+-    if (sVkEmulation->instanceSupportsMoltenVK) {
++    if (sVkEmulation->useMetalExternalMemory) {
+         opaqueFd = false;
+         info->externalMetalHandle = getMtlResourceFromVkDeviceMemory(vk, info->memory);
+         validHandle = (nullptr != info->externalMetalHandle);
+@@ -1941,6 +1933,11 @@ void freeExternalMemoryLocked(VulkanDispatch* vk, VkEmulation::ExternalMemoryInf
+ #if defined(__APPLE__)
+     if (info->externalMetalHandle) {
+         CFRelease(info->externalMetalHandle);
++        // Mirror the fd path three lines above, which invalidates its handle. ExternalMemoryInfo
++        // is a plain struct held by value in maps (see getColorBufferInfo, which returns
++        // ColorBufferInfo BY VALUE), so a non-invalidated handle is an over-release waiting to
++        // happen — and Metal handles are now the only handle type.
++        info->externalMetalHandle = nullptr;
+     }
+ #endif
+ }
+@@ -1974,7 +1971,7 @@ bool importExternalMemory(VulkanDispatch* vk, VkDevice targetDevice,
+         VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT,
+         nullptr
+     };
+-    if (sVkEmulation->instanceSupportsMoltenVK) {
++    if (sVkEmulation->useMetalExternalMemory) {
+         opaqueFd = false;
+         importInfoMetalInfo.handle = info->externalMetalHandle;
+         importInfoPtr = &importInfoMetalInfo;
+@@ -2046,7 +2043,7 @@ bool importExternalMemoryDedicatedImage(VulkanDispatch* vk, VkDevice targetDevic
+         VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT,
+         nullptr
+     };
+-    if (sVkEmulation->instanceSupportsMoltenVK) {
++    if (sVkEmulation->useMetalExternalMemory) {
+         importInfoMetalInfo.handle = info->externalMetalHandle;
+         importInfoPtr = &importInfoMetalInfo;
+         opaqueFd = false;
+@@ -2361,7 +2358,7 @@ static bool updateExternalMemoryInfo(VK_EXT_MEMORY_HANDLE extMemHandle,
+ 
+ #ifdef __APPLE__
+     // importExtMemoryHandleToVkColorBuffer is not supported with MoltenVK
+-    if (sVkEmulation->instanceSupportsMoltenVK) {
++    if (sVkEmulation->useMetalExternalMemory) {
+         WARN("Unexpected call to updateExternalMemoryInfo!");
+         pInfo->externalMetalHandle = nullptr;
+     }
+@@ -2455,7 +2452,7 @@ bool initializeVkColorBufferLocked(
+         VK_EXT_MEMORY_HANDLE_TYPE_BIT,
+     };
+ #if defined(__APPLE__)
+-    if (sVkEmulation->instanceSupportsMoltenVK) {
++    if (sVkEmulation->useMetalExternalMemory) {
+         // Using a different handle type when in MoltenVK mode
+         extImageCi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
+     }
+@@ -3501,9 +3498,12 @@ bool setupVkBuffer(uint64_t size, uint32_t bufferHandle, bool vulkanOnly, uint32
+         VK_EXT_MEMORY_HANDLE_TYPE_BIT,
+     };
+ #if defined(__APPLE__)
+-    if (sVkEmulation->instanceSupportsMoltenVK) {
+-        // Using a different handle type when in MoltenVK mode
+-        extBufferCi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_EXT;
++    if (sVkEmulation->useMetalExternalMemory) {
++        // MTLHEAP, not MTLBUFFER: allocExternalMemory() exports the backing VkDeviceMemory as
++        // MTLHEAP, and KosmicKrisp's kk_GetPhysicalDeviceExternalBufferProperties reports
++        // features=0 for anything other than MTLHEAP (kk_buffer.c). MoltenVK tolerated the
++        // mismatch; a conformant driver does not.
++        extBufferCi.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
+     }
+ #endif
+     void* extBufferCiPtr = nullptr;
+@@ -3863,7 +3863,7 @@ VkExternalMemoryHandleTypeFlags transformExternalMemoryHandleTypeFlags_tohost(
+ 
+         VkExternalMemoryHandleTypeFlagBits handleTypeNeeded = VK_EXT_MEMORY_HANDLE_TYPE_BIT;
+ #if defined(__APPLE__)
+-        if (sVkEmulation->instanceSupportsMoltenVK) {
++        if (sVkEmulation->useMetalExternalMemory) {
+             // Using a different handle type when in MoltenVK mode
+             handleTypeNeeded = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
+         }
+@@ -3894,7 +3894,7 @@ VkExternalMemoryHandleTypeFlags transformExternalMemoryHandleTypeFlags_fromhost(
+ 
+     VkExternalMemoryHandleTypeFlagBits handleTypeUsed = VK_EXT_MEMORY_HANDLE_TYPE_BIT;
+ #if defined(__APPLE__)
+-    if (sVkEmulation->instanceSupportsMoltenVK) {
++    if (sVkEmulation->useMetalExternalMemory) {
+         // Using a different handle type when in MoltenVK mode
+         handleTypeUsed = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
+     }
+diff --git a/host/vulkan/VkCommonOperations.h b/host/vulkan/VkCommonOperations.h
+index 389182745..ecd7fea48 100644
+--- a/host/vulkan/VkCommonOperations.h
++++ b/host/vulkan/VkCommonOperations.h
+@@ -152,14 +152,23 @@ struct VkEmulation {
+     bool instanceSupportsExternalSemaphoreCapabilities = false;
+     bool instanceSupportsExternalFenceCapabilities = false;
+     bool instanceSupportsSurface = false;
++    // Avnir in-Vulkan present: VK_EXT_metal_surface was advertised by the loader AND enabled on the
++    // instance, so vkCreateMetalSurfaceEXT may be called. Driver-agnostic (MoltenVK and
++    // KosmicKrisp both expose it); always false off Apple.
++    bool instanceSupportsMetalSurface = false;
+     PFN_vkGetPhysicalDeviceImageFormatProperties2KHR getImageFormatProperties2Func = nullptr;
+     PFN_vkGetPhysicalDeviceProperties2KHR getPhysicalDeviceProperties2Func = nullptr;
+     PFN_vkGetPhysicalDeviceFeatures2 getPhysicalDeviceFeatures2Func = nullptr;
+ 
+ #if defined(__APPLE__)
+-    bool instanceSupportsMoltenVK = false;
++    // TRUE whenever the selected physical device supports VK_EXT_external_memory_metal, i.e.
++    // external memory is exchanged as Metal MTLHeap handles rather than fds. On macOS this is a
++    // hard requirement (init fails otherwise) — see createGlobalVkEmulation(). It replaces the
++    // old instanceSupportsMoltenVK flag, which tested the ICD *name*; the semantics were always
++    // "Metal external memory", never "the driver is MoltenVK".
++    bool useMetalExternalMemory = false;
+ #else
+-    static const bool instanceSupportsMoltenVK = false;
++    static const bool useMetalExternalMemory = false;
+ #endif
+ 
+     bool debugUtilsAvailableAndRequested = false;
+@@ -266,7 +275,10 @@ struct VkEmulation {
+ 
+         VK_EXT_MEMORY_HANDLE externalHandle = VK_EXT_MEMORY_HANDLE_INVALID;
+ #ifdef __APPLE__
+-        // This is used as an external handle when MoltenVK is enabled
++        // The external handle on macOS: an MTLHeap exported via vkGetMemoryMetalHandleEXT.
++        // `externalHandle` (the fd above) is unused on this platform and stays INVALID; use
++        // getColorBufferMetalMemoryHandle()/getBufferMetalMemoryHandle() instead of the
++        // getColorBufferExtMemoryHandle()/getBufferExtMemoryHandle() fd accessors.
+         MTLResource_id externalMetalHandle = nullptr;
+ #endif
+         uint32_t streamHandleType;
+diff --git a/host/vulkan/VkDecoderGlobalState.cpp b/host/vulkan/VkDecoderGlobalState.cpp
+index 9a4c1a363..854e172bc 100644
+--- a/host/vulkan/VkDecoderGlobalState.cpp
++++ b/host/vulkan/VkDecoderGlobalState.cpp
+@@ -67,7 +67,6 @@
+ 
+ #ifdef __APPLE__
+ #include <CoreFoundation/CoreFoundation.h>
+-#include <vulkan/vulkan_beta.h> // for MoltenVK portability extensions
+ #endif
+ 
+ #ifndef VERBOSE
+@@ -162,6 +161,14 @@ VK_EXT_SYNC_HANDLE dupExternalSync(VK_EXT_SYNC_HANDLE h) {
+ static constexpr const char* const kEmulatedDeviceExtensions[] = {
+     "VK_ANDROID_external_memory_android_hardware_buffer",
+     "VK_ANDROID_native_buffer",
++#if defined(__APPLE__) && defined(VK_MVK_moltenvk)
++    // We synthesize this string in on_vkEnumerateDeviceExtensionProperties as a legacy-guest
++    // alias for VK_EXT_external_memory_metal. It is not a real extension, so it must never be
++    // forwarded to the host driver in ppEnabledExtensionNames — filteredDeviceExtensionNames
++    // passes guest-requested names through verbatim, and a conformant driver would answer
++    // VK_ERROR_EXTENSION_NOT_PRESENT. MoltenVK masked this; KosmicKrisp will not.
++    VK_MVK_MOLTENVK_EXTENSION_NAME,
++#endif
+     "VK_FUCHSIA_buffer_collection",
+     "VK_FUCHSIA_external_memory",
+     "VK_FUCHSIA_external_semaphore",
+@@ -179,6 +186,42 @@ static constexpr const char* const kEmulatedDeviceExtensions[] = {
+ #endif
+ };
+ 
++// Device extensions that MUST NOT be advertised to the guest.
++//
++// Each of these has an associated VkStructureType that this build's cereal codegen lists in
++// goldfish_vk_extension_struct_size_with_stream_features (523 types) but does NOT handle in
++// reservedunmarshal_extension_struct (194 types). A guest that enables the extension and chains
++// the struct hits reservedunmarshal's default case and abort()s the renderer. Filtering the
++// extension out of vkEnumerateDeviceExtensionProperties means the guest never enables it, so the
++// struct is never put on the wire. No wire-format guessing is involved.
++//
++// VK_EXT_memory_budget is the empirically confirmed member of this set: it was aborting the VMM,
++// and the 329-type gap analysis independently predicts it, which is what validates the method for
++// the other eight.
++//
++// This is deliberately NOT #if defined(__APPLE__): the codegen gap is a property of this host
++// build, not of macOS.
++//
++// Extensions deliberately NOT listed here, because MoltenVK exposed them and they demonstrably do
++// not abort — stripping them would delete real capability: buffer_device_address,
++// depth_clip_control, image_2d_view_of_3d, pipeline_robustness, sample_locations,
++// shader_atomic_float, present_id, present_wait, push_descriptor,
++// shader_subgroup_uniform_control_flow.
++//
++// Raw string literals are used for the eight non-memory_budget entries because the corresponding
++// *_EXTENSION_NAME macros are not guaranteed present in this tree's vulkan_core.h vintage.
++static constexpr const char* const kGuestHiddenDeviceExtensions[] = {
++    VK_EXT_MEMORY_BUDGET_EXTENSION_NAME,
++    "VK_EXT_attachment_feedback_loop_dynamic_state",
++    "VK_EXT_attachment_feedback_loop_layout",
++    "VK_EXT_blend_operation_advanced",
++    "VK_EXT_conditional_rendering",
++    "VK_EXT_multi_draw",
++    "VK_EXT_mutable_descriptor_type",
++    "VK_EXT_nested_command_buffer",
++    "VK_KHR_workgroup_memory_explicit_layout",
++};
++
+ // A list of instance extensions that should not be passed to the host driver.
+ // On older pre-1.1 Vulkan platforms, gfxstream emulates these features.
+ static constexpr const char* const kEmulatedInstanceExtensions[] = {
+@@ -1060,11 +1103,6 @@ class VkDecoderGlobalState::Impl {
+             curr = curr->pNext;
+         }
+ 
+-#if defined(__APPLE__)
+-        if (m_emu->instanceSupportsMoltenVK) {
+-            createInfoFiltered.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+-        }
+-#endif
+ 
+         // bug: 155795731
+         bool swiftshader =
+@@ -1804,17 +1842,11 @@ class VkDecoderGlobalState::Impl {
+         auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
+         auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
+ 
+-        bool shouldPassthrough = !m_emu->enableYcbcrEmulation;
+-#if defined(__APPLE__)
+-        shouldPassthrough = shouldPassthrough && !m_emu->instanceSupportsMoltenVK;
+-#endif
+-        if (shouldPassthrough) {
+-            return vk->vkEnumerateDeviceExtensionProperties(physicalDevice, pLayerName,
+-                                                            pPropertyCount, pProperties);
+-        }
+-
+-        // If MoltenVK is supported on host, we need to ensure that we include
+-        // VK_MVK_moltenvk extenstion in returned properties.
++        // No passthrough path: kGuestHiddenDeviceExtensions must be enforced unconditionally.
++        // (The old passthrough was reachable whenever enableYcbcrEmulation was false AND the
++        // Metal flag was false; enableYcbcrEmulation is hardcoded false in FrameBuffer.cpp, so
++        // the only thing keeping the strip alive was the Metal flag — a trap for any future
++        // edit that flips it.)
+         std::vector<VkExtensionProperties> properties;
+         VkResult result =
+             enumerateDeviceExtensionProperties(vk, physicalDevice, pLayerName, properties);
+@@ -1823,8 +1855,14 @@ class VkDecoderGlobalState::Impl {
+         }
+ 
+ #if defined(__APPLE__) && defined(VK_MVK_moltenvk)
+-        // Guest will check for VK_MVK_moltenvk extension for enabling AHB support
+-        if (m_emu->instanceSupportsMoltenVK &&
++        // LEGACY-GUEST ALIAS — this is NOT a claim that MoltenVK is in use (it is not; the host
++        // driver is Mesa KosmicKrisp). Modern gfxstream_vk gates AHB support on
++        // VK_EXT_external_memory_metal appearing in this list (ResourceTracker.cpp,
++        // metalExtMemAvailable). Older guest images key off VK_MVK_moltenvk instead, and the
++        // guest driver ships inside the system image, so it cannot be audited from here. Cost of
++        // keeping it: one string in an enumerate result. Cost of removing it on an old image:
++        // AHB silently disappears. Gate it on what it actually means.
++        if (hasDeviceExtension(properties, VK_EXT_EXTERNAL_MEMORY_METAL_EXTENSION_NAME) &&
+             !hasDeviceExtension(properties, VK_MVK_MOLTENVK_EXTENSION_NAME)) {
+             VkExtensionProperties mvk_props;
+             strncpy(mvk_props.extensionName, VK_MVK_MOLTENVK_EXTENSION_NAME,
+@@ -1842,6 +1880,18 @@ class VkDecoderGlobalState::Impl {
+             ycbcr_props.specVersion = VK_KHR_SAMPLER_YCBCR_CONVERSION_SPEC_VERSION;
+             properties.push_back(ycbcr_props);
+         }
++        // Hide every extension in kGuestHiddenDeviceExtensions from the guest. See that array's
++        // comment for why (cereal reservedunmarshal_extension_struct gap -> renderer abort()).
++        properties.erase(
++            std::remove_if(properties.begin(), properties.end(),
++                           [](const VkExtensionProperties& prop) {
++                               for (const char* hidden : kGuestHiddenDeviceExtensions) {
++                                   if (strcmp(prop.extensionName, hidden) == 0) return true;
++                               }
++                               return false;
++                           }),
++            properties.end());
++
+         if (pProperties == nullptr) {
+             *pPropertyCount = properties.size();
+         } else {
+@@ -1944,63 +1994,6 @@ class VkDecoderGlobalState::Impl {
+             }
+         }
+ 
+-#ifdef __APPLE__
+-#ifndef VK_ENABLE_BETA_EXTENSIONS
+-        // TODO(b/349066492): Update Vulkan headers, stringhelpers and compilation parameters
+-        // to use this directly from beta extensions and use regular chain append commands
+-        const VkStructureType VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR =
+-            (VkStructureType)1000163000;
+-#endif
+-        // Enable all portability features supported on the device
+-        VkPhysicalDevicePortabilitySubsetFeaturesKHR supportedPortabilityFeatures = {
+-            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR, nullptr};
+-        if (m_emu->instanceSupportsMoltenVK) {
+-            VkPhysicalDeviceFeatures2 features2 = {
+-                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+-                .pNext = &supportedPortabilityFeatures,
+-            };
+-            vk->vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
+-
+-            if (mVerbosePrints) {
+-                fprintf(stderr,
+-                        "VERBOSE:%s: MoltenVK supportedPortabilityFeatures\n"
+-                        "constantAlphaColorBlendFactors = %d\n"
+-                        "events = %d\n"
+-                        "imageViewFormatReinterpretation = %d\n"
+-                        "imageViewFormatSwizzle = %d\n"
+-                        "imageView2DOn3DImage = %d\n"
+-                        "multisampleArrayImage = %d\n"
+-                        "mutableComparisonSamplers = %d\n"
+-                        "pointPolygons = %d\n"
+-                        "samplerMipLodBias = %d\n"
+-                        "separateStencilMaskRef = %d\n"
+-                        "shaderSampleRateInterpolationFunctions = %d\n"
+-                        "tessellationIsolines = %d\n"
+-                        "tessellationPointMode = %d\n"
+-                        "triangleFans = %d\n"
+-                        "vertexAttributeAccessBeyondStride = %d\n",
+-                        __func__, supportedPortabilityFeatures.constantAlphaColorBlendFactors,
+-                        supportedPortabilityFeatures.events,
+-                        supportedPortabilityFeatures.imageViewFormatReinterpretation,
+-                        supportedPortabilityFeatures.imageViewFormatSwizzle,
+-                        supportedPortabilityFeatures.imageView2DOn3DImage,
+-                        supportedPortabilityFeatures.multisampleArrayImage,
+-                        supportedPortabilityFeatures.mutableComparisonSamplers,
+-                        supportedPortabilityFeatures.pointPolygons,
+-                        supportedPortabilityFeatures.samplerMipLodBias,
+-                        supportedPortabilityFeatures.separateStencilMaskRef,
+-                        supportedPortabilityFeatures.shaderSampleRateInterpolationFunctions,
+-                        supportedPortabilityFeatures.tessellationIsolines,
+-                        supportedPortabilityFeatures.tessellationPointMode,
+-                        supportedPortabilityFeatures.triangleFans,
+-                        supportedPortabilityFeatures.vertexAttributeAccessBeyondStride);
+-            }
+-
+-            // Insert into device create info chain
+-            supportedPortabilityFeatures.pNext = const_cast<void*>(createInfoFiltered.pNext);
+-            createInfoFiltered.pNext = &supportedPortabilityFeatures;
+-        }
+-#endif
+ 
+         // Filter device memory report as callbacks can not be passed between guest and host.
+         vk_struct_chain_filter<VkDeviceDeviceMemoryReportCreateInfoEXT>(&createInfoFiltered);
+@@ -5069,9 +5062,10 @@ class VkDecoderGlobalState::Impl {
+                 bool opaqueFd = true;
+ 
+ #if defined(__APPLE__)
+-                // Use metal object extension on MoltenVK mode for color buffer import,
+-                // non-moltenVK path on MacOS will use FD handles
+-                if (m_emu->instanceSupportsMoltenVK) {
++                // macOS color-buffer import goes through MTLHeap handles; there is no FD path
++                // on this platform. The synthesized VkMemoryDedicatedAllocateInfo below
++                // (TODO b/351765838) works around a guest that omits it for video rendering.
++                if (m_emu->useMetalExternalMemory) {
+ 
+                     extern VkImage getColorBufferVkImage(uint32_t colorBufferHandle);
+                     if (dedicatedAllocInfoPtr == nullptr || localDedicatedAllocInfo.image == VK_NULL_HANDLE) {
+@@ -5145,7 +5139,7 @@ class VkDecoderGlobalState::Impl {
+ 
+             bool opaqueFd = true;
+ #ifdef __APPLE__
+-            if (m_emu->instanceSupportsMoltenVK) {
++            if (m_emu->useMetalExternalMemory) {
+                 MTLResource_id bufferMetalMemoryHandle =
+                     getBufferMetalMemoryHandle(importBufferInfoPtr->buffer);
+ 
+@@ -5158,7 +5152,9 @@ class VkDecoderGlobalState::Impl {
+                     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                 }
+ 
+-                importInfoMetalHandle.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_EXT;
++                // MTLHEAP: gfxstream exports the backing memory as MTLHEAP (allocExternalMemory),
++                // and KosmicKrisp's kk_AllocateMemory hard-asserts handleType == MTLHEAP.
++                importInfoMetalHandle.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
+                 importInfoMetalHandle.handle = bufferMetalMemoryHandle;
+ 
+                 vk_append_struct(&structChainIter, &importInfoMetalHandle);
+@@ -5317,13 +5313,11 @@ class VkDecoderGlobalState::Impl {
+                 VkExternalMemoryHandleTypeFlags handleTypes;
+ 
+ #if defined(__APPLE__)
+-                if (m_emu->instanceSupportsMoltenVK) {
+-                    // Using a different handle type when in MoltenVK mode
+-                    handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_EXT|VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLTEXTURE_BIT_EXT;
+-                }
+-                else {
+-                    handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+-                }
++                // MTLHEAP is the only external handle type on this platform. NOTE: the
++                // ExternalBlob feature is not actually reachable on macOS — on_vkMapMemoryIntoAddressSpace
++                // aborts for it further down. Kept correct so the constant cannot be
++                // copy-pasted wrong.
++                handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
+ #elif defined(_WIN32)
+                 handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+ #elif defined(__unix__)
+@@ -5890,9 +5884,9 @@ class VkDecoderGlobalState::Impl {
+ #endif
+ 
+ #ifdef __APPLE__
+-            if (m_emu->instanceSupportsMoltenVK) {
++            if (m_emu->useMetalExternalMemory) {
+                 GFXSTREAM_ABORT(FatalError(ABORT_REASON_OTHER))
+-                    << "ExternalBlob feature is not supported with MoltenVK";
++                    << "ExternalBlob feature is not supported with Metal external memory";
+             }
+ #endif
+ 
+@@ -8112,21 +8106,10 @@ class VkDecoderGlobalState::Impl {
+             res.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+         }
+ #elif defined(__APPLE__)
+-        if (m_emu->instanceSupportsMoltenVK) {
+-            if (hasDeviceExtension(properties, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
+-                res.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+-            }
+-            if (hasDeviceExtension(properties, VK_EXT_METAL_OBJECTS_EXTENSION_NAME)) {
+-                res.push_back(VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
+-            }
+-            if (hasDeviceExtension(properties, VK_EXT_EXTERNAL_MEMORY_METAL_EXTENSION_NAME)) {
+-                res.push_back(VK_EXT_EXTERNAL_MEMORY_METAL_EXTENSION_NAME);
+-            }
+-        } else {
+-            // Non-MoltenVK path, use memory_fd
+-            if (hasDeviceExtension(properties, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME)) {
+-                res.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+-            }
++        // macOS: MTLHeap external memory only. No VK_KHR_portability_subset, no
++        // VK_EXT_metal_objects, no VK_KHR_external_memory_fd on this platform's driver.
++        if (hasDeviceExtension(properties, VK_EXT_EXTERNAL_MEMORY_METAL_EXTENSION_NAME)) {
++            res.push_back(VK_EXT_EXTERNAL_MEMORY_METAL_EXTENSION_NAME);
+         }
+ #endif
+ 
+@@ -8190,12 +8173,6 @@ class VkDecoderGlobalState::Impl {
+             res.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+         }
+ 
+-#if defined(__APPLE__)
+-        if (m_emu->instanceSupportsMoltenVK) {
+-            res.push_back(VK_MVK_MACOS_SURFACE_EXTENSION_NAME);
+-            res.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+-        }
+-#endif
+ 
+         return res;
+     }
+diff --git a/host/vulkan/VulkanDispatch.cpp b/host/vulkan/VulkanDispatch.cpp
+index fd3048888..9126c8281 100644
+--- a/host/vulkan/VulkanDispatch.cpp
++++ b/host/vulkan/VulkanDispatch.cpp
+@@ -79,46 +79,50 @@ static void initIcdPaths(bool forTesting) {
+         setIcdPaths("vk_swiftshader_icd.json");
+     } else {
+ #ifdef __APPLE__
+-        // Mac: Use MoltenVK by default unless GPU mode is set to swiftshader
+-        if (androidIcd != "moltenvk") {
+-            WARN("%s: Unknown ICD, resetting to MoltenVK", __func__);
+-            android::base::setEnvironmentVariable("ANDROID_EMU_VK_ICD", "moltenvk");
++        // macOS: the host-GPU Vulkan driver is Mesa KosmicKrisp (Khronos-conformant, Metal
++        // backend). MoltenVK has been removed entirely; macOS 26+ is a hard requirement.
++        if (androidIcd != "kosmickrisp") {
++            WARN("%s: Unknown ICD '%s', resetting to KosmicKrisp", __func__, androidIcd.c_str());
++            android::base::setEnvironmentVariable("ANDROID_EMU_VK_ICD", "kosmickrisp");
+         }
+-        setIcdPaths("MoltenVK_icd.json");
+-
+-        // Configure MoltenVK library with environment variables
+-        // 0: No logging.
+-        // 1: Log errors only.
+-        // 2: Log errors and warning messages.
+-        // 3: Log errors, warnings and informational messages.
+-        // 4: Log errors, warnings, infos and debug messages.
+-        const bool verboseLogs =
+-            (android::base::getEnvironmentVariable("ANDROID_EMUGL_VERBOSE") == "1");
+-        const char* logLevelValue = verboseLogs ? "4" : "1";
+-        android::base::setEnvironmentVariable("MVK_CONFIG_LOG_LEVEL", logLevelValue);
+-
+-        //  Limit MoltenVK to use single queue, as some older ANGLE versions
+-        //  expect this for -guest-angle to work.
+-        //  0: Limit Vulkan to a single queue, with no explicit semaphore
+-        //  synchronization, and use Metal's implicit guarantees that all operations
+-        //  submitted to a queue will give the same result as if they had been run in
+-        //  submission order.
+-        android::base::setEnvironmentVariable("MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE", "0");
+-
+-        // TODO(b/364055067)
+-        // MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS is not working correctly
+-        android::base::setEnvironmentVariable("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "0");
+-
+-        // MVK_CONFIG_USE_MTLHEAP is required for VK_EXT_external_memory_metal
+-        android::base::setEnvironmentVariable("MVK_CONFIG_USE_MTLHEAP", "1");
+-
+-        // TODO(b/351765838): VVL won't work with MoltenVK due to the current
+-        //  way of external memory handling, add it into disable list to
+-        //  avoid users enabling it implicitly (i.e. via vkconfig).
+-        //  It can be enabled with VK_LOADER_LAYERS_ALLOW=VK_LAYER_KHRONOS_validation
+-        INFO("Vulkan Validation Layers won't be enabled with MoltenVK");
+-        android::base::setEnvironmentVariable("VK_LOADER_LAYERS_DISABLE",
+-                                              "VK_LAYER_KHRONOS_validation");
++
++        // Prefer a caller-supplied driver manifest over our staged copy.
++        // The Vulkan loader gives VK_DRIVER_FILES strict precedence over VK_ICD_FILENAMES, so
++        // setIcdPaths()'s write to VK_ICD_FILENAMES is a silent no-op whenever the caller
++        // exported VK_DRIVER_FILES. Make that explicit rather than relying on loader precedence
++        // that is invisible from this file: it is what lets the emulator and
++        // crates/aemulator-hvf/kosmickrisp/run-gate.sh provably load the same driver binary.
++        const std::string callerDriverFiles =
++            android::base::getEnvironmentVariable("VK_DRIVER_FILES");
++        const std::string callerIcdFilenames =
++            android::base::getEnvironmentVariable("VK_ICD_FILENAMES");
++        if (!callerDriverFiles.empty()) {
++            INFO("%s: honoring caller-supplied VK_DRIVER_FILES=%s", __func__,
++                 callerDriverFiles.c_str());
++        } else if (!callerIcdFilenames.empty()) {
++            INFO("%s: honoring caller-supplied VK_ICD_FILENAMES=%s", __func__,
++                 callerIcdFilenames.c_str());
++        } else {
++            // Bundle-relative fallback: <programDir>/lib64/vulkan/ and <launcherDir>/lib64/vulkan/.
++            setIcdPaths("kosmickrisp_mesa_icd.aarch64.json");
++        }
++
++        // NOTE: no driver tuning env vars are set. The four MVK_CONFIG_* vars this block used to
++        // set have no KosmicKrisp analogue and none is needed:
++        //   MVK_CONFIG_USE_MTLHEAP=1                  -> KosmicKrisp always backs exportable
++        //                                                allocations with an MTLHeap; MTLHEAP is
++        //                                                its only external handle type.
++        //   MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE=0   -> the "single queue" property older ANGLE
++        //                                                needs is structural: KosmicKrisp exposes
++        //                                                exactly one queue family, queueCount=1.
++        //                                                Its VkSemaphores are real (MTLEvent-
++        //                                                backed), which is strictly stronger than
++        //                                                MoltenVK's implicit ordering.
++        //   MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0   -> no discrete-binding fallback exists.
++        //   MVK_CONFIG_LOG_LEVEL                      -> no log-level knob (mesa logs to stderr).
++        // VK_LOADER_LAYERS_DISABLE is likewise NOT set any more: the Khronos validation layers
++        // work against a conformant driver and are the primary bring-up tool. If VVL ever emits
++        // false positives on the MTLHEAP path, re-add it as an opt-OUT, never a force-disable.
+ #else
+         // By default, on other platforms, just use whatever the system
+         // is packing.
+diff --git a/host/vulkan/meson.build b/host/vulkan/meson.build
+index c11957070..acb960602 100644
+--- a/host/vulkan/meson.build
++++ b/host/vulkan/meson.build
+@@ -17,6 +17,7 @@ files_lib_vulkan_server = files(
+   'DeviceOpTracker.cpp',
+   'DisplayVk.cpp',
+   'DisplaySurfaceVk.cpp',
++  'MetalLayerPresenterVk.cpp',
+   'PostWorkerVk.cpp',
+   'DebugUtilsHelper.cpp',
+   'SwapChainStateVk.cpp',
+diff --git a/third-party/CMakeLists.txt b/third-party/CMakeLists.txt
+index f7257003a..5758de7b0 100644
+--- a/third-party/CMakeLists.txt
++++ b/third-party/CMakeLists.txt
+@@ -95,6 +95,9 @@ if(NOT TARGET aemu_common)
+ 
+         if (WIN32)
+             set(aemu-base-platform-deps Shlwapi)
++        elseif (APPLE)
++            # macOS: librt does not exist (clock_gettime/shm_* live in libSystem)
++            set(aemu-base-platform-deps dl)
+         else()
+             set(aemu-base-platform-deps dl rt)
+         endif()

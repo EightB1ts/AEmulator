@@ -1,0 +1,12 @@
+[package]
+name = "aemulator-dtb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Hand-authored ARM64 device tree (vm-fdt) driven by DeviceProfile, plus a no-VM-tells assertion."
+
+[dependencies]
+aemulator-identity = { path = "../aemulator-identity" }
+vm-fdt = { workspace = true }
+thiserror = { workspace = true }

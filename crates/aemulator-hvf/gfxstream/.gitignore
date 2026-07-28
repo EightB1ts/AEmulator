@@ -1,0 +1,13 @@
+# Build products of build-gfxstream.sh / run.sh. All reproducible from the scripts + the pinned
+# third_party checkout; none of it is authored here.
+#
+# `lib64/` is staged by run.sh, not written by hand: it holds the KosmicKrisp ICD manifest plus an
+# ABSOLUTE symlink to Homebrew's libvulkan.dylib. Committing it would bake one machine's Homebrew
+# prefix into the repo. (ANDROID_EMU_VK_ICD confines gfxstream's loader search to this dir — see the
+# comment at run.sh:29.)
+probe
+probe.dSYM/
+lib64/
+
+# `evidence/` is deliberately NOT ignored — the screenshots and capability dumps in it are the
+# recorded proof behind the PHASE*-STATUS.md claims, and Phase 0.6 adds the identity goldens there.

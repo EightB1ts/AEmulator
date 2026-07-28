@@ -1,0 +1,25 @@
+[package]
+name = "aemulator-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The `aemulator` CLI — profile-show/validate/props/bootconfig/fingerprint/lint/qemu-args/dtb."
+
+[[bin]]
+name = "aemulator"
+path = "src/main.rs"
+
+[dependencies]
+aemulator-identity = { path = "../aemulator-identity" }
+aemulator-detection = { path = "../aemulator-detection" }
+aemulator-dtb = { path = "../aemulator-dtb" }
+aemulator-vmm = { path = "../aemulator-vmm" }
+aemulator-control = { path = "../aemulator-control" }
+aemulator-supervisor = { path = "../aemulator-supervisor" }
+aemulator-adb = { path = "../aemulator-adb" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }

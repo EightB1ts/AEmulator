@@ -1,0 +1,14 @@
+[package]
+name = "attestation-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "OPTIONAL Phase-5 per-flow relay that borrows a real rooted device's genuine hardware attestation."
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

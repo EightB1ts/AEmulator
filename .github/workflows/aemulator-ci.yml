@@ -1,0 +1,66 @@
+# AEmulator CI — fmt / clippy / test + the identity-validator blocklist gate.
+#
+# PROJECT-LOCAL: AEmulator lives INSIDE the avnir-beta monorepo (at AEmulator/). This workflow is
+# scoped to that subtree via the `paths:` filter and `defaults.run.working-directory` below — it is
+# deliberately independent of the repo's main build-deploy / playwright pipelines and never runs
+# Terraform, wrangler, or the Python workers. It mirrors `ci/check.sh` step-for-step; keep the two
+# in sync (the shell script is the source of truth for the gate — CI just runs it).
+#
+# Default cargo features only. The Linux/KVM crosvm backend is behind the `kvm` feature +
+# cfg(target_os="linux") and is NOT built here (this runner is x86-64 Linux; the fleet KVM build is
+# a separate bare-metal-ARM path — see docs/PHASE0-RUNBOOK.md).
+
+name: AEmulator CI
+
+on:
+  push:
+    branches: [dev, staging, main]
+    paths:
+      - "AEmulator/**"
+      - ".github/workflows/aemulator-ci.yml"
+  pull_request:
+    paths:
+      - "AEmulator/**"
+      - ".github/workflows/aemulator-ci.yml"
+
+# One in-flight run per ref; cancel superseded runs.
+concurrency:
+  group: aemulator-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # AEmulator is a subtree of the avnir-beta monorepo.
+    working-directory: AEmulator
+
+jobs:
+  check:
+    name: fmt · clippy · test · identity gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            AEmulator/target
+          key: aemulator-cargo-${{ runner.os }}-${{ hashFiles('AEmulator/Cargo.lock') }}
+          restore-keys: |
+            aemulator-cargo-${{ runner.os }}-
+
+      # Run the single source-of-truth gate. It does: fmt --check, clippy -D warnings,
+      # cargo test, profile-validate, and the props/bootconfig/DTB blocklist grep.
+      - name: Run merge gate (ci/check.sh)
+        run: bash ci/check.sh

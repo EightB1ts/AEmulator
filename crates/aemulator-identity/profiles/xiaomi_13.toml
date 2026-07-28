@@ -1,0 +1,152 @@
+# EXAMPLE reference profile — Xiaomi 13 (`fuxi`) / Qualcomm Snapdragon 8 Gen 2 (`SM8550`).
+#
+# LEGAL NOTE: this is clearly-labeled EXAMPLE reference data. Fabricating and *shipping* a
+# specific-OEM identity requires counsel (trademark / TAC-reprogramming statutes). Use as a
+# dev/test fixture only.
+#
+# PROVENANCE, honestly stated — not every field here carries the same weight:
+#   * VERIFIED against public platform data: the whole `[soc]` block (SM8550 = `kalama`, socinfo id
+#     519, the 1+2+2+3 Cortex-X3/A715/A710/A510 topology, its MIDR part numbers and cpufreq maxima)
+#     and the Adreno 740 GPU identity. These are the load-bearing values for SoC coherence.
+#   * SHAPE-ACCURATE derivations: the `[build]` strings are a coherent Xiaomi 13 / MIUI 14 (Android
+#     13) release-build fingerprint, not a byte-for-byte dump.
+#   * CARRIED OVER from the previous Redmi K40 fixture: `[[sensors]]` and `[network]`. Sensor parts
+#     are not SoC-tied and the Xiaomi OUI is unchanged; they were not re-verified for `fuxi`.
+#
+# This file is the on-disk twin of `profiles::reference_profile()`; `DeviceProfile::from_toml`
+# loads it, and the two must materialize identical `emit_properties()` maps (guarded by a test).
+
+[meta]
+name = "Xiaomi 13 (fuxi) / SM8550"
+source = "Snapdragon 8 Gen 2 (SM8550/kalama) public platform data + a Xiaomi 13 `fuxi` MIUI 14 build shape"
+legal_note = "EXAMPLE reference data. Fabricating a specific-OEM identity requires counsel (trademark / TAC-reprogramming statutes). Reference/dev fixture only."
+
+[build]
+brand = "Xiaomi"
+product_name = "fuxi"
+device = "fuxi"
+model = "2211133C"
+manufacturer = "Xiaomi"
+board = "fuxi"
+bootloader = "unknown"
+hardware = "qcom"
+host = "c5-miui-ota-bd131.bj"
+user = "builder"
+tags = "release-keys"
+build_type = "user"
+build_id = "TKQ1.220829.002"
+incremental = "V14.0.6.0.TMCCNXM"
+release = "13"
+sdk = 33
+security_patch = "2023-04-01"
+display_id = "TKQ1.220829.002"
+
+[soc]
+soc_manufacturer = "QTI"
+soc_model = "SM8550"
+board_platform = "kalama"
+
+# Snapdragon 8 Gen 2 is a 1+2+2+3 part: 1x Cortex-X3 "prime" + 2x Cortex-A715 + 2x Cortex-A710
+# ("gold", two different µarchs in the same performance tier — that split is real and a uniform
+# gold cluster would be the anomaly) + 3x Cortex-A510 "silver". Every core is a stock ARM design,
+# so the implementer is ARM (0x41) — Qualcomm stopped shipping custom-Kryo `0x51` MIDRs years
+# before this part, and NEVER Apple (0x61).
+[[soc.midr_clusters]]
+part_name = "Cortex-X3 (prime)"
+implementer = 65   # 0x41 ARM Ltd.
+part = 3406        # 0xd4e Cortex-X3
+variant = 1
+revision = 0
+core_count = 1
+max_freq_khz = 3187200
+
+[[soc.midr_clusters]]
+part_name = "Cortex-A715 (gold)"
+implementer = 65   # 0x41
+part = 3405        # 0xd4d Cortex-A715
+variant = 1
+revision = 0
+core_count = 2
+max_freq_khz = 2803200
+
+[[soc.midr_clusters]]
+part_name = "Cortex-A710 (gold)"
+implementer = 65   # 0x41
+part = 3399        # 0xd47 Cortex-A710
+variant = 1
+revision = 0
+core_count = 2
+max_freq_khz = 2803200
+
+[[soc.midr_clusters]]
+part_name = "Cortex-A510 (silver)"
+implementer = 65   # 0x41
+part = 3398        # 0xd46 Cortex-A510
+variant = 1
+revision = 0
+core_count = 3
+max_freq_khz = 2016000
+
+[soc.socinfo]
+family = "Snapdragon"
+machine = "fuxi"
+soc_id = 519       # SM8550 (kalama) in drivers/soc/qcom/socinfo.c
+revision = "2.0"
+serial_number = ""
+foundry_id = 0
+chip_family = 0
+raw_device_family = 0
+raw_device_number = 0
+hardware_platform = "MTP"
+pmic_model = ""
+
+[abi]
+abilist = "arm64-v8a,armeabi-v7a,armeabi"
+abilist32 = "armeabi-v7a,armeabi"
+abilist64 = "arm64-v8a"
+
+# Adreno 740 — a Vulkan 1.3 device (the SM8250-era Adreno 650 topped out at 1.1 on its shipping
+# driver). This is the level the guest must be able to claim for a Vulkan 1.3 host renderer
+# (gfxstream -> KosmicKrisp, which advertises apiVersion 1.4.354) to be a coherent story.
+[gpu]
+gl_vendor = "Qualcomm"
+gl_renderer = "Adreno (TM) 740"
+gl_version = "OpenGL ES 3.2 V@0744.0 (GIT@a0d5f2b, Ie4a2f9d70e, 1675814076)"
+vk_device_name = "Adreno (TM) 740"
+vk_vendor_id = 20803   # 0x5143 Qualcomm
+vk_device_type = "integrated_gpu"
+vk_driver_id = "VK_DRIVER_ID_QUALCOMM_PROPRIETARY"
+ro_hardware_egl = "adreno"
+
+[[sensors]]
+sensor_type = "accelerometer"
+name = "LSM6DSO Accelerometer"
+vendor = "STMicroelectronics"
+max_range = 78.4532
+resolution = 0.00239685
+power = 0.15
+min_delay = 2000
+
+[[sensors]]
+sensor_type = "magnetic_field"
+name = "AK09918 Magnetometer"
+vendor = "AKM"
+max_range = 4912.0
+resolution = 0.15
+power = 1.1
+min_delay = 10000
+
+# WiFi-only tablet posture — the default. Deletes the whole IMEI/IMSI/SIM surface;
+# `ro.baseband=unknown` is normal on a retail WiFi device.
+[telephony]
+mode = "wifi_only"
+
+[verified_boot]
+verifiedbootstate = "green"
+flash_locked = true
+device_state = "locked"
+veritymode = "enforcing"
+
+[network]
+mac_oui = "F0:B4:29"   # Xiaomi OUI
+interfaces = ["wlan0", "p2p0"]

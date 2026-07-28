@@ -1,0 +1,17 @@
+[gpu3d] stream_renderer_init returned 0
+[ok] virtio-gpu 3D (VIRGL+CONTEXT_INIT) 1024x768 → gfxstream host renderer, /dev/dri/renderD128
+[    0.174051] [drm] features: +virgl -edid -resource_blob -host_visible
+[    0.174053] [drm] features: +context_init
+[    0.174884] [drm] number of cap sets: 2
+[    0.175148] [drm] cap set 0: id 3, max-version 0, max-size 104
+[    0.175504] [drm] cap set 1: id 1, max-version 0, max-size 0
+[    0.175872] [drm] Initialized virtio_gpu 0.1.0 0 for a000600.virtio_mmio on minor 0
+[    0.174051] [drm] features: +virgl -edid -resource_blob -host_visible
+[    0.174053] [drm] features: +context_init
+[    0.174884] [drm] number of cap sets: 2
+[    0.175148] [drm] cap set 0: id 3, max-version 0, max-size 104
+[    0.175504] [drm] cap set 1: id 1, max-version 0, max-size 0
+[    0.175872] [drm] Initialized virtio_gpu 0.1.0 0 for a000600.virtio_mmio on minor 0
+crw-rw----    1 root     video     226,   0 Jan  1 00:00 card0
+crw-rw----    1 root     video     226, 128 Jan  1 00:00 renderD128
+~ # [6ncat /sys/class/drm/card0/device/features 2>/dev/null; echo GPU3D_DONE

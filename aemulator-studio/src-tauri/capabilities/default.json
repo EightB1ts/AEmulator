@@ -1,0 +1,7 @@
+{
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "default",
+    "description": "Default capability for the main window. App-defined commands (registered via invoke_handler) are reachable under core:default; no per-command ACL entry is required in Tauri v2.",
+    "windows": ["main"],
+    "permissions": ["core:default", "core:window:allow-start-dragging"]
+}

@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aemulator-identity",
+    "crates/aemulator-detection",
+    "crates/aemulator-dtb",
+    "crates/aemulator-control",
+    "crates/aemulator-vmm",
+    "crates/aemulator-supervisor",
+    "crates/attestation-relay",
+    "crates/aemulator-adb",
+    "crates/aemulator-cli",
+]
+
+# aemulator-hvf is a macOS-only HVF spike that links `-framework Hypervisor`. Kept OUT of the
+# workspace so the default `cargo build`/`cargo test` can never be broken by it. Build explicitly:
+#   cargo build --manifest-path crates/aemulator-hvf/Cargo.toml
+#
+# aemulator-studio/src-tauri is the standalone Tauri GUI ("AEmulator Studio"). It pulls in the
+# large Tauri/wry dependency tree and is macOS-window-bound, so — exactly like aemulator-hvf — it
+# is kept OUT of the workspace to keep the hermetic default `cargo build`/`cargo test` untouched.
+# Build explicitly from its own dir (see aemulator-studio/DESIGN.md).
+exclude = [
+    "crates/aemulator-hvf",
+    "aemulator-studio/src-tauri",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "BSD-3-Clause"
+rust-version = "1.96"
+repository = "https://github.com/avnir-ai/AEmulator"
+
+# Shared external dependencies. Crates opt in with `<dep> = { workspace = true }`.
+# Intra-workspace path deps are declared per-crate (see the dependency DAG in SCAFFOLD.md).
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+log = "0.4"
+env_logger = "0.11"
+vm-fdt = "0.3"

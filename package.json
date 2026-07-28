@@ -1,0 +1,53 @@
+{
+    "name": "aemulator",
+    "version": "0.0.1",
+    "private": true,
+    "description": "AEmulator repo-root task runner. Thin, dependency-free shim that fronts the Rust cargo workspace, the excluded macOS-only crates, and the AEmulator Studio Tauri app behind one script namespace.",
+    "license": "BSD-3-Clause",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/avnir-ai/AEmulator"
+    },
+    "packageManager": "pnpm@11.9.0",
+    "engines": {
+        "node": ">=22",
+        "pnpm": ">=11"
+    },
+    "scripts": {
+        "setup": "pnpm -C aemulator-studio install --frozen-lockfile",
+        "dev": "pnpm run tauri:dev",
+        "tauri": "pnpm -C aemulator-studio run tauri",
+        "tauri:dev": "pnpm -C aemulator-studio run tauri:dev",
+        "tauri:build": "pnpm -C aemulator-studio run tauri:build",
+        "tauri:check": "cargo check --manifest-path aemulator-studio/src-tauri/Cargo.toml --all-targets",
+        "tauri:lint": "cargo clippy --manifest-path aemulator-studio/src-tauri/Cargo.toml --all-targets -- -D warnings",
+        "studio:dev": "pnpm -C aemulator-studio run dev",
+        "studio:build": "pnpm -C aemulator-studio run build",
+        "studio:preview": "pnpm -C aemulator-studio run preview",
+        "studio:typecheck": "pnpm -C aemulator-studio exec tsc --noEmit",
+        "rust:build": "cargo build --workspace",
+        "rust:build:release": "cargo build --workspace --release",
+        "rust:check": "cargo check --workspace --all-targets",
+        "rust:test": "cargo test --workspace",
+        "rust:fmt": "cargo fmt --all",
+        "rust:fmt:check": "cargo fmt --all --check",
+        "rust:lint": "cargo clippy --workspace --all-targets -- -D warnings",
+        "rust:lint:fix": "cargo clippy --workspace --all-targets --fix --allow-dirty --allow-staged",
+        "rust:doc": "cargo doc --workspace --no-deps",
+        "hvf:build": "cargo build --release --manifest-path crates/aemulator-hvf/Cargo.toml --bin aemulator-hvf && pnpm run hvf:sign",
+        "hvf:sign": "bash -c 'for p in debug release; do b=crates/aemulator-hvf/target/$p/aemulator-hvf; [ -f \"$b\" ] && codesign --sign - --entitlements crates/aemulator-hvf/hv.entitlements --force \"$b\" || true; done'",
+        "hvf:doctor": "bash ci/hvf-doctor.sh",
+        "hvf:doctor:fix": "bash ci/hvf-doctor.sh --fix",
+        "hvf:test": "cargo test --manifest-path crates/aemulator-hvf/Cargo.toml",
+        "cli": "cargo run -q -p aemulator-cli --",
+        "gate": "bash ci/check.sh",
+        "gate:fast": "AEMU_SKIP_BUILD_CHECKS=1 bash ci/check.sh",
+        "build": "pnpm run rust:build && pnpm run studio:build",
+        "test": "pnpm run rust:test",
+        "lint": "pnpm run rust:lint && pnpm run studio:typecheck",
+        "fmt": "pnpm run rust:fmt",
+        "fmt:check": "pnpm run rust:fmt:check",
+        "ci": "pnpm run gate && pnpm run studio:typecheck && pnpm run studio:build",
+        "clean": "cargo clean && rm -rf aemulator-studio/dist aemulator-studio/src-tauri/target"
+    }
+}

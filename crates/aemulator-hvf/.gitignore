@@ -1,0 +1,6 @@
+# Build output.
+/target/
+
+# Test fixtures (kernel Image, initramfs, disk images, run logs) — fetched/generated locally,
+# never committed. testdata/ also carries its own allow-list .gitignore for belt-and-suspenders.
+/testdata/
