@@ -588,6 +588,7 @@ pub fn fence_count() -> u64 {
 // Mock forwarder — the recording double the Phase-3c smoke test drives.
 // =====================================================================================
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// One routed call recorded by [`MockRenderer`]. `PartialEq` so tests can assert exact routing.
@@ -611,6 +612,15 @@ pub enum Call {
         resource_id: u32,
     },
     ResourceUnref {
+        resource_id: u32,
+    },
+    /// `RESOURCE_MAP_BLOB` asked the host for the blob's `(host_ptr, size)`.
+    ResourceMap {
+        resource_id: u32,
+    },
+    /// The host-side blob map was released (`stream_renderer_resource_unmap`). Recorded so a test
+    /// can prove the VMM does not leak the host mapping when the *guest* mapping fails.
+    ResourceUnmap {
         resource_id: u32,
     },
     WaitSync {
@@ -664,40 +674,168 @@ pub enum Call {
 /// device, then inspect it after driving commands.
 pub type CallLog = Arc<Mutex<Vec<Call>>>;
 
-/// A [`Renderer3d`] double that records every routed call and returns success — no GPU, no gfxstream.
-/// This is what proves the guest→device→renderer-FFI routing in the smoke test.
-pub struct MockRenderer {
-    log: CallLog,
-    /// Optional byte the mock writes into every `read_pixels`/`transfer_from_host` dst, so present
-    /// coupling can be observed (a non-zero framebuffer after a 3D flush).
+/// The [`Renderer3d`] methods [`MockRendererBuilder::fail`] can override, i.e. every method that
+/// reports a gfxstream-style status. Naming anything else is a typo in the test, so the builder
+/// panics rather than silently injecting a failure that never fires.
+const INJECTABLE: &[&str] = &[
+    "context_create",
+    "resource_create_3d",
+    "wait_sync",
+    "attach_backing",
+    "transfer_to_host_3d",
+    "transfer_from_host_3d",
+    "create_blob",
+    "resource_unmap",
+    "submit_cmd",
+    "create_fence",
+    "fill_caps",
+    "read_pixels",
+    "present_to_layer",
+];
+
+/// The capsets [`MockRenderer`] reports by default: index 0 = the gfxstream Vulkan capset (id 3),
+/// v1, 8 bytes — the single capset the real [`GfxstreamRenderer`] advertises.
+const DEFAULT_CAPSETS: &[(u32, u32, u32)] = &[(3, 1, 8)];
+
+/// Builder for a [`MockRenderer`] with **failure injection**. Every method of the mock succeeds by
+/// default (`rc = 0`), which means no error branch in the device is reachable from a test unless a
+/// specific status is installed here.
+///
+/// ```ignore
+/// let (mock, log) = MockRenderer::builder()
+///     .fail("attach_backing", -22)             // per-method rc override
+///     .resource_map(Some((0x1_0000_0000, 0x8000)))
+///     .present_rc(-4)
+///     .capsets(&[(3, 1, 8)])
+///     .build();
+/// ```
+///
+/// [`MockRenderer::new`] is exactly `MockRenderer::builder().build()`.
+#[derive(Clone, Debug)]
+pub struct MockRendererBuilder {
+    rc: HashMap<&'static str, i32>,
     fill_byte: u8,
-    /// What [`Renderer3d::present_to_layer`] reports back. `0` (presented) by default, so a test that
-    /// publishes a layer pointer exercises the in-Vulkan present branch; [`Self::with_present_rc`]
-    /// substitutes a dropped-frame (`1`) or hard-failure (negative) status to drive the other arms.
-    present_rc: i32,
+    resource_map: Option<(u64, u64)>,
+    map_info: u32,
+    capsets: Vec<(u32, u32, u32)>,
 }
 
-impl MockRenderer {
-    pub fn new() -> (Self, CallLog) {
-        Self::with_present_rc(0)
+impl Default for MockRendererBuilder {
+    fn default() -> Self {
+        Self {
+            rc: HashMap::new(),
+            fill_byte: 0xAB,
+            resource_map: None,
+            map_info: 0,
+            capsets: DEFAULT_CAPSETS.to_vec(),
+        }
+    }
+}
+
+impl MockRendererBuilder {
+    /// Make `method` report `rc` instead of success.
+    ///
+    /// # Panics
+    /// If `method` is not one of the status-returning [`Renderer3d`] methods (see [`INJECTABLE`]) —
+    /// a misspelled name would otherwise inject a failure that never fires, so the test would pass
+    /// while covering nothing.
+    pub fn fail(mut self, method: &'static str, rc: i32) -> Self {
+        assert!(
+            INJECTABLE.contains(&method),
+            "MockRenderer::builder().fail({method:?}): not a status-returning Renderer3d method; \
+             one of {INJECTABLE:?}"
+        );
+        self.rc.insert(method, rc);
+        self
     }
 
-    /// A mock whose `present_to_layer` reports `rc` — the knob that selects which `flush_3d` branch
-    /// runs when a CAMetalLayer is published.
-    pub fn with_present_rc(rc: i32) -> (Self, CallLog) {
+    /// What [`Renderer3d::resource_map`] returns. `None` (the default) is the "host refused to map
+    /// this blob" case; `Some((host_ptr, size))` is what unlocks the whole body of `Gpu::map_blob`.
+    pub fn resource_map(mut self, map: Option<(u64, u64)>) -> Self {
+        self.resource_map = map;
+        self
+    }
+
+    /// The `STREAM_RENDERER_MAP_CACHE_*` value [`Renderer3d::resource_map_info`] reports (drives the
+    /// `OK_MAP_INFO` payload).
+    pub fn map_info(mut self, info: u32) -> Self {
+        self.map_info = info;
+        self
+    }
+
+    /// What [`Renderer3d::present_to_layer`] reports: `0` presented, `> 0` frame deliberately
+    /// dropped, `< 0` hard failure. Selects which `flush_3d` branch runs when a layer is published.
+    pub fn present_rc(self, rc: i32) -> Self {
+        self.fail("present_to_layer", rc)
+    }
+
+    /// The `(capset_id, max_version, max_size)` triples the mock reports, in index order. Also sets
+    /// `num_capsets`, i.e. `virtio_gpu_config.num_capsets`.
+    pub fn capsets(mut self, capsets: &[(u32, u32, u32)]) -> Self {
+        self.capsets = capsets.to_vec();
+        self
+    }
+
+    /// The byte the mock writes into every `read_pixels` / `transfer_from_host_3d` destination, so a
+    /// readback is observable as a non-zero framebuffer.
+    pub fn fill_byte(mut self, byte: u8) -> Self {
+        self.fill_byte = byte;
+        self
+    }
+
+    pub fn build(self) -> (MockRenderer, CallLog) {
         let log: CallLog = Arc::new(Mutex::new(Vec::new()));
         (
-            Self {
+            MockRenderer {
                 log: log.clone(),
-                fill_byte: 0xAB,
-                present_rc: rc,
+                rc: self.rc,
+                fill_byte: self.fill_byte,
+                resource_map: self.resource_map,
+                map_info: self.map_info,
+                capsets: self.capsets,
             },
             log,
         )
     }
+}
+
+/// A [`Renderer3d`] double that records every routed call and — unless a status was installed via
+/// [`MockRenderer::builder`] — returns success. No GPU, no gfxstream. This is what proves the
+/// guest→device→renderer-FFI routing in the smoke test, and what makes the device's error branches
+/// reachable from a test at all.
+pub struct MockRenderer {
+    log: CallLog,
+    /// Per-method status overrides installed by [`MockRendererBuilder::fail`]. Absent ⇒ `0`.
+    rc: HashMap<&'static str, i32>,
+    /// Byte the mock writes into every `read_pixels`/`transfer_from_host` dst, so present coupling
+    /// can be observed (a non-zero framebuffer after a 3D flush).
+    fill_byte: u8,
+    /// What `resource_map` reports back. `None` (the default) fails the map.
+    resource_map: Option<(u64, u64)>,
+    /// What `resource_map_info` reports back.
+    map_info: u32,
+    /// `(capset_id, max_version, max_size)` by index; also drives `num_capsets`.
+    capsets: Vec<(u32, u32, u32)>,
+}
+
+impl MockRenderer {
+    /// A mock with every default: all methods succeed, `resource_map` fails, one Vulkan capset.
+    pub fn new() -> (Self, CallLog) {
+        Self::builder().build()
+    }
+
+    /// Start configuring a mock — see [`MockRendererBuilder`].
+    pub fn builder() -> MockRendererBuilder {
+        MockRendererBuilder::default()
+    }
 
     fn push(&self, c: Call) {
         self.log.lock().unwrap().push(c);
+    }
+
+    /// The status installed for `method`, or success.
+    fn rc(&self, method: &'static str) -> i32 {
+        self.rc.get(method).copied().unwrap_or(0)
     }
 }
 
@@ -708,14 +846,14 @@ impl Renderer3d for MockRenderer {
             context_init,
             name: name.to_vec(),
         });
-        0
+        self.rc("context_create")
     }
     fn context_destroy(&mut self, ctx_id: u32) {
         self.push(Call::ContextDestroy { ctx_id });
     }
     fn resource_create_3d(&mut self, args: &ResourceCreate3d) -> i32 {
         self.push(Call::ResourceCreate3d(*args));
-        0
+        self.rc("resource_create_3d")
     }
     fn ctx_attach_resource(&mut self, ctx_id: u32, resource_id: u32) {
         self.push(Call::CtxAttach {
@@ -734,14 +872,14 @@ impl Renderer3d for MockRenderer {
     }
     fn wait_sync(&mut self, resource_id: u32) -> i32 {
         self.push(Call::WaitSync { resource_id });
-        0
+        self.rc("wait_sync")
     }
     fn attach_backing(&mut self, resource_id: u32, iovs: &[(u64, usize)]) -> i32 {
         self.push(Call::AttachBacking {
             resource_id,
             len: iovs.iter().map(|&(_, l)| l).sum(),
         });
-        0
+        self.rc("attach_backing")
     }
     fn detach_backing(&mut self, resource_id: u32) {
         self.push(Call::DetachBacking { resource_id });
@@ -752,7 +890,7 @@ impl Renderer3d for MockRenderer {
             xfer: *xfer,
             len: data.len(),
         });
-        0
+        self.rc("transfer_to_host_3d")
     }
     fn transfer_from_host_3d(&mut self, ctx_id: u32, xfer: &Transfer3d, data: &mut [u8]) -> i32 {
         for b in data.iter_mut() {
@@ -763,62 +901,203 @@ impl Renderer3d for MockRenderer {
             xfer: *xfer,
             len: data.len(),
         });
-        0
+        self.rc("transfer_from_host_3d")
     }
     fn create_blob(&mut self, ctx_id: u32, blob: &CreateBlob, _iovs: &[(u64, usize)]) -> i32 {
         self.push(Call::CreateBlob {
             ctx_id,
             blob: *blob,
         });
-        0
+        self.rc("create_blob")
     }
-    fn resource_map(&mut self, _resource_id: u32) -> Option<(u64, u64)> {
-        None
+    fn resource_map(&mut self, resource_id: u32) -> Option<(u64, u64)> {
+        self.push(Call::ResourceMap { resource_id });
+        self.resource_map
     }
-    fn resource_unmap(&mut self, _resource_id: u32) -> i32 {
-        0
+    fn resource_unmap(&mut self, resource_id: u32) -> i32 {
+        self.push(Call::ResourceUnmap { resource_id });
+        self.rc("resource_unmap")
     }
     fn resource_map_info(&mut self, _resource_id: u32) -> u32 {
-        0
+        self.map_info
     }
     fn submit_cmd(&mut self, ctx_id: u32, cmd: &mut [u8]) -> i32 {
         self.push(Call::SubmitCmd {
             ctx_id,
             bytes: cmd.to_vec(),
         });
-        0
+        self.rc("submit_cmd")
     }
     fn create_fence(&mut self, fence: &FenceReq) -> i32 {
         self.push(Call::CreateFence(*fence));
-        0
+        self.rc("create_fence")
     }
     fn num_capsets(&self) -> u32 {
-        1
+        self.capsets.len() as u32
     }
     fn capset_info(&mut self, index: u32) -> (u32, u32, u32) {
         self.push(Call::CapsetInfo { index });
-        // Pretend index 0 = gfxstream-vulkan capset (id 3), v1, 8 bytes.
-        (3, 1, 8)
+        self.capsets
+            .get(index as usize)
+            .copied()
+            .unwrap_or((0, 0, 0))
     }
     fn fill_caps(&mut self, capset_id: u32, version: u32, out: &mut [u8]) -> i32 {
         self.push(Call::FillCaps { capset_id, version });
         for b in out.iter_mut() {
             *b = 0;
         }
-        0
+        self.rc("fill_caps")
     }
     fn read_pixels(&mut self, resource_id: u32, w: u32, h: u32, dst: &mut [u8]) -> i32 {
         for b in dst.iter_mut() {
             *b = self.fill_byte;
         }
         self.push(Call::ReadPixels { resource_id, w, h });
-        0
+        self.rc("read_pixels")
     }
     fn present_to_layer(&mut self, resource_id: u32, layer_ptr: usize) -> i32 {
         self.push(Call::PresentToLayer {
             resource_id,
             layer_ptr,
         });
-        self.present_rc
+        self.rc("present_to_layer")
+    }
+}
+
+// =====================================================================================
+// Mock tests — the mock itself is test infrastructure, so its knobs need their own guard.
+// =====================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every mock method used to hard-return `0`, so **no** error branch anywhere in `gpu.rs` was
+    /// reachable from a test. This pins the injection mechanism itself: what is installed comes back
+    /// out, an un-overridden method still succeeds, and the call is recorded either way (a device
+    /// that bails on a failure must still be observable as having made the call).
+    #[test]
+    fn mock_renderer_reports_the_injected_failure() {
+        let (mut mock, log) = MockRenderer::builder()
+            .fail("attach_backing", -22)
+            .resource_map(Some((0x1_0000_0000, 0x8000)))
+            .map_info(3)
+            .present_rc(-4)
+            .capsets(&[(3, 1, 8), (9, 1, 16)])
+            .build();
+
+        assert_eq!(mock.attach_backing(1, &[(0x1000, 0x40)]), -22);
+        assert_eq!(
+            mock.submit_cmd(1, &mut [0u8; 4]),
+            0,
+            "a method with no installed status must still succeed"
+        );
+        assert_eq!(mock.present_to_layer(1, 0xCAFE), -4);
+        assert_eq!(mock.resource_map(1), Some((0x1_0000_0000, 0x8000)));
+        assert_eq!(mock.resource_map_info(1), 3);
+        assert_eq!(mock.num_capsets(), 2);
+        assert_eq!(mock.capset_info(1), (9, 1, 16));
+        assert_eq!(
+            mock.capset_info(7),
+            (0, 0, 0),
+            "an out-of-range capset index reports nothing, not the first capset"
+        );
+
+        let calls = log.lock().unwrap();
+        assert!(
+            calls.iter().any(|c| matches!(
+                c,
+                Call::AttachBacking {
+                    resource_id: 1,
+                    len: 0x40
+                }
+            )),
+            "a failing call must still be recorded: {calls:?}"
+        );
+    }
+
+    /// `MockRenderer::new()` is the contract 11 existing device tests are written against, so it must
+    /// stay exactly `builder().build()`.
+    #[test]
+    fn new_is_the_default_build() {
+        let (mut new, _) = MockRenderer::new();
+        let (mut built, _) = MockRenderer::builder().build();
+        assert_eq!(new.resource_map(1), built.resource_map(1));
+        assert_eq!(new.resource_map(1), None);
+        assert_eq!(new.num_capsets(), built.num_capsets());
+        assert_eq!(new.capset_info(0), built.capset_info(0));
+        assert_eq!(new.capset_info(0), (3, 1, 8));
+        assert_eq!(
+            new.present_to_layer(1, 0x10),
+            built.present_to_layer(1, 0x10)
+        );
+        assert_eq!(new.present_to_layer(1, 0x10), 0);
+    }
+
+    /// `Call::CreateFence` / `CreateBlob` / `TransferToHost` / `TransferFromHost` were recorded by the
+    /// mock and asserted on by nothing, so a routing regression in any of the four would not have
+    /// been caught. Pin the recorded shape exactly, in order.
+    #[test]
+    fn the_mock_records_the_fence_blob_and_transfer_calls() {
+        let (mut mock, log) = MockRenderer::new();
+        let xfer = Transfer3d {
+            box_: [0, 0, 0, 4, 4, 1],
+            offset: 0,
+            resource_id: 7,
+            level: 0,
+            stride: 16,
+            layer_stride: 0,
+        };
+        let blob = CreateBlob {
+            resource_id: 7,
+            blob_mem: 1,
+            blob_flags: 3,
+            nr_entries: 0,
+            blob_id: 5,
+            size: 0x1000,
+        };
+        let fence = FenceReq {
+            flags: 1,
+            fence_id: 0x99,
+            ctx_id: 2,
+            ring_idx: 1,
+        };
+
+        let mut data = [0u8; 16];
+        assert_eq!(mock.transfer_to_host_3d(2, &xfer, &mut data), 0);
+        assert_eq!(mock.transfer_from_host_3d(2, &xfer, &mut data), 0);
+        assert_eq!(
+            data, [0xABu8; 16],
+            "transfer_from_host must fill the destination, or a readback is unobservable"
+        );
+        assert_eq!(mock.create_blob(2, &blob, &[]), 0);
+        assert_eq!(mock.create_fence(&fence), 0);
+
+        assert_eq!(
+            log.lock().unwrap().as_slice(),
+            &[
+                Call::TransferToHost {
+                    ctx_id: 2,
+                    xfer,
+                    len: 16
+                },
+                Call::TransferFromHost {
+                    ctx_id: 2,
+                    xfer,
+                    len: 16
+                },
+                Call::CreateBlob { ctx_id: 2, blob },
+                Call::CreateFence(fence),
+            ]
+        );
+    }
+
+    /// A misspelled method name in `fail()` would inject a status that never fires — the test would
+    /// go green having covered nothing. That must be loud.
+    #[test]
+    #[should_panic(expected = "not a status-returning Renderer3d method")]
+    fn failing_an_unknown_method_is_a_hard_error() {
+        let _ = MockRenderer::builder().fail("attach_backng", -22);
     }
 }

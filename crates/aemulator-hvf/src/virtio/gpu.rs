@@ -143,6 +143,125 @@ struct Rect {
     height: u32,
 }
 
+/// The guest-address-space mapping boundary `RESOURCE_MAP_BLOB` / `RESOURCE_UNMAP_BLOB` cross.
+///
+/// This exists so the blob-map path is testable. The two `hv_vm_map`/`hv_vm_unmap` calls used to sit
+/// inline in [`Gpu::map_blob`] / [`Gpu::unmap_blob`], which made the whole body of `map_blob` — the
+/// window bounds check, the granule-alignment check, the mapping itself, the `blob_maps` bookkeeping
+/// and the `OK_MAP_INFO` reply — unreachable from any test: an `hv_vm_map` in a unit test would need
+/// a live `hv_vm_create`d VM, and the failure branch would need HVF to be *made* to fail.
+///
+/// `Send` because the `Box<dyn GuestMapper>` lives inside the [`Gpu`] device, which moves onto the
+/// vCPU thread. `Err` carries the raw `hv_return_t` so the caller can name it in a log.
+pub(crate) trait GuestMapper: Send {
+    /// Map `size` bytes of host memory at `host_ptr` into the guest at IPA `ipa`, read-write.
+    fn map(&mut self, host_ptr: u64, ipa: u64, size: u64) -> Result<(), i32>;
+    /// Remove a mapping previously installed by [`Self::map`].
+    fn unmap(&mut self, ipa: u64, size: u64) -> Result<(), i32>;
+}
+
+/// The production mapper: HVF second-stage translation via `hv_vm_map` / `hv_vm_unmap`.
+struct HvfMapper;
+
+impl GuestMapper for HvfMapper {
+    fn map(&mut self, host_ptr: u64, ipa: u64, size: u64) -> Result<(), i32> {
+        let rw = crate::HV_MEMORY_READ | crate::HV_MEMORY_WRITE;
+        // Safety: `host_ptr`/`size` come from `stream_renderer_resource_map`, i.e. a live host
+        // allocation owned by the renderer for as long as the blob is mapped; `unmap_blob` removes
+        // the guest mapping before the renderer releases it.
+        let rc = unsafe {
+            crate::hv_vm_map(
+                host_ptr as *mut std::os::raw::c_void,
+                ipa,
+                size as usize,
+                rw,
+            )
+        };
+        if rc == crate::HV_SUCCESS {
+            Ok(())
+        } else {
+            Err(rc)
+        }
+    }
+
+    fn unmap(&mut self, ipa: u64, size: u64) -> Result<(), i32> {
+        // Safety: removing a mapping this device installed; HVF validates the range itself.
+        let rc = unsafe { crate::hv_vm_unmap(ipa, size as usize) };
+        if rc == crate::HV_SUCCESS {
+            Ok(())
+        } else {
+            Err(rc)
+        }
+    }
+}
+
+/// One operation a [`RecordingMapper`] observed, in call order.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MapOp {
+    Map { host_ptr: u64, ipa: u64, size: u64 },
+    Unmap { ipa: u64, size: u64 },
+}
+
+/// Shared, cloneable log of [`MapOp`]s — clone the handle before moving the mapper into the device.
+#[cfg(test)]
+pub(crate) type MapLog = Arc<Mutex<Vec<MapOp>>>;
+
+/// Test double for [`GuestMapper`]: records every attempted mapping (successful or not) and can be
+/// made to fail the next `map`, which is the only way to reach `map_blob`'s "release the host map
+/// again because the guest mapping failed" branch.
+#[cfg(test)]
+pub(crate) struct RecordingMapper {
+    ops: MapLog,
+    /// Consumed by the next [`GuestMapper::map`]; that call reports this `hv_return_t` and every
+    /// later one succeeds.
+    fail_next: Option<i32>,
+}
+
+#[cfg(test)]
+impl RecordingMapper {
+    /// A mapper where every operation succeeds.
+    pub(crate) fn new() -> (Self, MapLog) {
+        Self::build(None)
+    }
+
+    /// A mapper whose **next** `map` reports `rc` (an `hv_return_t`); later ones succeed.
+    pub(crate) fn failing(rc: i32) -> (Self, MapLog) {
+        Self::build(Some(rc))
+    }
+
+    fn build(fail_next: Option<i32>) -> (Self, MapLog) {
+        let ops: MapLog = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                ops: ops.clone(),
+                fail_next,
+            },
+            ops,
+        )
+    }
+}
+
+#[cfg(test)]
+impl GuestMapper for RecordingMapper {
+    fn map(&mut self, host_ptr: u64, ipa: u64, size: u64) -> Result<(), i32> {
+        self.ops.lock().unwrap().push(MapOp::Map {
+            host_ptr,
+            ipa,
+            size,
+        });
+        match self.fail_next.take() {
+            Some(rc) => Err(rc),
+            None => Ok(()),
+        }
+    }
+
+    fn unmap(&mut self, ipa: u64, size: u64) -> Result<(), i32> {
+        self.ops.lock().unwrap().push(MapOp::Unmap { ipa, size });
+        Ok(())
+    }
+}
+
 pub struct Gpu {
     default_width: u32,
     default_height: u32,
@@ -167,6 +286,9 @@ pub struct Gpu {
     /// Live host-visible blob maps: resource id → (guest-offset within the shmem window, size). Set
     /// on `RESOURCE_MAP_BLOB` (after a successful `hv_vm_map`), cleared on `RESOURCE_UNMAP_BLOB`.
     blob_maps: HashMap<u32, (u64, u64)>,
+    /// How host blob memory reaches the guest address space. [`HvfMapper`] in production; a
+    /// [`RecordingMapper`] under test (see [`Gpu::with_mapper`]).
+    mapper: Box<dyn GuestMapper>,
 }
 
 impl Gpu {
@@ -188,6 +310,7 @@ impl Gpu {
             capset_size: HashMap::new(),
             blobs: HashMap::new(),
             blob_maps: HashMap::new(),
+            mapper: Box::new(HvfMapper),
         }
     }
 
@@ -207,6 +330,20 @@ impl Gpu {
     ) -> Self {
         let mut g = Self::new(width, height);
         g.renderer = Some(renderer);
+        g
+    }
+
+    /// Like [`Gpu::with_renderer`] but with the guest-mapping boundary substituted too — the only
+    /// way a test can reach `map_blob`'s body without a live `hv_vm_create`d VM.
+    #[cfg(test)]
+    pub(crate) fn with_mapper(
+        width: u32,
+        height: u32,
+        renderer: Box<dyn super::gpu3d::Renderer3d>,
+        mapper: Box<dyn GuestMapper>,
+    ) -> Self {
+        let mut g = Self::with_renderer(width, height, renderer);
+        g.mapper = mapper;
         g
     }
 
@@ -969,21 +1106,14 @@ impl Gpu {
                  (not host-granule aligned)"
             );
         }
-        let rw = crate::HV_MEMORY_READ | crate::HV_MEMORY_WRITE;
-        let rc = unsafe {
-            crate::hv_vm_map(
-                host_ptr as *mut std::os::raw::c_void,
-                ipa,
-                size as usize,
-                rw,
-            )
-        };
-        if rc != crate::HV_SUCCESS {
+        if let Err(rc) = self.mapper.map(host_ptr, ipa, size) {
             eprintln!(
                 "[gpu3d] map_blob res={resource_id} hv_vm_map(host={host_ptr:#x}, ipa={ipa:#x}, size={size:#x}) -> {} ({:#010x})",
                 crate::hv_return_name(rc),
                 rc as u32
             );
+            // The host-side map succeeded, so it must be released again — otherwise the renderer
+            // holds a host mapping the guest can never reach and never unmaps.
             let _ = self.renderer.as_mut().unwrap().resource_unmap(resource_id);
             return err(VIRTIO_GPU_RESP_ERR_UNSPEC);
         }
@@ -1039,8 +1169,7 @@ impl Gpu {
         use crate::virtio::pci::PCI_SHM_BASE;
         if let Some((offset, size)) = self.blob_maps.remove(&resource_id) {
             let ipa = PCI_SHM_BASE + offset;
-            let rc = unsafe { crate::hv_vm_unmap(ipa, size as usize) };
-            if rc != crate::HV_SUCCESS {
+            if let Err(rc) = self.mapper.unmap(ipa, size) {
                 eprintln!(
                     "[gpu3d] unmap_blob res={resource_id} hv_vm_unmap(ipa={ipa:#x}, size={size:#x}) -> {}",
                     crate::hv_return_name(rc)
@@ -1431,6 +1560,56 @@ mod tests {
         assert_eq!(fb.bytes, pixels);
         assert!(fb.non_zero_bytes() > 0);
     }
+
+    /// The **first** test in this crate to drive a device through a real virtqueue instead of calling
+    /// its private `dispatch`. Everything between the guest's kick and the used ring —
+    /// `pop_descriptor_chain`, [`split_chain`], [`write_scatter`], `add_used` — had never executed
+    /// under test, and it is exactly the layer deferred fence completion has to change.
+    ///
+    /// Two writable descriptors on purpose: a single contiguous response buffer would not exercise
+    /// `write_scatter`'s per-descriptor loop, which is where a response can be silently truncated.
+    #[test]
+    fn testkit_roundtrips_a_control_chain() {
+        use super::super::testkit::TestQueue;
+
+        let mut tq = TestQueue::new(0x8000);
+        let mut gpu = Gpu::new(1024, 768);
+
+        let resp_len = CTRL_HDR_LEN + VIRTIO_GPU_MAX_SCANOUTS * 24;
+        let split = 24u32; // response header in the first descriptor, pmodes[] in the second
+        let head = tq.push_chain(
+            &hdr(VIRTIO_GPU_CMD_GET_DISPLAY_INFO),
+            &[split, resp_len as u32 - split],
+        );
+
+        assert!(
+            gpu.process_controlq(&tq.mem, &mut tq.queue),
+            "a queued chain must be reported as consumed"
+        );
+
+        let used = tq.used();
+        assert_eq!(used.len(), 1, "exactly one used entry per chain: {used:?}");
+        assert_eq!(used[0].0, u32::from(head), "used.id is the chain head");
+        assert_eq!(
+            used[0].1 as usize, resp_len,
+            "used.len must be the full response length, scattered across both descriptors"
+        );
+
+        let resp = tq.resp_bytes(head);
+        assert_eq!(
+            read_le(&resp, 0, 4),
+            VIRTIO_GPU_RESP_OK_DISPLAY_INFO as u64,
+            "the guest must read back OK_DISPLAY_INFO out of guest RAM"
+        );
+        assert_eq!(read_le(&resp, CTRL_HDR_LEN + 8, 4), 1024);
+        assert_eq!(read_le(&resp, CTRL_HDR_LEN + 12, 4), 768);
+        assert_eq!(read_le(&resp, CTRL_HDR_LEN + 16, 4), 1, "pmodes[0].enabled");
+
+        assert!(
+            !gpu.process_controlq(&tq.mem, &mut tq.queue),
+            "the chain must not be popped twice — add_used has to have advanced next_avail"
+        );
+    }
 }
 
 /// Phase 3c smoke test: with a gfxstream renderer attached the device advertises VIRGL and routes
@@ -1661,7 +1840,7 @@ mod tests_3d {
     /// would trade a skipped frame for a full GPU→CPU transfer on a present path that is healthy.
     #[test]
     fn a_dropped_frame_does_not_degrade_to_readback() {
-        let (mock, log) = MockRenderer::with_present_rc(1);
+        let (mock, log) = MockRenderer::builder().present_rc(1).build();
         let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
         let mem = mem();
         gpu.handle()
@@ -1688,7 +1867,7 @@ mod tests_3d {
     /// CPU framebuffer — the only remaining pixel source — is still written.
     #[test]
     fn a_hard_present_failure_falls_back_to_the_readback_path() {
-        let (mock, log) = MockRenderer::with_present_rc(-4);
+        let (mock, log) = MockRenderer::builder().present_rc(-4).build();
         let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
         let mem = mem();
         gpu.handle()
@@ -1907,5 +2086,214 @@ mod tests_3d {
         let b = uuid_of(&mut gpu, 6);
         assert_eq!(a1, a2, "the same resource must keep the same uuid");
         assert_ne!(a1, b, "different resources must not collide");
+    }
+
+    // =============================================================================================
+    // RESOURCE_MAP_BLOB / RESOURCE_UNMAP_BLOB.
+    //
+    // Until `MockRenderer::resource_map` could report a host pointer and `hv_vm_map` could be
+    // substituted, `Gpu::map_blob` returned at its very first line in every test — the window bounds
+    // check, the granule-alignment check, the mapping, the `blob_maps` bookkeeping and the
+    // `OK_MAP_INFO` reply had never run. These are the first tests to enter that body.
+    // =============================================================================================
+
+    /// Host pointer the mock hands back, 16 KiB-aligned like a real `stream_renderer_resource_map`
+    /// result (HVF requires host / IPA / size all aligned to the host granule).
+    const BLOB_HOST_PTR: u64 = 0x1_0000_0000;
+    const BLOB_SIZE: u64 = 0x8000;
+    const BLOB_OFFSET: u64 = 0x4000;
+    const BLOB_RES: u32 = 9;
+
+    /// `RESOURCE_MAP_BLOB`: hdr(24) resource_id(24) padding(28) offset(32).
+    fn map_blob_cmd(resource_id: u32, offset: u64) -> Vec<u8> {
+        let mut c = hdr3d(super::super::gpu3d::VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB, 0);
+        c.extend_from_slice(&resource_id.to_le_bytes());
+        c.extend_from_slice(&0u32.to_le_bytes()); // padding
+        c.extend_from_slice(&offset.to_le_bytes());
+        c
+    }
+
+    /// `RESOURCE_UNMAP_BLOB`: hdr(24) resource_id(24) padding(28).
+    fn unmap_blob_cmd(resource_id: u32) -> Vec<u8> {
+        let mut c = hdr3d(super::super::gpu3d::VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB, 0);
+        c.extend_from_slice(&resource_id.to_le_bytes());
+        c.extend_from_slice(&0u32.to_le_bytes());
+        c
+    }
+
+    /// A device whose renderer maps `BLOB_RES` to `(BLOB_HOST_PTR, BLOB_SIZE)` and whose guest
+    /// mapping is a [`RecordingMapper`].
+    fn blob_gpu(mapper: Box<dyn GuestMapper>) -> (Gpu, super::super::gpu3d::CallLog) {
+        let (mock, log) = MockRenderer::builder()
+            .resource_map(Some((BLOB_HOST_PTR, BLOB_SIZE)))
+            .map_info(3) // STREAM_RENDERER_MAP_CACHE_* value echoed in OK_MAP_INFO
+            .build();
+        (Gpu::with_mapper(64, 64, Box::new(mock), mapper), log)
+    }
+
+    /// The happy path through the whole of `map_blob`: one mapping installed, at the IPA derived from
+    /// `PCI_SHM_BASE + offset`, with the host pointer and size the renderer reported — and an
+    /// `OK_MAP_INFO` reply carrying `map_info`. "Once" is the load-bearing word: a second `hv_vm_map`
+    /// for the same blob would leak the first.
+    #[test]
+    fn map_blob_maps_once_and_records_the_mapping() {
+        use super::super::gpu3d::VIRTIO_GPU_RESP_OK_MAP_INFO;
+        use crate::virtio::pci::PCI_SHM_BASE;
+
+        let (mapper, ops) = RecordingMapper::new();
+        let (mut gpu, log) = blob_gpu(Box::new(mapper));
+        let mem = mem();
+
+        let resp = gpu.dispatch(&mem, &map_blob_cmd(BLOB_RES, BLOB_OFFSET));
+
+        assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_OK_MAP_INFO as u64);
+        assert_eq!(
+            resp.len(),
+            CTRL_HDR_LEN + 8,
+            "OK_MAP_INFO is hdr + map_info"
+        );
+        assert_eq!(
+            read_le(&resp, CTRL_HDR_LEN, 4),
+            3,
+            "the reply must carry the renderer's map_info, not a hardcoded default"
+        );
+        assert_eq!(
+            *ops.lock().unwrap(),
+            vec![MapOp::Map {
+                host_ptr: BLOB_HOST_PTR,
+                ipa: PCI_SHM_BASE + BLOB_OFFSET,
+                size: BLOB_SIZE,
+            }],
+            "exactly one guest mapping, at PCI_SHM_BASE + offset"
+        );
+        assert_eq!(
+            gpu.blob_maps.get(&BLOB_RES),
+            Some(&(BLOB_OFFSET, BLOB_SIZE)),
+            "the live map must be recorded so unref/unmap can tear it down"
+        );
+        let calls = log.lock().unwrap();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, Call::ResourceUnmap { .. })),
+            "a successful map must not release the host mapping: {calls:?}"
+        );
+    }
+
+    /// `hv_vm_map` failing leaves the host-side blob map live but unreachable by the guest, so it must
+    /// be released again. This branch had **never executed** — an `hv_vm_map` failure needs a live VM
+    /// to provoke, which is exactly what [`GuestMapper`] removes from the path.
+    #[test]
+    fn map_blob_releases_the_host_map_when_the_guest_mapping_fails() {
+        let (mapper, ops) = RecordingMapper::failing(crate::HV_DENIED as i32);
+        let (mut gpu, log) = blob_gpu(Box::new(mapper));
+        let mem = mem();
+
+        let resp = gpu.dispatch(&mem, &map_blob_cmd(BLOB_RES, BLOB_OFFSET));
+
+        assert_eq!(
+            read_le(&resp, 0, 4),
+            VIRTIO_GPU_RESP_ERR_UNSPEC as u64,
+            "a failed guest mapping must be reported to the guest, not answered OK"
+        );
+        assert_eq!(
+            ops.lock().unwrap().len(),
+            1,
+            "the map was attempted exactly once and not retried"
+        );
+        let calls = log.lock().unwrap();
+        assert!(
+            calls.iter().any(
+                |c| matches!(c, Call::ResourceUnmap { resource_id } if *resource_id == BLOB_RES)
+            ),
+            "the host blob map must be released again: {calls:?}"
+        );
+        assert!(
+            gpu.blob_maps.is_empty(),
+            "a failed map must leave no bookkeeping behind"
+        );
+    }
+
+    /// The shmem-window bounds check. A guest offset whose blob would run past `PCI_SHM_SIZE` must be
+    /// rejected **before** any `hv_vm_map` — a mapping outside BAR2 is not reachable by the guest and
+    /// on a large enough overrun would collide with whatever else the VMM has placed above it.
+    #[test]
+    fn map_blob_rejects_an_offset_past_the_shmem_window() {
+        use crate::virtio::pci::PCI_SHM_SIZE;
+
+        let (mapper, ops) = RecordingMapper::new();
+        let (mut gpu, log) = blob_gpu(Box::new(mapper));
+        let mem = mem();
+
+        // Aligned, inside the window itself, but offset + BLOB_SIZE runs past its end.
+        let offset = PCI_SHM_SIZE - 0x4000;
+        let resp = gpu.dispatch(&mem, &map_blob_cmd(BLOB_RES, offset));
+
+        assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_ERR_UNSPEC as u64);
+        assert!(
+            ops.lock().unwrap().is_empty(),
+            "an out-of-window offset must be rejected before the guest mapping is attempted"
+        );
+        assert!(
+            gpu.blob_maps.is_empty(),
+            "a rejected map must leave no bookkeeping behind"
+        );
+        let calls = log.lock().unwrap();
+        assert!(
+            calls.iter().any(
+                |c| matches!(c, Call::ResourceUnmap { resource_id } if *resource_id == BLOB_RES)
+            ),
+            "the host map obtained before the bounds check must be released: {calls:?}"
+        );
+    }
+
+    /// `RESOURCE_UNMAP_BLOB` then a fresh `RESOURCE_MAP_BLOB` for the same resource. The unmap must
+    /// target the *same* `(ipa, size)` the map installed — an unmap of a different range leaves the
+    /// original mapping live, which is how a stale host pointer stays reachable by the guest after the
+    /// renderer has freed it.
+    #[test]
+    fn unmap_then_remap_succeeds() {
+        use super::super::gpu3d::VIRTIO_GPU_RESP_OK_MAP_INFO;
+        use crate::virtio::pci::PCI_SHM_BASE;
+
+        let (mapper, ops) = RecordingMapper::new();
+        let (mut gpu, _log) = blob_gpu(Box::new(mapper));
+        let mem = mem();
+        let ipa = PCI_SHM_BASE + BLOB_OFFSET;
+        let mapped = MapOp::Map {
+            host_ptr: BLOB_HOST_PTR,
+            ipa,
+            size: BLOB_SIZE,
+        };
+
+        let first = gpu.dispatch(&mem, &map_blob_cmd(BLOB_RES, BLOB_OFFSET));
+        assert_eq!(read_le(&first, 0, 4), VIRTIO_GPU_RESP_OK_MAP_INFO as u64);
+
+        let unmap = gpu.dispatch(&mem, &unmap_blob_cmd(BLOB_RES));
+        assert_eq!(read_le(&unmap, 0, 4), VIRTIO_GPU_RESP_OK_NODATA as u64);
+        assert!(
+            gpu.blob_maps.is_empty(),
+            "unmap must drop the live-map bookkeeping"
+        );
+
+        let second = gpu.dispatch(&mem, &map_blob_cmd(BLOB_RES, BLOB_OFFSET));
+        assert_eq!(
+            read_le(&second, 0, 4),
+            VIRTIO_GPU_RESP_OK_MAP_INFO as u64,
+            "the window is free again, so the same offset must map a second time"
+        );
+
+        assert_eq!(
+            *ops.lock().unwrap(),
+            vec![
+                mapped,
+                MapOp::Unmap {
+                    ipa,
+                    size: BLOB_SIZE
+                },
+                mapped,
+            ],
+            "unmap must release exactly the (ipa, size) that was mapped"
+        );
     }
 }

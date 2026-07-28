@@ -26,6 +26,11 @@ pub mod net;
 /// android14 GKI kernel actually speaks (`CONFIG_VIRTIO_MMIO=n`, `virtio_pci.ko` only).
 pub mod pci;
 pub mod rng;
+/// In-process virtqueue harness for the device tests — a real `virtio_queue::Queue` over real guest
+/// memory, programmed exactly the way [`pci`] programs it from the guest's config registers. Test-only
+/// (`#[cfg(test)]`), so it never reaches a shipped binary.
+#[cfg(test)]
+pub mod testkit;
 
 pub use gpu::ScanoutHandle;
 pub use mmio::{Backend, MmioTransport};
