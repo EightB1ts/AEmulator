@@ -83,6 +83,12 @@ pub struct SecureEnv {
     sharing_check: [u8; 32],
 }
 
+impl Default for SecureEnv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SecureEnv {
     pub fn new() -> Self {
         // Deterministic, non-secret constants — this is a software stand-in, not a TEE.

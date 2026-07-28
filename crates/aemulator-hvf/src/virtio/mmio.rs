@@ -58,6 +58,12 @@ const VIRTIO_MMIO_INT_VRING: u32 = 1 << 0;
 
 /// One of the three device backends. An enum (not `dyn`) so the stdin thread can reach the console
 /// without downcasting.
+///
+/// The variants differ a lot in size (`Gpu` carries the scanout + resource maps; `Rng` is nearly
+/// empty). Boxing the large ones would shrink the enum but put an allocation and a pointer-chase on
+/// the MMIO dispatch path — which is the one thing this enum exists to keep direct — and there is at
+/// most one `Backend` per device, so the wasted stack is bounded by the device count, not by traffic.
+#[allow(clippy::large_enum_variant)]
 pub enum Backend {
     Rng(Rng),
     Console(Console),

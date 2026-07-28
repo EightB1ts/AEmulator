@@ -160,14 +160,14 @@ impl CompositeBlock {
             disk_size,
             false,
         );
-        beginning.extend(std::iter::repeat(0u8).take(HEADER_PADDING_LEN));
+        beginning.extend(std::iter::repeat_n(0u8, HEADER_PADDING_LEN));
         beginning.extend_from_slice(&entries);
-        beginning.extend(std::iter::repeat(0u8).take(PARTITION_ALIGNMENT_SIZE));
+        beginning.extend(std::iter::repeat_n(0u8, PARTITION_ALIGNMENT_SIZE));
         debug_assert_eq!(beginning.len(), GPT_BEGINNING_SIZE as usize);
 
         // 5. Footer buffer: padding + backup entry array + backup header.
         let mut footer = Vec::with_capacity((footer_padding + GPT_END_SIZE) as usize);
-        footer.extend(std::iter::repeat(0u8).take(footer_padding as usize));
+        footer.extend(std::iter::repeat_n(0u8, footer_padding as usize));
         footer.extend_from_slice(&entries);
         write_gpt_header(
             &mut footer,
@@ -176,7 +176,7 @@ impl CompositeBlock {
             disk_size,
             true,
         );
-        footer.extend(std::iter::repeat(0u8).take(HEADER_PADDING_LEN));
+        footer.extend(std::iter::repeat_n(0u8, HEADER_PADDING_LEN));
         debug_assert_eq!(footer.len() as u64, disk_size - footer_offset);
 
         Ok(Self {
@@ -544,7 +544,7 @@ fn build_entry(label: &str, offset: u64, length: u64, idx: u8) -> [u8; 128] {
 /// Write a protective MBR (one whole-disk 0xEE partition) into `out` (512 bytes).
 fn write_protective_mbr(out: &mut Vec<u8>, disk_size: u64) {
     let start = out.len();
-    out.extend(std::iter::repeat(0u8).take(446)); // bootstrap
+    out.extend(std::iter::repeat_n(0u8, 446)); // bootstrap
     out.push(0x00); // status
     out.extend_from_slice(&[0, 0, 0]); // CHS begin
     out.push(0xEE); // type: GPT protective
@@ -552,7 +552,7 @@ fn write_protective_mbr(out: &mut Vec<u8>, disk_size: u64) {
     out.extend_from_slice(&1u32.to_le_bytes()); // first LBA
     let num_sectors = ((disk_size / SECTOR_SIZE).saturating_sub(1)).min(0xFFFF_FFFF) as u32;
     out.extend_from_slice(&num_sectors.to_le_bytes());
-    out.extend(std::iter::repeat(0u8).take(16 * 3)); // three empty entries
+    out.extend(std::iter::repeat_n(0u8, 16 * 3)); // three empty entries
     out.extend_from_slice(&[0x55, 0xAA]); // boot signature
     debug_assert_eq!(out.len() - start, SECTOR_SIZE as usize);
 }

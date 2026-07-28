@@ -11,6 +11,12 @@ pub struct Rng {
     urandom: Option<File>,
 }
 
+impl Default for Rng {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Rng {
     pub fn new() -> Self {
         Self {

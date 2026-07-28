@@ -1,8 +1,9 @@
 //! `gfxstream` — raw FFI bindings to the gfxstream host renderer's C ABI (Phase 3a).
 //!
-//! These are **bindings only**. Nothing here is wired into the VMM yet — that is Phase 3c
-//! (virtio-gpu 3D transport). The module exists behind the `gfxstream` cargo feature so the
-//! default `aemulator-hvf` build is completely unaffected (and needs no libclang / dylib).
+//! These are the raw bindings; `crate::virtio::gpu3d` is the safe forwarder built on them and
+//! `crate::display::metal::init_gfxstream` is what starts the renderer. They are **not** behind a
+//! cargo feature — there are none, deliberately, and `Cargo.toml` explains why: a feature-gated
+//! renderer produced binaries that booted perfectly and were quietly crippled.
 //!
 //! # What was proven in Phase 3a
 //! The host renderer dylib
@@ -17,15 +18,16 @@
 //! # Regenerating [`ffi`]
 //! `crates/aemulator-hvf/gfxstream/gen-ffi.sh` runs `bindgen` over
 //! `src/gfxstream/wrapper.h` (which includes `virtio-gpu-gfxstream-renderer.h`,
-//! `-unstable.h`, and `host-common/opengles.h`). The output [`ffi`] module is committed so the
-//! feature build does not require bindgen/libclang.
+//! `-unstable.h`, and `host-common/opengles.h`). The output [`ffi`] module is committed so an
+//! ordinary build needs neither bindgen nor libclang.
 //!
-//! # Linking (future — Phase 3c)
-//! To actually call into these symbols, a consumer must link `libgfxstream_backend.dylib`
-//! (e.g. `cargo:rustc-link-lib=dylib=gfxstream_backend` +
-//! `cargo:rustc-link-search=native=<build-host>` + an rpath), and at runtime stage the Vulkan loader
-//! + point `VK_DRIVER_FILES` at the KosmicKrisp ICD exactly as `run.sh` does. The current feature
-//! build compiles the bindings without linking, so it stays hermetic.
+//! # Linking
+//! `build.rs` links `libgfxstream_backend.dylib` unconditionally
+//! (`cargo:rustc-link-lib=dylib=gfxstream_backend`, `cargo:rustc-link-search=native=<build-host>`,
+//! and an rpath). At runtime the Vulkan loader must be staged and `VK_DRIVER_FILES` pointed at the
+//! KosmicKrisp ICD, exactly as `run.sh` does; `ci/hvf-doctor.sh` checks both, plus that every
+//! `stream_renderer_*` symbol the binary imports is actually exported by the dylib — the guard for
+//! the stale-binary crash recorded in `PHASE-KOSMICKRISP-STATUS.md`.
 
 pub mod ffi;
 

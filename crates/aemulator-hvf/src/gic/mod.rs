@@ -172,7 +172,7 @@ impl Gic {
 
     /// Is `ipa` inside the distributor MMIO window?
     pub fn dist_contains(ipa: u64) -> bool {
-        ipa >= GICD_BASE && ipa < GICD_BASE + GICD_SIZE
+        (GICD_BASE..GICD_BASE + GICD_SIZE).contains(&ipa)
     }
 
     /// Is `ipa` inside the redistributor MMIO window?

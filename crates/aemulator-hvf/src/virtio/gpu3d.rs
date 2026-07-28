@@ -46,8 +46,9 @@ use std::os::raw::{c_char, c_int, c_uint, c_void};
 // ---- virtio-gpu feature bits (virtio spec §5.7.3 / linux virtio_gpu.h) ----
 /// `VIRTIO_GPU_F_VIRGL` (bit 0): the device supports the virgl 3D command set.
 pub const VIRTIO_GPU_F_VIRGL: u64 = 1 << 0;
-/// `VIRTIO_GPU_F_RESOURCE_BLOB` (bit 3): the device supports blob resources (`RESOURCE_CREATE_BLOB`)
-/// + host-visible blob mapping (`RESOURCE_MAP_BLOB`/`UNMAP_BLOB`). This is what unlocks the gfxstream
+/// `VIRTIO_GPU_F_RESOURCE_BLOB` (bit 3): the device supports blob resources
+/// (`RESOURCE_CREATE_BLOB`) and host-visible blob mapping (`RESOURCE_MAP_BLOB`/`UNMAP_BLOB`). This
+/// is what unlocks the gfxstream
 /// **Address Space Graphics** (ASG) ring — Mesa's `gfxstream_vk` streams its command buffer through a
 /// HOST3D blob mapped into both guest and host, so without this feature the guest falls back to
 /// SwiftShader. Requires a host-visible PCI shared-memory region (BAR2, see `pci::PCI_SHM_BASE`).

@@ -256,6 +256,12 @@ impl Drop for SlirpNet {
 /// Declared `unsafe` because it dereferences both raw pointers; the C ABI and symbol are unchanged,
 /// so `slirp_shim.c` needs no edit. (This only became visible once `net` stopped being an optional
 /// feature — clippy's deny-by-default `not_unsafe_ptr_arg_deref` had never run over this file.)
+///
+/// # Safety
+/// `opaque` must be a live `*const SlirpNet` previously handed to libslirp as the callback opaque,
+/// and `buf` must point to at least `len` readable bytes valid for the duration of this call.
+/// libslirp guarantees both from its own poll loop; nothing else may call this. Null `opaque`/`buf`
+/// and `len == 0` are handled defensively rather than trusted.
 #[no_mangle]
 pub unsafe extern "C" fn aemu_slirp_recv_frame(opaque: *mut c_void, buf: *const u8, len: usize) {
     if opaque.is_null() || buf.is_null() || len == 0 {

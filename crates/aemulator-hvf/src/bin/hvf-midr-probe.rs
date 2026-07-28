@@ -5,7 +5,7 @@
 //!   1. `hv_vm_create(NULL)`               — default VM (guest runs at EL1, no EL2).
 //!   2. `hv_vm_map`                        — one RWX guest page (host heap page → guest IPA).
 //!   3. Writes a 3-instruction aarch64 stub into that page:
-//!        `mrs x0, MIDR_EL1 ; str x0, [x1] ; hvc #0`
+//!      `mrs x0, MIDR_EL1 ; str x0, [x1] ; hvc #0`
 //!   4. `hv_vcpu_create`, set PC=code, x1=scratch IPA, CPSR=EL1h.
 //!   5. `hv_vcpu_set_sys_reg(HV_SYS_REG_MIDR_EL1, <fake Qualcomm MIDR>)`.
 //!   6. `hv_vcpu_run` until the guest `hvc #0` exits (HV_EXIT_REASON_EXCEPTION, ESR.EC=0x16).

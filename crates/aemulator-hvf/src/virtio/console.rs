@@ -60,6 +60,12 @@ pub struct Console {
     dumped_raw: bool,
 }
 
+impl Default for Console {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Console {
     /// The default interactive console (Linux `run-linux`, Android hvc0). TX→stdout, RX←stdin.
     pub fn new() -> Self {

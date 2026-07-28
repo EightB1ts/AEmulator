@@ -61,8 +61,9 @@ pub const PCI_SHM_SIZE: u64 = 0x4000_0000;
 const BAR_SIZE: u64 = 0x4000;
 
 /// virtio shared-memory capability (`VIRTIO_PCI_CAP_SHARED_MEMORY_CFG`) shmid for the virtio-gpu
-/// host-visible region. **Must be `1`** (`VIRTIO_GPU_SHM_ID_HOST_VISIBLE`, per Linux `virtio_gpu.h`
-/// + crosvm `protocol.rs`); id `0` is `SHM_ID_NONE`/undefined, so a cap with id 0 is never matched by
+/// host-visible region. **Must be `1`** (`VIRTIO_GPU_SHM_ID_HOST_VISIBLE`, per Linux
+/// `virtio_gpu.h` and crosvm `protocol.rs`); id `0` is `SHM_ID_NONE`/undefined, so a cap with id 0
+/// is never matched by
 /// the guest kernel's `virtio_get_shm_region(HOST_VISIBLE)` → no host-visible region → Mesa
 /// gfxstream_vk fails "VirtGpuDevice must support host-visible memory / Failed to create ASG stream".
 const VIRTIO_GPU_SHM_ID_HOST_VISIBLE: u8 = 1;
@@ -207,7 +208,7 @@ impl PciDevice {
         self.cfg[0x0c] = 0; // cache line size
         self.cfg[0x0e] = 0x00; // header type 0 (single function)
                                // BAR0 (patched live in config_read).
-        put32(&mut self.cfg, 0x10, bar0 | 0x0);
+        put32(&mut self.cfg, 0x10, bar0);
         // BAR2/BAR3: the 64-bit prefetchable host-visible shared-memory window, when present.
         // Memory BAR encoding: bit0=0 (memory), bits2:1=10 (64-bit), bit3=1 (prefetchable) → 0x0C.
         if let Some((base, _size)) = self.shm_bar {
@@ -615,11 +616,11 @@ impl PciBus {
     }
 
     pub fn cam_contains(ipa: u64) -> bool {
-        ipa >= PCI_CAM_BASE && ipa < PCI_CAM_BASE + PCI_CAM_SIZE
+        (PCI_CAM_BASE..PCI_CAM_BASE + PCI_CAM_SIZE).contains(&ipa)
     }
 
     pub fn mmio_contains(ipa: u64) -> bool {
-        ipa >= PCI_MMIO_BASE && ipa < PCI_MMIO_BASE + PCI_MMIO_SIZE
+        (PCI_MMIO_BASE..PCI_MMIO_BASE + PCI_MMIO_SIZE).contains(&ipa)
     }
 
     /// Decode a CAM access → (bus, dev, func, reg).
@@ -811,11 +812,11 @@ mod tests_shm {
         let d = gpu_pci_dev_with_shm();
         // BAR2 low: base low | 0x0C (64-bit prefetchable memory BAR).
         assert_eq!(
-            d.config_read(0x18, 4) as u32,
+            d.config_read(0x18, 4),
             (PCI_SHM_BASE as u32 & 0xffff_fff0) | 0x0c
         );
         // BAR3 high: base high.
-        assert_eq!(d.config_read(0x1c, 4) as u32, (PCI_SHM_BASE >> 32) as u32);
+        assert_eq!(d.config_read(0x1c, 4), (PCI_SHM_BASE >> 32) as u32);
     }
 
     #[test]
@@ -824,20 +825,20 @@ mod tests_shm {
         // 64-bit BAR sizing: write all-ones to low+high, read the size mask, then restore.
         d.config_write(0x18, 0xffff_ffff, 4);
         d.config_write(0x1c, 0xffff_ffff, 4);
-        let lo = d.config_read(0x18, 4) as u32;
-        let hi = d.config_read(0x1c, 4) as u32;
+        let lo = d.config_read(0x18, 4);
+        let hi = d.config_read(0x1c, 4);
         // Reconstruct the size from the 64-bit mask (clear the low type bits).
-        let mask = (((hi as u64) << 32) | (lo as u64 & 0xffff_fff0)) as u64;
+        let mask = ((hi as u64) << 32) | (lo as u64 & 0xffff_fff0);
         let size = (!mask).wrapping_add(1);
         assert_eq!(size, PCI_SHM_SIZE, "BAR2 must size to the shmem window");
         // Restore the original base; sizing latch clears.
         d.config_write(0x18, (PCI_SHM_BASE as u32 & 0xffff_fff0) | 0x0c, 4);
         d.config_write(0x1c, (PCI_SHM_BASE >> 32) as u32, 4);
         assert_eq!(
-            d.config_read(0x18, 4) as u32,
+            d.config_read(0x18, 4),
             (PCI_SHM_BASE as u32 & 0xffff_fff0) | 0x0c
         );
-        assert_eq!(d.config_read(0x1c, 4) as u32, (PCI_SHM_BASE >> 32) as u32);
+        assert_eq!(d.config_read(0x1c, 4), (PCI_SHM_BASE >> 32) as u32);
     }
 
     #[test]

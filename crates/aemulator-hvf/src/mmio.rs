@@ -74,7 +74,7 @@ impl Pl011 {
     /// Is `ipa` inside this device's MMIO window?
     #[inline]
     pub fn contains(ipa: u64) -> bool {
-        ipa >= PL011_BASE && ipa < PL011_BASE + PL011_SIZE
+        (PL011_BASE..PL011_BASE + PL011_SIZE).contains(&ipa)
     }
 
     /// Raw interrupt status, derived from FIFO state (RX + RX-timeout assert while data waits).

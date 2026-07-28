@@ -502,7 +502,7 @@ fn boot_and_run_common(
         // bring-up script to the console on a timer, re-asserting the policy route/rule to beat
         // netd reconciliation. Disable with `AEMU_NET_AUTOCONF=0`. Pure-std, so the default
         // (non-`net`) build stays hermetic; a NIC-less run simply never spawns it.
-        let autoconf_on = std::env::var_os("AEMU_NET_AUTOCONF").map_or(true, |v| v != "0");
+        let autoconf_on = std::env::var_os("AEMU_NET_AUTOCONF").is_none_or(|v| v != "0");
         if cfg.netdev && autoconf_on {
             spawn_net_autoconfig_thread(tx.clone());
         }

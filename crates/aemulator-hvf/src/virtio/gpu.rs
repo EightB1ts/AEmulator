@@ -963,7 +963,7 @@ impl Gpu {
         // Silicon). A guest that allocated the blob at a 4 KiB-aligned offset will trip this — log it
         // precisely (it is the most likely next blocker), then still attempt so HVF's rc is reported.
         let page = crate::host_page_size() as u64;
-        if ipa % page != 0 || host_ptr % page != 0 || size % page != 0 {
+        if !ipa.is_multiple_of(page) || host_ptr % page != 0 || size % page != 0 {
             eprintln!(
                 "[gpu3d] map_blob res={resource_id} ALIGNMENT ipa={ipa:#x} host={host_ptr:#x} size={size:#x} page={page:#x} \
                  (not host-granule aligned)"
@@ -1153,7 +1153,7 @@ fn gather_backing(mem: &Mem, entries: &[(u64, u32)]) -> Vec<u8> {
         if mem.read_slice(&mut t, GuestAddress(addr)).is_ok() {
             buf.extend_from_slice(&t);
         } else {
-            buf.extend(std::iter::repeat(0u8).take(len as usize));
+            buf.extend(std::iter::repeat_n(0u8, len as usize));
         }
     }
     buf
@@ -1323,8 +1323,8 @@ mod tests {
         assert_ne!(gpu.features() & VIRTIO_GPU_F_EDID, 0);
         let resp = gpu.resp_edid(0, 0);
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_OK_EDID as u64);
-        assert_eq!(read_le(&resp, CTRL_HDR_LEN as usize, 4), 128); // size field
-                                                                   // EDID payload begins at hdr(24)+size(4)+padding(4) = 32, with the header magic.
+        assert_eq!(read_le(&resp, CTRL_HDR_LEN, 4), 128); // size field
+                                                          // EDID payload begins at hdr(24)+size(4)+padding(4) = 32, with the header magic.
         assert_eq!(resp[32], 0x00);
         assert_eq!(resp[33], 0xFF);
     }

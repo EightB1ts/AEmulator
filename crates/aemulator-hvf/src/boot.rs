@@ -46,6 +46,12 @@ pub struct BootPlan {
 /// in bytes (used for the `/memory` node). `initrd_path`, when set, is copied high in RAM and
 /// described to the kernel via `/chosen/linux,initrd-{start,end}`. `num_virtio` virtio-mmio
 /// transports get generic `/virtio_mmio@…` nodes. Returns the entry + FDT addresses for the vCPU.
+///
+/// The argument list is wide because every one of these is an independent, caller-chosen input to a
+/// single-shot staging step — there is no state to hold between calls, so a params struct would add
+/// a type whose only purpose is to be constructed inline at the two call sites and immediately
+/// destructured here.
+#[allow(clippy::too_many_arguments)]
 pub fn stage_boot(
     ram: &GuestRam,
     kernel_path: &Path,

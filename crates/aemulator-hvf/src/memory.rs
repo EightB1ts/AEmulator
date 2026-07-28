@@ -23,7 +23,7 @@ impl GuestRam {
     /// `DRAM_BASE`. `size` must be a multiple of the host granule (16 KiB on Apple Silicon).
     pub fn new(size: usize) -> Result<Self, String> {
         let page = host_page_size();
-        if size % page != 0 {
+        if !size.is_multiple_of(page) {
             return Err(format!(
                 "guest RAM size {size:#x} is not a multiple of the host page size {page:#x}"
             ));
