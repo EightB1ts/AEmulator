@@ -43,11 +43,7 @@ pub struct LaunchPlan {
 impl LaunchPlan {
     /// A copy-pasteable shell preview (env VAR=… prog args…) for logs + the UI.
     pub fn preview(&self) -> String {
-        let env: String = self
-            .env
-            .iter()
-            .map(|(k, v)| format!("{k}={v} "))
-            .collect();
+        let env: String = self.env.iter().map(|(k, v)| format!("{k}={v} ")).collect();
         format!("{env}{} {}", self.program.display(), self.args.join(" "))
     }
 }
@@ -75,7 +71,8 @@ pub fn compose_launch(
 
     // Render pipeline → flags. Gpu3d shows a native window + Metal scanout;
     // SwRender / Headless run without --gpu3d (SwRender adds SWRENDER=1 below).
-    let mut env: Vec<(String, String)> = vec![("AEMU_HOSTFWD".into(), format!("tcp:{adb_port}:5555"))];
+    let mut env: Vec<(String, String)> =
+        vec![("AEMU_HOSTFWD".into(), format!("tcp:{adb_port}:5555"))];
     let extra_render_cmdline = match profile.render_mode {
         RenderMode::Gpu3d => {
             args.push("--display".into());
@@ -138,7 +135,11 @@ pub fn compose_launch(
         args.push(extra);
     }
 
-    LaunchPlan { program: binary, args, env }
+    LaunchPlan {
+        program: binary,
+        args,
+        env,
+    }
 }
 
 /// Ad-hoc codesign the binary with the hypervisor entitlement:
@@ -232,8 +233,10 @@ const BOOTSTRAP_REL: &str = "third_party/bootstrap.sh";
 const KOSMICKRISP_ICD_BASENAME: &str = "kosmickrisp_mesa_icd.aarch64.json";
 
 /// The Vulkan LOADER (not the driver). Homebrew first, then the Intel-era prefix.
-const VULKAN_LOADER_CANDIDATES: [&str; 2] =
-    ["/opt/homebrew/lib/libvulkan.dylib", "/usr/local/lib/libvulkan.dylib"];
+const VULKAN_LOADER_CANDIDATES: [&str; 2] = [
+    "/opt/homebrew/lib/libvulkan.dylib",
+    "/usr/local/lib/libvulkan.dylib",
+];
 
 /// Resolve the KosmicKrisp driver manifest that this machine's bootstrap installed, erroring with
 /// the command that produces it when it is absent.
@@ -295,11 +298,7 @@ pub fn ensure_vulkan_icd(binary: &Path) -> Result<(), String> {
 
 /// The I/O half of [`ensure_vulkan_icd`], with both inputs injected so it can be tested against a
 /// fabricated source tree instead of whatever this machine happens to have installed.
-fn stage_vulkan_icd(
-    binary: &Path,
-    icd: &Path,
-    loader_candidates: &[&str],
-) -> Result<(), String> {
+fn stage_vulkan_icd(binary: &Path, icd: &Path, loader_candidates: &[&str]) -> Result<(), String> {
     let bindir = binary.parent().ok_or("binary has no parent dir")?;
     let vkdir = bindir.join("lib64/vulkan");
     std::fs::create_dir_all(&vkdir).map_err(|e| format!("mkdir {}: {e}", vkdir.display()))?;
@@ -408,7 +407,10 @@ mod tests {
             5556,
         );
         assert!(p.env.iter().any(|(k, v)| k == "SWRENDER" && v == "1"));
-        assert!(p.env.iter().any(|(k, v)| k == "AEMU_HOSTFWD" && v == "tcp:5556:5555"));
+        assert!(p
+            .env
+            .iter()
+            .any(|(k, v)| k == "AEMU_HOSTFWD" && v == "tcp:5556:5555"));
         assert!(!p.args.iter().any(|a| a == "--gpu3d"));
         assert!(p.args.iter().any(|a| a == "--cf-dir"));
     }
@@ -427,7 +429,10 @@ mod tests {
         assert!(!p.env.iter().any(|(k, _)| k == "SWRENDER"));
         // The guest must use ANGLE, never gfxstream's GLES: there is no host OpenGL on
         // macOS, so `egl=emulation` aborts the VMM mid-boot.
-        assert!(p.args.iter().any(|a| a.contains("androidboot.hardware.egl=angle")));
+        assert!(p
+            .args
+            .iter()
+            .any(|a| a.contains("androidboot.hardware.egl=angle")));
         assert!(!p.args.iter().any(|a| a.contains("egl=emulation")));
     }
 
@@ -459,10 +464,16 @@ mod tests {
             "androidboot.hardware.gltransport=virtio-gpu-asg",
             "androidboot.opengles.version=196609",
         ] {
-            assert!(cmdline.contains(prop), "Gpu3d cmdline is missing {prop}: {cmdline}");
+            assert!(
+                cmdline.contains(prop),
+                "Gpu3d cmdline is missing {prop}: {cmdline}"
+            );
         }
         // `vulkan=ranchu` is what selects gfxstream_vk (the real host GPU); `pastel` is SwiftShader.
-        assert!(!cmdline.contains("vulkan=pastel"), "Gpu3d must not select SwiftShader");
+        assert!(
+            !cmdline.contains("vulkan=pastel"),
+            "Gpu3d must not select SwiftShader"
+        );
     }
 
     /// Staging must leave the MANIFEST on disk, not merely the directory that should hold it.
@@ -475,19 +486,27 @@ mod tests {
     fn staging_writes_the_icd_manifest_itself_not_just_its_directory() {
         let root = scratch("icd-ok");
         let icd = root.join(KOSMICKRISP_ICD_BASENAME);
-        std::fs::write(&icd, br#"{"ICD":{"library_path":"/x/libvulkan_kosmickrisp.dylib"}}"#)
-            .unwrap();
+        std::fs::write(
+            &icd,
+            br#"{"ICD":{"library_path":"/x/libvulkan_kosmickrisp.dylib"}}"#,
+        )
+        .unwrap();
         // Stand-in for the Vulkan loader, so the test never depends on this machine's Homebrew.
         let loader = root.join("libvulkan.dylib");
         std::fs::write(&loader, b"\xcf\xfa\xed\xfe").unwrap();
         let bin = root.join("bin/aemulator-hvf");
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
 
-        stage_vulkan_icd(&bin, &icd, &[&loader.display().to_string()]).expect("staging must succeed");
+        stage_vulkan_icd(&bin, &icd, &[&loader.display().to_string()])
+            .expect("staging must succeed");
 
         let vkdir = bin.parent().unwrap().join("lib64/vulkan");
         let staged = vkdir.join(KOSMICKRISP_ICD_BASENAME);
-        assert!(staged.is_file(), "no ICD manifest staged at {}", staged.display());
+        assert!(
+            staged.is_file(),
+            "no ICD manifest staged at {}",
+            staged.display()
+        );
         assert_eq!(
             std::fs::read(&staged).unwrap(),
             std::fs::read(&icd).unwrap(),
@@ -495,7 +514,10 @@ mod tests {
         );
         // The loader belongs in the SAME dir: ANDROID_EMU_VK_ICD being set makes gfxstream look
         // for libvulkan.dylib here and nowhere else, so a staged ICD alone still finds no Vulkan.
-        assert!(vkdir.join("libvulkan.dylib").exists(), "Vulkan loader not staged");
+        assert!(
+            vkdir.join("libvulkan.dylib").exists(),
+            "Vulkan loader not staged"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -513,7 +535,10 @@ mod tests {
             &[&loader.display().to_string()],
         )
         .expect_err("a missing driver manifest must be fatal — there is no MoltenVK fallback left");
-        assert!(err.contains("kosmickrisp-not-built.json"), "error must name the manifest: {err}");
+        assert!(
+            err.contains("kosmickrisp-not-built.json"),
+            "error must name the manifest: {err}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -536,7 +561,11 @@ mod tests {
         // CAMetalLayer is published, so the in-Vulkan swapchain present never runs and every
         // GUEST frame pays a stream_renderer_transfer_read. Setting it would quietly retire the
         // only present path Studio ships.
-        for mode in [RenderMode::Gpu3d, RenderMode::SwRender, RenderMode::Headless] {
+        for mode in [
+            RenderMode::Gpu3d,
+            RenderMode::SwRender,
+            RenderMode::Headless,
+        ] {
             let p = compose_launch(
                 PathBuf::from("/bin/x"),
                 &prof(mode),

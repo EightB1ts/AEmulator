@@ -98,6 +98,9 @@ mod tests {
         let first = pool.alloc_adb();
         assert!(pool.in_use.contains(&first));
         pool.free(first);
-        assert!(!pool.in_use.contains(&first), "free() must drop the reservation");
+        assert!(
+            !pool.in_use.contains(&first),
+            "free() must drop the reservation"
+        );
     }
 }

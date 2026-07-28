@@ -4,7 +4,7 @@
 #
 # Runs, in order, and fails hard (exit non-zero) on the first failure:
 #   1. cargo fmt --all --check     (formatting is canonical rustfmt, 4-space)
-#   2. cargo clippy -D warnings    (all crates, all targets — zero warnings)
+#   2. cargo clippy -D warnings    (all workspace crates, all targets — zero warnings)
 #   3. cargo test                  (default features; whole workspace)
 #   4. the IDENTITY-VALIDATOR GATE  — the load-bearing anti-detection check:
 #        a. `profile-validate`  recomputes ConstructBuildFingerprint + coherence asserts
@@ -12,6 +12,11 @@
 #           via the CLI and grep them against the hard virtualization blocklist
 #           (ranchu|goldfish|qemu|cutf|vsoc|crosvm|swiftshader|dummy-virt|houdini|exagear).
 #           ANY hit is a full compromise (plan §"the leak surface is the whole image") → fail.
+#   5. ci/hvf-doctor.sh            (host Vulkan driver + gfxstream ABI match)
+#   6. the WORKSPACE-EXCLUDED crates — `crates/aemulator-hvf` and `aemulator-studio/src-tauri` are
+#      in `[workspace].exclude`, so steps 1-3 provably cannot reach them. Without step 6 the whole
+#      VMM + graphics stack and the Studio backend are unformatted, unlinted and untested by this
+#      gate. Steps 5 and 6 are REQUIRED on Apple-Silicon macOS and skipped LOUDLY elsewhere.
 #
 # NOTE the blocklist is grepped against the GUEST-facing artifacts only — NOT `qemu-args`,
 # which is the HOST launcher command line and legitimately contains "qemu-system-aarch64".
@@ -125,6 +130,36 @@ elif [ ! -f "$TP_GFXSTREAM_DYLIB" ]; then
 else
     bash "$DOCTOR" || fail "hvf-doctor failed — see its output above"
     ok "host graphics stack verified (driver ICD + gfxstream ABI match)"
+fi
+
+# --- 6: the workspace-EXCLUDED crates ---------------------------------------
+# Steps 1-3 above run `cargo fmt --all` / `clippy --all-targets` / `test` against the WORKSPACE, and
+# `crates/aemulator-hvf` + `aemulator-studio/src-tauri` are both in `[workspace].exclude`
+# (Cargo.toml:24-27). Cargo cannot reach an excluded crate from the workspace root, so until this
+# step existed ~10k lines — the entire VMM and graphics stack, plus the Studio backend — were never
+# formatted, linted or tested by the gate. Not merely untested: unlinted and unformatted.
+#
+# Gated exactly like hvf-doctor above, and for the same reason: both crates' build.rs hard-fail
+# without host-local dependencies (aemulator-hvf links -framework Hypervisor and needs libslirp +
+# the gfxstream dylib; the Studio pulls the Tauri/wry tree). So this is REQUIRED on an
+# Apple-Silicon macOS host with a built dylib and SKIPPED LOUDLY anywhere else. A skip that reads as
+# a pass is how the original gap was created.
+if [ "${AEMU_SKIP_BUILD_CHECKS:-0}" != "1" ]; then
+    step "workspace-excluded crates: aemulator-hvf + aemulator-studio/src-tauri (fmt · clippy · test)"
+    if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
+        printf '%s  ! skipped: needs Apple Silicon macOS (host is %s/%s) — aemulator-hvf and the Studio backend are UNVERIFIED on this runner%s\n' \
+            "$C_Y" "$(uname -s)" "$(uname -m)" "$C_0"
+    elif [ ! -f "$TP_GFXSTREAM_DYLIB" ]; then
+        printf '%s  ! skipped: gfxstream host renderer not built on this machine — run third_party/bootstrap.sh%s\n' \
+            "$C_Y" "$C_0"
+    else
+        for m in crates/aemulator-hvf/Cargo.toml aemulator-studio/src-tauri/Cargo.toml; do
+            cargo fmt --manifest-path "$m" --check || fail "rustfmt: run 'cargo fmt --manifest-path $m'"
+            cargo clippy --manifest-path "$m" --all-targets -- -D warnings || fail "clippy: fix warnings in $m"
+            cargo test --manifest-path "$m" || fail "cargo test failed for $m"
+            ok "$(dirname "$m"): fmt + clippy + tests green"
+        done
+    fi
 fi
 
 printf '\n%s==> ALL CHECKS PASSED%s\n' "$C_G" "$C_0"

@@ -2,8 +2,8 @@
 //! disk-usage accounting, and snapshots.
 //!
 //! Provisioning is REAL: each emulator gets its OWN cf-dir cloned from the base
-//! image, because the binary mutates `img/` in place (userdata/misc/metadata/frp
-//! + the prep of super.raw.img) — two VMs must never share a cf-dir. `cp -c -R`
+//! image, because the binary mutates `img/` in place (userdata, misc, metadata,
+//! frp, and the prep of super.raw.img) — two VMs must never share a cf-dir. `cp -c -R`
 //! performs the clone via `clonefile(2)`, so the multi-GB image costs only its
 //! private write delta on disk. Snapshot CRUD is still a Phase-2 placeholder.
 
@@ -28,21 +28,29 @@ pub fn provision_cf_dir(base_dir: &Path, cf_dir: &Path) -> Result<(), String> {
         return Err(format!("base image not found: {}", base_dir.display()));
     }
     if let Some(parent) = cf_dir.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
 
     // `cp -c -R` uses clonefile(2) on APFS (instant COW). Fall back to a plain
     // recursive copy on failure (non-APFS / cross-volume).
     let cow = Command::new("cp")
-        .args(["-c", "-R", &base_dir.display().to_string(), &cf_dir.display().to_string()])
+        .args([
+            "-c",
+            "-R",
+            &base_dir.display().to_string(),
+            &cf_dir.display().to_string(),
+        ])
         .output()
         .map_err(|e| format!("cp -c spawn: {e}"))?;
     if cow.status.success() {
         return Ok(());
     }
     let plain = Command::new("cp")
-        .args(["-R", &base_dir.display().to_string(), &cf_dir.display().to_string()])
+        .args([
+            "-R",
+            &base_dir.display().to_string(),
+            &cf_dir.display().to_string(),
+        ])
         .output()
         .map_err(|e| format!("cp -R spawn: {e}"))?;
     if plain.status.success() {
@@ -166,8 +174,15 @@ mod tests {
         let id = "11111111-1111-4111-8111-111111111111".to_string();
         let p = control_socket_path(&id);
         let len = p.to_string_lossy().len();
-        assert!(len <= 104, "control socket path is {len} bytes (> 104): {}", p.display());
+        assert!(
+            len <= 104,
+            "control socket path is {len} bytes (> 104): {}",
+            p.display()
+        );
         assert!(p.to_string_lossy().ends_with(".sock"));
-        assert!(p.to_string_lossy().contains(&id), "socket path must be unique per emulator id");
+        assert!(
+            p.to_string_lossy().contains(&id),
+            "socket path must be unique per emulator id"
+        );
     }
 }

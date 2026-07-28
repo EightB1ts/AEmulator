@@ -6,6 +6,7 @@
 //!   1. `AEMU_HVF_DIR` env override (an absolute path to the aemulator-hvf crate).
 //!   2. Walk the ancestors of the current exe looking for `crates/aemulator-hvf`.
 //!   3. Walk the ancestors of the CWD for the same.
+//!
 //! In `tauri dev` the exe lives at
 //! `AEmulator/aemulator-studio/src-tauri/target/debug/aemulator-studio`, whose
 //! ancestor `AEmulator/` contains `crates/aemulator-hvf` — so dev resolves with
@@ -74,10 +75,16 @@ pub fn hvf_binary() -> Result<PathBuf, String> {
         let pin = pin.to_string_lossy().to_string();
         let p = candidate(&pin);
         return if p.exists() {
-            println!("[studio] emulator binary (AEMU_HVF_PROFILE): {}", p.display());
+            println!(
+                "[studio] emulator binary (AEMU_HVF_PROFILE): {}",
+                p.display()
+            );
             Ok(p)
         } else {
-            Err(format!("AEMU_HVF_PROFILE={pin} but {} does not exist", p.display()))
+            Err(format!(
+                "AEMU_HVF_PROFILE={pin} but {} does not exist",
+                p.display()
+            ))
         };
     }
 

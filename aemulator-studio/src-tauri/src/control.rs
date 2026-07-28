@@ -18,8 +18,17 @@ use std::time::Duration;
 /// A control verb, rendered to its exact one-line wire form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verb {
-    Tap { x: u32, y: u32 },
-    Swipe { x1: u32, y1: u32, x2: u32, y2: u32, ms: Option<u32> },
+    Tap {
+        x: u32,
+        y: u32,
+    },
+    Swipe {
+        x1: u32,
+        y1: u32,
+        x2: u32,
+        y2: u32,
+        ms: Option<u32>,
+    },
     Text(String),
     Key(String),
     /// Press-and-hold / release halves, for live keyboard forwarding + held modifiers.
@@ -27,7 +36,9 @@ pub enum Verb {
     KeyUp(String),
     Launch(String),
     Screenshot(PathBuf),
-    WaitStable { timeout_ms: Option<u32> },
+    WaitStable {
+        timeout_ms: Option<u32>,
+    },
     Info,
     Quit,
 }
@@ -60,14 +71,10 @@ impl Verb {
 /// Send one raw command line to the socket and return the single-line reply
 /// (trimmed). Times out fast so a wedged VM never blocks the IPC thread.
 pub fn send_raw(socket: &Path, command: &str) -> Result<String, String> {
-    let mut stream = UnixStream::connect(socket)
-        .map_err(|e| format!("connect {}: {e}", socket.display()))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(15)))
-        .ok();
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .ok();
+    let mut stream =
+        UnixStream::connect(socket).map_err(|e| format!("connect {}: {e}", socket.display()))?;
+    stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
     writeln!(stream, "{command}").map_err(|e| format!("write: {e}"))?;
     stream.flush().map_err(|e| format!("flush: {e}"))?;
     let mut reader = BufReader::new(&stream);
@@ -229,7 +236,12 @@ fn parse_frame_reply(reply: &str, path: &Path) -> Result<Option<RawFrame>, Strin
             pixels.len()
         ));
     }
-    Ok(Some(RawFrame { width, height, gen, pixels }))
+    Ok(Some(RawFrame {
+        width,
+        height,
+        gen,
+        pixels,
+    }))
 }
 
 /// Ask the VM to capture a screenshot to `path`, then read the PNG bytes back.
@@ -274,7 +286,9 @@ mod tests {
         assert_eq!(f.pixels.len(), 64);
 
         // `unchanged` short-circuits without touching the file.
-        assert!(parse_frame_reply("OK unchanged gen=9", &p).unwrap().is_none());
+        assert!(parse_frame_reply("OK unchanged gen=9", &p)
+            .unwrap()
+            .is_none());
         // A short file is an error, not a silently-accepted partial frame.
         std::fs::write(&p, vec![0u8; 8]).unwrap();
         assert!(parse_frame_reply("OK size=4x4 gen=9 bytes=64 src=cpu", &p).is_err());
@@ -305,13 +319,20 @@ mod tests {
             .next_frame(&path, None)
             .expect("frame request must succeed")
             .expect("a first request (since=None) must return a frame");
-        assert!(f.width > 0 && f.height > 0, "geometry must parse: {f:?}", f = (f.width, f.height));
+        assert!(
+            f.width > 0 && f.height > 0,
+            "geometry must parse: {f:?}",
+            f = (f.width, f.height)
+        );
         assert_eq!(
             f.pixels.len(),
             f.width as usize * f.height as usize * 4,
             "pixel buffer must be exactly w*h*4 RGBA"
         );
-        assert!(path.exists(), "the frame must land at the REAL (spaced) path");
+        assert!(
+            path.exists(),
+            "the frame must land at the REAL (spaced) path"
+        );
 
         // Asking again at the same generation must short-circuit.
         assert!(
@@ -332,7 +353,14 @@ mod tests {
     fn verb_wire_forms() {
         assert_eq!(Verb::Tap { x: 5, y: 9 }.wire(), "tap 5 9");
         assert_eq!(
-            Verb::Swipe { x1: 1, y1: 2, x2: 3, y2: 4, ms: Some(300) }.wire(),
+            Verb::Swipe {
+                x1: 1,
+                y1: 2,
+                x2: 3,
+                y2: 4,
+                ms: Some(300)
+            }
+            .wire(),
             "swipe 1 2 3 4 300"
         );
         assert_eq!(Verb::Key("ENTER".into()).wire(), "key ENTER");

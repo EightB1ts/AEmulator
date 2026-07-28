@@ -69,7 +69,10 @@ pub enum Liveness {
     /// No session record on disk and no lock held — nothing is running.
     None,
     /// A VMM is live. `record` is present when the bookkeeping survived (the normal case).
-    Live { pid: u32, record: Option<SessionRecord> },
+    Live {
+        pid: u32,
+        record: Option<SessionRecord>,
+    },
     /// A record exists but its process is gone — stale bookkeeping to garbage-collect.
     Stale,
 }
@@ -126,7 +129,11 @@ pub fn cf_lock_holder(cf_dir: &Path) -> Option<Option<u32>> {
     use std::os::unix::io::AsRawFd;
 
     let path = cf_dir.join(CF_LOCK_FILE);
-    let mut file = std::fs::OpenOptions::new().read(true).write(true).open(&path).ok()?;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .ok()?;
     // Safety: valid fd owned by `file`.
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if rc == 0 {
@@ -135,7 +142,10 @@ pub fn cf_lock_holder(cf_dir: &Path) -> Option<Option<u32>> {
         return None;
     }
     let mut s = String::new();
-    let pid = file.read_to_string(&mut s).ok().and_then(|_| s.trim().parse().ok());
+    let pid = file
+        .read_to_string(&mut s)
+        .ok()
+        .and_then(|_| s.trim().parse().ok());
     Some(pid)
 }
 
@@ -149,7 +159,9 @@ pub fn classify(instance_dir: &Path, cf_dir: &Path) -> Liveness {
 
     if let Some(holder) = cf_lock_holder(cf_dir) {
         // Lock held → a VMM is alive. Prefer the lock file's pid; fall back to the record's.
-        let pid = holder.or_else(|| record.as_ref().map(|r| r.pid)).unwrap_or(0);
+        let pid = holder
+            .or_else(|| record.as_ref().map(|r| r.pid))
+            .unwrap_or(0);
         // Only trust the record if it describes the SAME process now holding the lock; otherwise it
         // belongs to an older VM and its socket/port would be wrong.
         let record = record.filter(|r| pid == 0 || r.pid == pid);
@@ -194,7 +206,8 @@ mod tests {
     use super::*;
 
     fn tmp(name: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("aemu-session-test-{}-{name}", std::process::id()));
+        let p =
+            std::env::temp_dir().join(format!("aemu-session-test-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
@@ -218,8 +231,8 @@ mod tests {
     /// against the emulator's source directly.
     #[test]
     fn cf_lock_file_name_mirrors_the_emulator() {
-        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../crates/aemulator-hvf/src/cf_lock.rs");
+        let src =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/aemulator-hvf/src/cf_lock.rs");
         let text = match std::fs::read_to_string(&src) {
             Ok(t) => t,
             // Don't fail the Studio build in a checkout without the emulator crate.
@@ -299,7 +312,10 @@ mod tests {
         writeln!(f, "31337").unwrap();
         f.flush().unwrap();
         // Safety: valid fd owned by `f`, held for the duration of the assertion below.
-        assert_eq!(unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+        assert_eq!(
+            unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
 
         match classify(&dir, &cf) {
             Liveness::Live { pid, record } => {
@@ -336,12 +352,18 @@ mod tests {
         writeln!(f, "22222").unwrap(); // a DIFFERENT process holds it now
         f.flush().unwrap();
         // Safety: valid fd owned by `f`.
-        assert_eq!(unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+        assert_eq!(
+            unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
 
         match classify(&dir, &cf) {
             Liveness::Live { pid, record } => {
                 assert_eq!(pid, 22222);
-                assert!(record.is_none(), "mismatched record must be discarded, not adopted");
+                assert!(
+                    record.is_none(),
+                    "mismatched record must be discarded, not adopted"
+                );
             }
             other => panic!("expected Live, got {other:?}"),
         }

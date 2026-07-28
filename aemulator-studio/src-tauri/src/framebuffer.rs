@@ -63,7 +63,14 @@ pub fn spawn(poll: FbPoll) {
 }
 
 fn run(poll: FbPoll) {
-    let FbPoll { socket, live_shot, stop, chan, app, id } = poll;
+    let FbPoll {
+        socket,
+        live_shot,
+        stop,
+        chan,
+        app,
+        id,
+    } = poll;
     // `None` forces a full capture on the first tick regardless of the VM's generation.
     let mut since: Option<u64> = None;
     // ONE connection for the whole stream — see `control::FrameStream`. Reconnected lazily
@@ -157,8 +164,16 @@ fn base64_encode_into(input: &[u8], out: &mut String) {
         let n = (b0 << 16) | (b1 << 8) | b2;
         out.push(A[((n >> 18) & 63) as usize] as char);
         out.push(A[((n >> 12) & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { A[((n >> 6) & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { A[(n & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            A[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            A[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
 }
 

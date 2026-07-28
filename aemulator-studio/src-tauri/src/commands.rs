@@ -11,10 +11,10 @@ use std::sync::Mutex;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
 
+use crate::control;
 use crate::error::StudioError;
 use crate::manager::DeviceManager;
 use crate::types::*;
-use crate::control;
 
 type Managed<'a> = State<'a, Mutex<DeviceManager>>;
 
@@ -57,7 +57,9 @@ pub fn delete_emulator(m: Managed, id: EmulatorId) -> Result<(), String> {
 
 #[tauri::command]
 pub fn start_emulator(app: AppHandle, m: Managed, id: EmulatorId) -> Result<VmInstance, String> {
-    lock(&m).start_emulator(&app, &id).map_err(|e| e.to_string())
+    lock(&m)
+        .start_emulator(&app, &id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

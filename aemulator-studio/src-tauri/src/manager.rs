@@ -271,7 +271,10 @@ impl DeviceManager {
             .map(|p| p.mem_mb)
             .sum();
         if used + profile.mem_mb > budget {
-            return Err(StudioError::RamBudget { want: used + profile.mem_mb, cap: budget });
+            return Err(StudioError::RamBudget {
+                want: used + profile.mem_mb,
+                cap: budget,
+            });
         }
 
         // Resolve paths.
@@ -318,7 +321,10 @@ impl DeviceManager {
             // garbage (record + stale socket) so the fresh launch below starts clean.
             session::Liveness::Stale => {
                 let stale_socket = session::read(&layout.dir).map(|r| r.socket);
-                println!("[studio] clearing stale session for {} (VM is gone)", profile.name);
+                println!(
+                    "[studio] clearing stale session for {} (VM is gone)",
+                    profile.name
+                );
                 session::cleanup_dead(&layout.dir, stale_socket.as_deref());
             }
             session::Liveness::None => {}
@@ -352,7 +358,8 @@ impl DeviceManager {
         }
 
         let adb_port = self.port_pool.alloc_adb();
-        let plan = spawn::compose_launch(binary, &profile, &layout.cf_dir, &layout.socket, adb_port);
+        let plan =
+            spawn::compose_launch(binary, &profile, &layout.cf_dir, &layout.socket, adb_port);
         println!("[studio] launching {}: {}", profile.name, plan.preview());
 
         // Fresh socket path each run.
@@ -375,8 +382,16 @@ impl DeviceManager {
         let handle = VmHandle {
             id: id.clone(),
             state: VmState::Booting,
-            ports: VmPorts { adb_host: adb_port, control_socket: layout.socket.display().to_string() },
-            display: DisplayInfo { width: 0, height: 0, gen: 0, nonzero: 0 },
+            ports: VmPorts {
+                adb_host: adb_port,
+                control_socket: layout.socket.display().to_string(),
+            },
+            display: DisplayInfo {
+                width: 0,
+                height: 0,
+                gen: 0,
+                nonzero: 0,
+            },
             started_at: Some(now_ms()),
             pid,
             instance_dir: layout.dir.clone(),
@@ -407,11 +422,23 @@ impl DeviceManager {
         );
 
         // Supervisor: stdout/stderr → vm-log + reap → vm-state.
-        spawn_supervisor(app.clone(), id.clone(), child, intentional_stop.clone(), log_ring);
+        spawn_supervisor(
+            app.clone(),
+            id.clone(),
+            child,
+            intentional_stop.clone(),
+            log_ring,
+        );
         // Readiness monitor: poll the control socket → flip Booting→Ready.
         spawn_ready_monitor(app.clone(), id.clone(), layout.socket, intentional_stop);
 
-        let _ = app.emit("vm-state", VmStateEvent { id: id.clone(), state: VmState::Booting });
+        let _ = app.emit(
+            "vm-state",
+            VmStateEvent {
+                id: id.clone(),
+                state: VmState::Booting,
+            },
+        );
         Ok(instance)
     }
 
@@ -431,8 +458,11 @@ impl DeviceManager {
         // Keep the resumed VM's adb port out of the allocator so the next launch can't collide.
         self.port_pool.reserve(rec.adb_port);
 
-        let log_ring: LogRing =
-            self.logs.entry(id.clone()).or_insert_with(|| Arc::new(Mutex::new(VecDeque::with_capacity(LOG_RING_CAP)))).clone();
+        let log_ring: LogRing = self
+            .logs
+            .entry(id.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(VecDeque::with_capacity(LOG_RING_CAP))))
+            .clone();
         emit_log(
             app,
             id,
@@ -446,7 +476,9 @@ impl DeviceManager {
         );
 
         let intentional_stop = Arc::new(AtomicBool::new(false));
-        let root = self.instances_root().unwrap_or_else(|_| std::env::temp_dir());
+        let root = self
+            .instances_root()
+            .unwrap_or_else(|_| std::env::temp_dir());
         let layout = storage::InstanceLayout::new(&root, id);
 
         let handle = VmHandle {
@@ -458,7 +490,12 @@ impl DeviceManager {
                 adb_host: rec.adb_port,
                 control_socket: rec.socket.display().to_string(),
             },
-            display: DisplayInfo { width: 0, height: 0, gen: 0, nonzero: 0 },
+            display: DisplayInfo {
+                width: 0,
+                height: 0,
+                gen: 0,
+                nonzero: 0,
+            },
             started_at: Some(rec.started_at),
             pid: rec.pid,
             instance_dir: layout.dir.clone(),
@@ -473,8 +510,20 @@ impl DeviceManager {
         let instance = handle.to_instance();
         self.running.insert(id.clone(), handle);
 
-        spawn_exit_watcher(app.clone(), id.clone(), rec.pid, layout.dir, intentional_stop);
-        let _ = app.emit("vm-state", VmStateEvent { id: id.clone(), state: VmState::Ready });
+        spawn_exit_watcher(
+            app.clone(),
+            id.clone(),
+            rec.pid,
+            layout.dir,
+            intentional_stop,
+        );
+        let _ = app.emit(
+            "vm-state",
+            VmStateEvent {
+                id: id.clone(),
+                state: VmState::Ready,
+            },
+        );
         instance
     }
 
@@ -484,7 +533,9 @@ impl DeviceManager {
     /// restart is invisible in the UI until the user presses Start (which is exactly when the old
     /// code spawned a duplicate onto its disk). Adopting up front means the UI simply shows the truth.
     pub fn reconcile_sessions(&mut self, app: &AppHandle) {
-        let Ok(root) = self.instances_root() else { return };
+        let Ok(root) = self.instances_root() else {
+            return;
+        };
         let ids: Vec<EmulatorId> = self.profiles.keys().cloned().collect();
         for id in ids {
             let layout = storage::InstanceLayout::new(&root, &id);
@@ -492,7 +543,10 @@ impl DeviceManager {
                 continue;
             }
             match session::classify(&layout.dir, &layout.cf_dir) {
-                session::Liveness::Live { pid, record: Some(rec) } => {
+                session::Liveness::Live {
+                    pid,
+                    record: Some(rec),
+                } => {
                     println!("[studio] reconcile: adopting running VM {id} (pid {pid})");
                     self.adopt_session(app, &id, rec);
                 }
@@ -529,7 +583,10 @@ impl DeviceManager {
         if ids.is_empty() {
             return;
         }
-        println!("[studio] shutting down {} running VM(s) before exit", ids.len());
+        println!(
+            "[studio] shutting down {} running VM(s) before exit",
+            ids.len()
+        );
         let mut pids = Vec::new();
         for id in &ids {
             if let Some(h) = self.running.get(id) {
@@ -555,7 +612,13 @@ impl DeviceManager {
         let pid = handle.pid;
         let socket = handle.socket.clone();
         let instance_dir = handle.instance_dir.clone();
-        let _ = app.emit("vm-state", VmStateEvent { id: id.clone(), state: VmState::Stopping });
+        let _ = app.emit(
+            "vm-state",
+            VmStateEvent {
+                id: id.clone(),
+                state: VmState::Stopping,
+            },
+        );
 
         // Escalation ladder: `quit` → SIGTERM → SIGKILL, each stage WAITING for the process to
         // actually exit rather than sleeping a fixed interval.
@@ -601,7 +664,10 @@ impl DeviceManager {
             session::clear(&instance_dir);
             let _ = app_for_thread.emit(
                 "vm-state",
-                VmStateEvent { id: id_for_thread.clone(), state: VmState::Stopped },
+                VmStateEvent {
+                    id: id_for_thread.clone(),
+                    state: VmState::Stopped,
+                },
             );
         });
 
@@ -616,7 +682,9 @@ impl DeviceManager {
     /// Free resources for VMs whose teardown has completed. Called when a stop finishes, so the adb
     /// port returns to the pool only after the process that was using it is gone.
     pub fn reap_stopped(&mut self, id: &EmulatorId) {
-        let Some(h) = self.running.get(id) else { return };
+        let Some(h) = self.running.get(id) else {
+            return;
+        };
         if matches!(h.state, VmState::Stopped | VmState::Crashed) && !session::pid_alive(h.pid) {
             let port = h.adb_port;
             self.port_pool.free(port);
@@ -631,8 +699,16 @@ impl DeviceManager {
             Ok(VmInstance {
                 id: profile.id.clone(),
                 state: VmState::Stopped,
-                ports: VmPorts { adb_host: 0, control_socket: String::new() },
-                display: DisplayInfo { width: 0, height: 0, gen: 0, nonzero: 0 },
+                ports: VmPorts {
+                    adb_host: 0,
+                    control_socket: String::new(),
+                },
+                display: DisplayInfo {
+                    width: 0,
+                    height: 0,
+                    gen: 0,
+                    nonzero: 0,
+                },
                 started_at: None,
                 pid: None,
             })
@@ -642,7 +718,11 @@ impl DeviceManager {
     pub fn get_logs(&self, id: &EmulatorId) -> Vec<VmLogEvent> {
         self.logs
             .get(id)
-            .map(|r| r.lock().map(|q| q.iter().cloned().collect()).unwrap_or_default())
+            .map(|r| {
+                r.lock()
+                    .map(|q| q.iter().cloned().collect())
+                    .unwrap_or_default()
+            })
             .unwrap_or_default()
     }
 
@@ -819,7 +899,13 @@ fn spawn_supervisor(
             if let Some(dir) = instance_dir {
                 session::clear(&dir);
             }
-            let _ = app.emit("vm-state", VmStateEvent { id: id.clone(), state: final_state });
+            let _ = app.emit(
+                "vm-state",
+                VmStateEvent {
+                    id: id.clone(),
+                    state: final_state,
+                },
+            );
             if final_state == VmState::Crashed {
                 let code = status
                     .ok()
@@ -828,7 +914,10 @@ fn spawn_supervisor(
                     .unwrap_or_else(|| "signal".into());
                 let _ = app.emit(
                     "vm-error",
-                    VmErrorEvent { id, message: format!("emulator process exited unexpectedly (status {code})") },
+                    VmErrorEvent {
+                        id,
+                        message: format!("emulator process exited unexpectedly (status {code})"),
+                    },
                 );
             }
         })
@@ -856,7 +945,11 @@ fn spawn_exit_watcher(
                 std::thread::sleep(EXIT_WATCH_INTERVAL);
             }
             let was_intentional = intentional.load(Ordering::Acquire);
-            let final_state = if was_intentional { VmState::Stopped } else { VmState::Crashed };
+            let final_state = if was_intentional {
+                VmState::Stopped
+            } else {
+                VmState::Crashed
+            };
 
             if let Some(state) = app.try_state::<Mutex<DeviceManager>>() {
                 let mut m = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -867,7 +960,13 @@ fn spawn_exit_watcher(
                 m.reap_stopped(&id);
             }
             session::clear(&instance_dir);
-            let _ = app.emit("vm-state", VmStateEvent { id: id.clone(), state: final_state });
+            let _ = app.emit(
+                "vm-state",
+                VmStateEvent {
+                    id: id.clone(),
+                    state: final_state,
+                },
+            );
             if final_state == VmState::Crashed {
                 let _ = app.emit(
                     "vm-error",
@@ -882,7 +981,12 @@ fn spawn_exit_watcher(
 }
 
 fn emit_log(app: &AppHandle, id: &EmulatorId, ring: &LogRing, line: String, stream: &str) {
-    let ev = VmLogEvent { id: id.clone(), line, stream: stream.to_string(), ts: now_ms() };
+    let ev = VmLogEvent {
+        id: id.clone(),
+        line,
+        stream: stream.to_string(),
+        ts: now_ms(),
+    };
     if let Ok(mut q) = ring.lock() {
         if q.len() >= LOG_RING_CAP {
             q.pop_front();
@@ -941,7 +1045,13 @@ fn spawn_ready_monitor(
                     }
                     if !ready {
                         ready = true;
-                        let _ = app.emit("vm-state", VmStateEvent { id: id.clone(), state: VmState::Ready });
+                        let _ = app.emit(
+                            "vm-state",
+                            VmStateEvent {
+                                id: id.clone(),
+                                state: VmState::Ready,
+                            },
+                        );
                     }
                     std::thread::sleep(Duration::from_secs(2));
                 } else {
@@ -983,8 +1093,16 @@ mod tests {
             VmHandle {
                 id: id.clone(),
                 state: VmState::Ready,
-                ports: VmPorts { adb_host: 5556, control_socket: String::new() },
-                display: DisplayInfo { width: 0, height: 0, gen: 0, nonzero: 0 },
+                ports: VmPorts {
+                    adb_host: 5556,
+                    control_socket: String::new(),
+                },
+                display: DisplayInfo {
+                    width: 0,
+                    height: 0,
+                    gen: 0,
+                    nonzero: 0,
+                },
                 started_at: Some(0),
                 pid: 0,
                 instance_dir: PathBuf::new(),
@@ -1006,7 +1124,10 @@ mod tests {
         let out = m
             .update_emulator(
                 &id,
-                UpdateEmulatorInput { name: Some("Renamed".into()), ..Default::default() },
+                UpdateEmulatorInput {
+                    name: Some("Renamed".into()),
+                    ..Default::default()
+                },
             )
             .expect("name is metadata — must apply while running");
         assert_eq!(out.name, "Renamed");
@@ -1019,7 +1140,10 @@ mod tests {
         let err = m
             .update_emulator(
                 &id,
-                UpdateEmulatorInput { cpus: Some(8), ..Default::default() },
+                UpdateEmulatorInput {
+                    cpus: Some(8),
+                    ..Default::default()
+                },
             )
             .expect_err("cpus is composed into argv at start — must be rejected while running");
         assert!(matches!(err, StudioError::Running));
@@ -1070,7 +1194,10 @@ mod tests {
         let (mut m, id) = mgr();
         m.update_emulator(
             &id,
-            UpdateEmulatorInput { base_image: Some("other".into()), ..Default::default() },
+            UpdateEmulatorInput {
+                base_image: Some("other".into()),
+                ..Default::default()
+            },
         )
         .expect_err("changing the base discards the disk — must be confirmed");
 
