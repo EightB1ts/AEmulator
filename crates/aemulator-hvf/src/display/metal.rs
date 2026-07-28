@@ -126,6 +126,81 @@ pub fn attach_layer(window: &Window, w: u32, h: u32) -> bool {
     unsafe { aemu_metal_attach_layer(view, w as i32, h as i32) == 1 }
 }
 
+/// Install the GPU identity the host renderer reports to the **guest**, and return the FFI status
+/// (`0` == installed).
+///
+/// Takes explicit values on purpose: this function is the *mechanism*, and it deliberately contains
+/// no opinion about what a GPU should claim to be. That policy belongs in the identity crate, where
+/// it is a plain struct whose tests run on every platform, rather than in a macOS-only display
+/// module that lives in a workspace-excluded crate its CI never compiles.
+///
+/// **Sentinel convention, and it is the whole contract:** `0` for an integer, `""` for the name and
+/// an all-zero `pipeline_cache_uuid` each mean *keep the host driver's own value*. So calling this
+/// with all sentinels is exactly equivalent to not calling it at all, and both are byte-identical to
+/// an unpatched renderer. That equivalence is load-bearing: it is what lets the identity policy be
+/// wired in as a separate, revertable change without this call being the thing that changes
+/// behaviour.
+///
+/// **Must be called before [`init_gfxstream`].** The renderer reads these values from its first
+/// `vkEnumeratePhysicalDevices` onward, on threads that `stream_renderer_init` creates; installing
+/// before init is what makes the unsynchronized read on those threads sound. Installing *after* would
+/// mean a guest that already read one answer starts seeing a different one.
+///
+/// `flags` is a bitmask of `ffi::STREAM_RENDERER_GPU_IDENTITY_*`:
+/// `CLAMP_MOBILE_FEATURES` (bit 0) reports the mobile-plausible subset of the host feature set, and
+/// `STRIP_PLATFORM_EXTS` (bit 1) hides the host-platform device extensions. Neither ever *adds* a
+/// capability — the renderer cannot report a feature the host lacks without breaking
+/// `vkCreateDevice` outright.
+///
+/// `device_name` is truncated to fit `VK_MAX_PHYSICAL_DEVICE_NAME_SIZE` (256 bytes including the
+/// NUL) and any interior NUL ends it, matching C string semantics. A name that does not fit is
+/// truncated rather than rejected: a slightly short name is a cosmetic problem, a failed install is
+/// a silent fallback to leaking the host's identity.
+///
+/// Returns the renderer's status: `0` installed, `-1` null pointer (not reachable from here),
+/// `-2` ABI mismatch — the dylib was built from a different version of
+/// `virtio-gpu-gfxstream-renderer-unstable.h` than `ffi.rs` was generated from. `-2` is not fatal:
+/// the renderer keeps exact passthrough, so graphics still work and only the identity is unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn set_gpu_identity(
+    vendor_id: u32,
+    device_id: u32,
+    device_name: &str,
+    pipeline_cache_uuid: [u8; 16],
+    max_viewports: u32,
+    subgroup_size: u32,
+    flags: u32,
+) -> i32 {
+    let mut identity = ffi::stream_renderer_gpu_identity {
+        // From `size_of`, never a literal: this field exists precisely so that a struct laid out by
+        // a stale header is refused instead of misread.
+        struct_size: std::mem::size_of::<ffi::stream_renderer_gpu_identity>() as u32,
+        vendor_id,
+        device_id,
+        flags,
+        max_viewports,
+        subgroup_size,
+        device_name: [0; 256],
+        pipeline_cache_uuid,
+    };
+    // Copy the name in, stopping at the first NUL and leaving room for the terminator. `as i8` is
+    // the c_char cast on aarch64-apple-darwin; the bytes are whatever the caller passed, and the
+    // renderer re-terminates on its side as well.
+    let bytes = device_name.as_bytes();
+    let name_len = bytes
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(bytes.len())
+        .min(identity.device_name.len() - 1);
+    for (dst, &src) in identity.device_name.iter_mut().zip(&bytes[..name_len]) {
+        *dst = src as std::os::raw::c_char;
+    }
+
+    // Safety: `identity` is a fully initialized, correctly laid out
+    // `stream_renderer_gpu_identity`; the renderer copies it and does not retain the pointer.
+    unsafe { ffi::stream_renderer_set_gpu_identity(&identity) }
+}
+
 /// Initialize the gfxstream host renderer for a windowed (non-surfaceless) present at `w`x`h`.
 ///
 /// Mirrors the Phase 3a probe's `stream_renderer_init` but **drops** `USE_SURFACELESS_BIT` (so a
@@ -147,6 +222,39 @@ pub fn init_gfxstream(w: i32, h: i32, use_gles: bool) -> i32 {
     let mut flags = ffi::RendererFlags::STREAM_RENDERER_FLAGS_USE_VK_BIT as u64;
     if use_gles {
         flags |= ffi::RendererFlags::STREAM_RENDERER_FLAGS_USE_GLES_BIT as u64;
+    }
+
+    // Install the guest-facing GPU identity BEFORE stream_renderer_init, which is the only point at
+    // which it is legal (the renderer reads it from its first vkEnumeratePhysicalDevices, on threads
+    // init creates). Keeping the call here rather than at each call site is what makes "the setter
+    // always runs first" a property of the code instead of a convention.
+    //
+    // ALL SENTINELS TODAY, i.e. this is exact passthrough: the guest sees the host driver's own
+    // vendorID, deviceID, deviceName, pipelineCacheUUID, feature set and extension list, byte for
+    // byte identical to an unpatched renderer. That is deliberate. The mechanism lands here; the
+    // policy — which vendor to claim, which UUID to derive, and the tests that justify each — lands
+    // separately in `aemulator-identity`, and switching it on is then a change to the arguments of
+    // this one call rather than a change to any of the machinery. Do not put a literal vendor id or
+    // UUID here; that is the policy leaking back into the mechanism.
+    let identity_rc = set_gpu_identity(
+        0,         // vendor_id      — 0 = keep host
+        0,         // device_id      — 0 = keep host
+        "",        // device_name    — "" = keep host
+        [0u8; 16], // cache UUID     — all-zero = keep host
+        0,         // max_viewports  — 0 = keep host
+        0,         // subgroup_size  — 0 = keep host
+        0,         // flags          — no feature clamp, no extension strip
+    );
+    if identity_rc != 0 {
+        // Never fatal: a rejected install means the renderer keeps reporting the host GPU, which is
+        // exactly what it does today. But -2 specifically means ffi.rs and the dylib disagree about
+        // a struct layout, and that is worth saying out loud before something subtler goes wrong.
+        eprintln!(
+            "[display] stream_renderer_set_gpu_identity returned {identity_rc} \
+             (-2 = ABI mismatch between ffi.rs and libgfxstream_backend.dylib; \
+             re-run crates/aemulator-hvf/gfxstream/gen-ffi.sh). \
+             Continuing with the host GPU's own identity."
+        );
     }
 
     let mut params = [

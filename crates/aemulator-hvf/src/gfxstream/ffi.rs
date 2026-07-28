@@ -53,6 +53,8 @@ pub const STREAM_RENDERER_PARAM_METRICS_CALLBACK_ADD_VULKAN_OUT_OF_MEMORY_EVENT:
 pub const STREAM_RENDERER_PARAM_RENDERER_FEATURES: u32 = 11;
 pub const STREAM_RENDERER_PARAM_METRICS_CALLBACK_SET_ANNOTATION: u32 = 1028;
 pub const STREAM_RENDERER_PARAM_METRICS_CALLBACK_ABORT: u32 = 1029;
+pub const STREAM_RENDERER_GPU_IDENTITY_CLAMP_MOBILE_FEATURES: u32 = 1;
+pub const STREAM_RENDERER_GPU_IDENTITY_STRIP_PLATFORM_EXTS: u32 = 2;
 pub const STREAM_RENDERER_PLATFORM_RESOURCE_USE_MASK: u32 = 240;
 pub const STREAM_RENDERER_PLATFORM_RESOURCE_TYPE_MASK: u32 = 15;
 pub const STREAM_RENDERER_PLATFORM_RESOURCE_TYPE_EGL_NATIVE_PIXMAP: u32 = 1;
@@ -367,6 +369,23 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn stream_renderer_release_metal_layer(ca_metal_layer: *mut ::std::os::raw::c_void);
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct stream_renderer_gpu_identity {
+    pub struct_size: u32,
+    pub vendor_id: u32,
+    pub device_id: u32,
+    pub flags: u32,
+    pub max_viewports: u32,
+    pub subgroup_size: u32,
+    pub device_name: [::std::os::raw::c_char; 256usize],
+    pub pipeline_cache_uuid: [u8; 16usize],
+}
+unsafe extern "C" {
+    pub fn stream_renderer_set_gpu_identity(
+        identity: *const stream_renderer_gpu_identity,
+    ) -> ::std::os::raw::c_int;
 }
 unsafe extern "C" {
     pub fn stream_renderer_flush(res_handle: u32);

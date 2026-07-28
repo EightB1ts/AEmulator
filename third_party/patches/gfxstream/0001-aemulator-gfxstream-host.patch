@@ -76,10 +76,10 @@ index d8f3f1601..89b7c9167 100644
          // Use Swiftshader vk icd if using swiftshader_indirect
          android::base::setEnvironmentVariable("ANDROID_EMU_VK_ICD", "swiftshader");
 diff --git a/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h b/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
-index eadee8d67..fdf668857 100644
+index eadee8d67..7dd6bdbff 100644
 --- a/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
 +++ b/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
-@@ -70,6 +70,41 @@ VG_EXPORT void gfxstream_backend_setup_window(void* native_window_handle, int32_
+@@ -70,6 +70,116 @@ VG_EXPORT void gfxstream_backend_setup_window(void* native_window_handle, int32_
                                                int32_t window_height, int32_t fb_width,
                                                int32_t fb_height);
  
@@ -118,23 +118,99 @@ index eadee8d67..fdf668857 100644
 +// responsible for not racing a present into the same layer it is releasing.
 +VG_EXPORT void stream_renderer_release_metal_layer(void* ca_metal_layer);
 +
++// Avnir guest-facing GPU identity (Apache-2.0). What the renderer tells the GUEST its GPU is.
++//
++// The renderer is a Vulkan-to-Vulkan proxy, so by default every identity field the guest reads is
++// the host driver's own — on macOS that is Mesa KosmicKrisp on Apple silicon, i.e. a `vendorID` of
++// 0x106b and a `pipelineCacheUUID` that is a permanent, unpermissioned, cross-app hardware
++// identifier. This entry point lets the caller replace a chosen subset of those answers.
++//
++// SENTINEL CONVENTION, and it is the whole contract: a zero integer, an empty `device_name`, and an
++// all-zero `pipeline_cache_uuid` each mean KEEP THE HOST VALUE. A zero-filled struct (other than
++// `struct_size`) is therefore an explicit request for exact passthrough, and NOT calling this at
++// all is byte-identical to that. The renderer applies; it never invents a value, never derives one
++// field from another, and holds no notion of which GPU is being described — all of that policy
++// lives in the caller (AEmulator's `aemulator-identity` crate, whose tests are the record of why
++// each value is what it is).
++//
++// What is affected, all of it guest-facing only: vkGetPhysicalDeviceProperties{,2} (base struct
++// plus a pNext walk), vkGetPhysicalDeviceFeatures{,2}, vkEnumerateDeviceExtensionProperties, and
++// the 32-byte VkPipelineCacheHeaderVersionOne that vkGetPipelineCacheData returns. The renderer's
++// own cached physical-device properties are deliberately NOT touched, because its internal
++// 1.0-vs-1.1 branch decisions and host-feature probes read them.
++//
++// MUST BE CALLED BEFORE stream_renderer_init(). The values are read from the first
++// vkEnumeratePhysicalDevices onwards, on renderer threads that do not exist yet at that point,
++// which is what makes an unsynchronized write safe. Calling it afterwards is undefined: a guest
++// that has already read one answer would start seeing another.
++struct stream_renderer_gpu_identity {
++    // sizeof(struct stream_renderer_gpu_identity). ABI drift guard: the renderer rejects the call
++    // rather than reading a struct laid out by a differently-versioned header. Set it from sizeof,
++    // never from a literal.
++    uint32_t struct_size;
++    // PCI-style vendor / device id. 0 = keep host.
++    uint32_t vendor_id;
++    uint32_t device_id;
++    // STREAM_RENDERER_GPU_IDENTITY_* bits below. 0 = apply nothing beyond the value fields.
++    uint32_t flags;
++    // VkPhysicalDeviceLimits::maxViewports. 0 = keep host. Must be 1 whenever the caller also asks
++    // for CLAMP_MOBILE_FEATURES, which reports multiViewport as unsupported: the Vulkan spec
++    // requires maxViewports == 1 in that case, and the renderer will refuse to clear the feature
++    // bit on its own if this field says otherwise rather than emit an internally invalid device.
++    uint32_t max_viewports;
++    // VkPhysicalDeviceSubgroupProperties::subgroupSize, and the Vulkan11/13 aliases of it.
++    // 0 = keep host.
++    uint32_t subgroup_size;
++    // VkPhysicalDeviceProperties::deviceName, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE bytes.
++    // "" = keep host. Truncated to fit and always NUL-terminated by the renderer.
++    char device_name[256];
++    // VkPhysicalDeviceProperties::pipelineCacheUUID, VK_UUID_SIZE bytes. All-zero = keep host.
++    //
++    // This is the single highest-value field here. It is a stable device identifier that no Android
++    // permission gates, that survives a factory reset, and that any two apps can join on — and it
++    // leaks through the pipeline-cache blob as well as through the properties call, so the renderer
++    // rewrites both directions of that blob to keep the two answers consistent.
++    uint8_t pipeline_cache_uuid[16];
++};
++
++// Report the mobile-plausible subset of the host's feature set: textureCompressionBC = FALSE (no
++// mobile GPU implements BC/DXT) and multiViewport = FALSE (paired with max_viewports == 1). Only
++// ever CLEARS bits. Reporting a feature the host lacks would make the guest enable it and
++// vkCreateDevice fail outright, so there is no bit here that can add one.
++#define STREAM_RENDERER_GPU_IDENTITY_CLAMP_MOBILE_FEATURES 0x00000001u
++// Hide the host-platform-specific device extensions that no Android GPU driver would ever
++// advertise. See on_vkEnumerateDeviceExtensionProperties for the exact list and for why
++// VK_EXT_external_memory_metal is only dropped when VK_EXT_external_memory_host survives it.
++#define STREAM_RENDERER_GPU_IDENTITY_STRIP_PLATFORM_EXTS 0x00000002u
++
++// Install `identity` (a copy is taken; the caller may free it immediately).
++//
++// Returns:
++//    0  installed.
++//   -1  `identity` is NULL.
++//   -2  `identity->struct_size` does not match this renderer's sizeof — the caller was built
++//       against a different version of this header. Nothing is installed, so the renderer keeps
++//       exact passthrough rather than applying a misread struct.
++VG_EXPORT int stream_renderer_set_gpu_identity(const struct stream_renderer_gpu_identity* identity);
++
  VG_EXPORT void stream_renderer_flush(uint32_t res_handle);
  
  // Platform resources and contexts support
 diff --git a/host/virtio-gpu-gfxstream-renderer.cpp b/host/virtio-gpu-gfxstream-renderer.cpp
-index 9f105497a..996fff495 100644
+index 9f105497a..43dec60ab 100644
 --- a/host/virtio-gpu-gfxstream-renderer.cpp
 +++ b/host/virtio-gpu-gfxstream-renderer.cpp
-@@ -33,6 +33,8 @@
+@@ -33,6 +33,9 @@
  #include "host-common/refcount-pipe.h"
  #include "host-common/vm_operations.h"
  #include "vulkan/VulkanDispatch.h"
 +#include "vulkan/VkCommonOperations.h"
++#include "vulkan/VkDecoderGlobalState.h"
 +#include "vulkan/MetalLayerPresenterVk.h"
  #include "render-utils/RenderLib.h"
  #include "vk_util.h"
  
-@@ -1002,7 +1004,45 @@ VG_EXPORT void gfxstream_backend_setup_window(void* native_window_handle, int32_
+@@ -1002,7 +1005,104 @@ VG_EXPORT void gfxstream_backend_setup_window(void* native_window_handle, int32_
                                 window_height, fb_width, fb_height, 1.0f, 0, false, false);
  }
  
@@ -173,6 +249,65 @@ index 9f105497a..996fff495 100644
 +#endif
 +}
 +
++// Avnir guest-facing GPU identity (Apache-2.0). Install what the renderer tells the GUEST its GPU
++// is. See the doc comment on struct stream_renderer_gpu_identity for the sentinel convention and
++// the must-be-called-before-init rule.
++//
++// This is a pure transport: validate the ABI, copy the fields across, done. It makes no decision
++// about any value, which is the whole design — the policy lives in the VMM (AEmulator's
++// `aemulator-identity` crate) where it is testable Rust, and this side cannot silently disagree with
++// it. An init parameter was rejected because stream_renderer_param::value is a bare uint64_t (no
++// room for a 256-byte name or a 16-byte UUID, and no struct_size to version), and an environment
++// variable was rejected because this repo already carries driver_pin.rs in its entirety as the
++// consequence of env-var-driven graphics configuration reverting itself silently. A dedicated
++// exported symbol is checked by third_party/bootstrap.sh's nm assertion and by ci/hvf-doctor.sh's
++// imported-vs-exported symbol diff, so a mismatch fails at doctor time rather than at address 0
++// halfway through a guest boot.
++VG_EXPORT int stream_renderer_set_gpu_identity(
++    const struct stream_renderer_gpu_identity* identity) {
++    if (!identity) {
++        stream_renderer_error("stream_renderer_set_gpu_identity: NULL identity");
++        return -1;
++    }
++    if (identity->struct_size != sizeof(struct stream_renderer_gpu_identity)) {
++        // ABI drift, not a bad value: the caller was built against a different version of the
++        // header. Refuse rather than reinterpret a struct at the wrong offsets — the failure mode of
++        // guessing is a garbage device name and a garbage UUID, which is worse than passthrough.
++        stream_renderer_error(
++            "stream_renderer_set_gpu_identity: struct_size %u != %zu — caller was built against a "
++            "different virtio-gpu-gfxstream-renderer-unstable.h. Nothing installed; the renderer "
++            "keeps reporting the host GPU's own identity.",
++            identity->struct_size, sizeof(struct stream_renderer_gpu_identity));
++        return -2;
++    }
++
++    gfxstream::vk::VkDecoderGlobalState::GpuIdentity applied;
++    applied.vendorId = identity->vendor_id;
++    applied.deviceId = identity->device_id;
++    applied.flags = identity->flags;
++    applied.maxViewports = identity->max_viewports;
++    applied.subgroupSize = identity->subgroup_size;
++    static_assert(sizeof(applied.deviceName) == sizeof(identity->device_name),
++                  "stream_renderer_gpu_identity::device_name must be "
++                  "VK_MAX_PHYSICAL_DEVICE_NAME_SIZE");
++    static_assert(sizeof(applied.pipelineCacheUuid) == sizeof(identity->pipeline_cache_uuid),
++                  "stream_renderer_gpu_identity::pipeline_cache_uuid must be VK_UUID_SIZE");
++    memcpy(applied.deviceName, identity->device_name, sizeof(applied.deviceName));
++    applied.deviceName[sizeof(applied.deviceName) - 1] = '\0';
++    memcpy(applied.pipelineCacheUuid, identity->pipeline_cache_uuid,
++           sizeof(applied.pipelineCacheUuid));
++
++    static_assert(gfxstream::vk::VkDecoderGlobalState::kGpuIdentityClampMobileFeatures ==
++                      STREAM_RENDERER_GPU_IDENTITY_CLAMP_MOBILE_FEATURES,
++                  "flag bit0 must mean the same thing on both sides of this ABI");
++    static_assert(gfxstream::vk::VkDecoderGlobalState::kGpuIdentityStripPlatformExts ==
++                      STREAM_RENDERER_GPU_IDENTITY_STRIP_PLATFORM_EXTS,
++                  "flag bit1 must mean the same thing on both sides of this ABI");
++
++    gfxstream::vk::VkDecoderGlobalState::setGpuIdentity(applied);
++    return 0;
++}
++
  VG_EXPORT void stream_renderer_teardown() {
 +#if defined(__APPLE__)
 +    gfxstream::vk::teardownMetalLayerPresenters();
@@ -180,6 +315,38 @@ index 9f105497a..996fff495 100644
      sFrontend()->teardown();
  
      android_finishOpenglesRenderer();
+@@ -1054,6 +1154,31 @@ static_assert(offsetof(struct stream_renderer_param, key) == 0,
+ static_assert(offsetof(struct stream_renderer_param, value) == 8,
+               "stream_renderer_param.value must be at offset 8");
+ 
++// Avnir guest-facing GPU identity. The layout is the ABI: the VMM builds this struct from a bindgen
++// translation of the same header, and `struct_size` only catches a size change — it is blind to two
++// fields of equal size swapping places, which is exactly the edit that would put a UUID where a name
++// belongs. So pin every offset here too, and note that the padding is intentional: six uint32_t
++// followed by a char[256] and a uint8_t[16] is 24 + 256 + 16 = 296 with no holes on any ABI that
++// gives uint32_t 4-byte alignment.
++static_assert(sizeof(struct stream_renderer_gpu_identity) == 296,
++              "stream_renderer_gpu_identity must be 296 bytes");
++static_assert(offsetof(struct stream_renderer_gpu_identity, struct_size) == 0,
++              "stream_renderer_gpu_identity.struct_size must be at offset 0");
++static_assert(offsetof(struct stream_renderer_gpu_identity, vendor_id) == 4,
++              "stream_renderer_gpu_identity.vendor_id must be at offset 4");
++static_assert(offsetof(struct stream_renderer_gpu_identity, device_id) == 8,
++              "stream_renderer_gpu_identity.device_id must be at offset 8");
++static_assert(offsetof(struct stream_renderer_gpu_identity, flags) == 12,
++              "stream_renderer_gpu_identity.flags must be at offset 12");
++static_assert(offsetof(struct stream_renderer_gpu_identity, max_viewports) == 16,
++              "stream_renderer_gpu_identity.max_viewports must be at offset 16");
++static_assert(offsetof(struct stream_renderer_gpu_identity, subgroup_size) == 20,
++              "stream_renderer_gpu_identity.subgroup_size must be at offset 20");
++static_assert(offsetof(struct stream_renderer_gpu_identity, device_name) == 24,
++              "stream_renderer_gpu_identity.device_name must be at offset 24");
++static_assert(offsetof(struct stream_renderer_gpu_identity, pipeline_cache_uuid) == 280,
++              "stream_renderer_gpu_identity.pipeline_cache_uuid must be at offset 280");
++
+ #ifdef CONFIG_AEMU
+ 
+ VG_EXPORT void stream_renderer_set_service_ops(const GoldfishPipeServiceOps* ops) {
 diff --git a/host/vulkan/Android.bp b/host/vulkan/Android.bp
 index a9364228d..ccf46fa30 100644
 --- a/host/vulkan/Android.bp
@@ -1318,6 +1485,48 @@ index 389182745..ecd7fea48 100644
          MTLResource_id externalMetalHandle = nullptr;
  #endif
          uint32_t streamHandleType;
+diff --git a/host/vulkan/VkDecoder.cpp b/host/vulkan/VkDecoder.cpp
+index ccc354a70..e1ae207c3 100644
+--- a/host/vulkan/VkDecoder.cpp
++++ b/host/vulkan/VkDecoder.cpp
+@@ -4357,14 +4357,22 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
+                 VkPipelineCache pipelineCache;
+                 size_t* pDataSize;
+                 void* pData;
+-                // Begin non wrapped dispatchable handle unboxing for device;
++                // AEmulator (Phase 4.9): this opcode used to be a RAW PASSTHROUGH — the generated
++                // code unboxed the device, grabbed the dispatch table and called
++                // vk->vkGetPipelineCacheData() directly, with no VkDecoderGlobalState handler in the
++                // path at all. That let the driver's 32-byte VkPipelineCacheHeaderVersionOne reach
++                // the guest verbatim, carrying the real vendorID, deviceID and pipelineCacheUUID.
++                // Routed through m_state instead, which matches the "global wrapped" form the codegen
++                // emits for every other intercepted call (hence the dropped unboxed_device/vk).
++                //
++                // THIS FILE IS GENERATED. A gfxstream pin bump will conflict here, and that is the
++                // designed behaviour: bootstrap.sh fails loudly rather than quietly restoring the
++                // leak. Re-apply by hand, do not drop the hunk.
++                // Begin global wrapped dispatchable handle unboxing for device;
+                 uint64_t cgen_var_0;
+                 memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
+                 *readStreamPtrPtr += 1 * 8;
+                 *(VkDevice*)&device = (VkDevice)(VkDevice)((VkDevice)(*&cgen_var_0));
+-                auto unboxed_device = unbox_VkDevice(device);
+-                auto vk = dispatch_VkDevice(device);
+-                // End manual dispatchable handle unboxing for device;
+                 uint64_t cgen_var_1;
+                 memcpy((uint64_t*)&cgen_var_1, *readStreamPtrPtr, 1 * 8);
+                 *readStreamPtrPtr += 1 * 8;
+@@ -4400,8 +4408,8 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
+                             (unsigned long long)pDataSize, (unsigned long long)pData);
+                 }
+                 VkResult vkGetPipelineCacheData_VkResult_return = (VkResult)0;
+-                vkGetPipelineCacheData_VkResult_return =
+-                    vk->vkGetPipelineCacheData(unboxed_device, pipelineCache, pDataSize, pData);
++                vkGetPipelineCacheData_VkResult_return = m_state->on_vkGetPipelineCacheData(
++                    &m_pool, device, pipelineCache, pDataSize, pData);
+                 if ((vkGetPipelineCacheData_VkResult_return) == VK_ERROR_DEVICE_LOST)
+                     m_state->on_DeviceLost();
+                 m_state->on_CheckOutOfMemory(vkGetPipelineCacheData_VkResult_return, opcode,
 diff --git a/host/vulkan/VkDecoderCerealGap.inc b/host/vulkan/VkDecoderCerealGap.inc
 new file mode 100644
 index 000000000..5e735f7c0
@@ -2058,7 +2267,7 @@ index 000000000..5e735f7c0
 +
 +#endif  // AEMULATOR_VK_DECODER_CEREAL_GAP_INC
 diff --git a/host/vulkan/VkDecoderGlobalState.cpp b/host/vulkan/VkDecoderGlobalState.cpp
-index 9a4c1a363..d96312345 100644
+index 9a4c1a363..aef5700d1 100644
 --- a/host/vulkan/VkDecoderGlobalState.cpp
 +++ b/host/vulkan/VkDecoderGlobalState.cpp
 @@ -67,7 +67,6 @@
@@ -2069,22 +2278,25 @@ index 9a4c1a363..d96312345 100644
  #endif
  
  #ifndef VERBOSE
-@@ -162,6 +161,14 @@ VK_EXT_SYNC_HANDLE dupExternalSync(VK_EXT_SYNC_HANDLE h) {
+@@ -162,6 +161,17 @@ VK_EXT_SYNC_HANDLE dupExternalSync(VK_EXT_SYNC_HANDLE h) {
  static constexpr const char* const kEmulatedDeviceExtensions[] = {
      "VK_ANDROID_external_memory_android_hardware_buffer",
      "VK_ANDROID_native_buffer",
 +#if defined(__APPLE__) && defined(VK_MVK_moltenvk)
-+    // We synthesize this string in on_vkEnumerateDeviceExtensionProperties as a legacy-guest
-+    // alias for VK_EXT_external_memory_metal. It is not a real extension, so it must never be
-+    // forwarded to the host driver in ppEnabledExtensionNames — filteredDeviceExtensionNames
-+    // passes guest-requested names through verbatim, and a conformant driver would answer
-+    // VK_ERROR_EXTENSION_NOT_PRESENT. MoltenVK masked this; KosmicKrisp will not.
++    // Not advertised to the guest by anything any more — the synthesis in
++    // on_vkEnumerateDeviceExtensionProperties that used to manufacture this name as a legacy-guest
++    // alias for VK_EXT_external_memory_metal has been deleted. The filter stays because it costs one
++    // string compare and covers the case the synthesis never did: a guest that names MoltenVK
++    // because it was compiled to, not because we offered it. It is not a real device extension, so
++    // it must never reach the host driver in ppEnabledExtensionNames —
++    // filteredDeviceExtensionNames passes guest-requested names through verbatim, and a conformant
++    // driver answers VK_ERROR_EXTENSION_NOT_PRESENT. MoltenVK masked this; KosmicKrisp will not.
 +    VK_MVK_MOLTENVK_EXTENSION_NAME,
 +#endif
      "VK_FUCHSIA_buffer_collection",
      "VK_FUCHSIA_external_memory",
      "VK_FUCHSIA_external_semaphore",
-@@ -179,6 +186,91 @@ static constexpr const char* const kEmulatedDeviceExtensions[] = {
+@@ -179,6 +189,91 @@ static constexpr const char* const kEmulatedDeviceExtensions[] = {
  #endif
  };
  
@@ -2176,7 +2388,63 @@ index 9a4c1a363..d96312345 100644
  // A list of instance extensions that should not be passed to the host driver.
  // On older pre-1.1 Vulkan platforms, gfxstream emulates these features.
  static constexpr const char* const kEmulatedInstanceExtensions[] = {
-@@ -1060,11 +1152,6 @@ class VkDecoderGlobalState::Impl {
+@@ -190,6 +285,55 @@ static constexpr const char* const kEmulatedInstanceExtensions[] = {
+ static constexpr uint32_t kMaxSafeVersion = VK_MAKE_VERSION(1, 3, 0);
+ static constexpr uint32_t kMinVersion = VK_MAKE_VERSION(1, 0, 0);
+ 
++// AEmulator guest-facing GPU identity — the ONE place the installed identity lives.
++//
++// Written exactly once, by VkDecoderGlobalState::setGpuIdentity() (below), from
++// stream_renderer_set_gpu_identity() BEFORE stream_renderer_init() creates any renderer thread.
++// Read from the first on_vkEnumeratePhysicalDevices() onwards. That happens-before is the whole
++// synchronization story; there is deliberately no mutex, because taking one here would imply the
++// write is legal at other times, and it is not (a guest that already read one answer must not start
++// seeing another).
++//
++// Zero-initialized == exact passthrough, which is what an unpatched renderer does and what this one
++// must keep doing when nobody calls the setter. Every consumer therefore gates on its OWN field
++// being non-sentinel, never on "something was installed" — an all-sentinel install has to be
++// byte-identical to no install at all, because that is what the VMM ships until its identity policy
++// is switched on.
++static VkDecoderGlobalState::GpuIdentity sGpuIdentity;
++
++// True when nothing at all is being overridden. Only used to keep the boot-log line honest.
++static bool gpuIdentityIsPassthrough(const VkDecoderGlobalState::GpuIdentity& id) {
++    if (id.vendorId || id.deviceId || id.flags || id.maxViewports || id.subgroupSize) return false;
++    if (id.deviceName[0] != '\0') return false;
++    for (uint8_t byte : id.pipelineCacheUuid) {
++        if (byte != 0) return false;
++    }
++    return true;
++}
++
++static bool gpuIdentityHasPipelineCacheUuid(const VkDecoderGlobalState::GpuIdentity& id) {
++    for (uint8_t byte : id.pipelineCacheUuid) {
++        if (byte != 0) return true;
++    }
++    return false;
++}
++
++// The VkPipelineCacheHeaderVersionOne that every conformant driver puts at the front of
++// vkGetPipelineCacheData's blob, and that vkCreatePipelineCache validates on the way back in:
++//
++//   [0..4)   headerSize (== 32)     [8..12)  vendorID
++//   [4..8)   headerVersion (== 1)  [12..16)  deviceID
++//   [16..32) pipelineCacheUUID
++//
++// The three uint32_t fields are in the implementation's native byte order, so a plain memcpy of a
++// host uint32_t is the correct encoding here (host and guest are both little-endian aarch64 in this
++// configuration; a mixed-endian pair could not share cache blobs at all).
++static constexpr size_t kPipelineCacheHeaderBytes = 32;
++static constexpr size_t kPipelineCacheHeaderVendorIdOffset = 8;
++static constexpr size_t kPipelineCacheHeaderDeviceIdOffset = 12;
++static constexpr size_t kPipelineCacheHeaderUuidOffset = 16;
++static constexpr uint32_t kPipelineCacheHeaderVersionOne = 1;
++
+ static constexpr uint64_t kPageSizeforBlob = 4096;
+ static constexpr uint64_t kPageMaskForBlob = ~(0xfff);
+ 
+@@ -1060,11 +1204,6 @@ class VkDecoderGlobalState::Impl {
              curr = curr->pNext;
          }
  
@@ -2188,7 +2456,7 @@ index 9a4c1a363..d96312345 100644
  
          // bug: 155795731
          bool swiftshader =
-@@ -1142,6 +1229,31 @@ class VkDecoderGlobalState::Impl {
+@@ -1142,6 +1281,31 @@ class VkDecoderGlobalState::Impl {
      }
  
      void vkDestroyInstanceImpl(VkInstance instance, const VkAllocationCallbacks* pAllocator) {
@@ -2220,7 +2488,239 @@ index 9a4c1a363..d96312345 100644
          // Do delayed removes out of the lock, but get the list of devices to destroy inside the
          // lock.
          {
-@@ -1804,17 +1916,11 @@ class VkDecoderGlobalState::Impl {
+@@ -1261,6 +1425,27 @@ class VkDecoderGlobalState::Impl {
+         auto instance = unbox_VkInstance(boxed_instance);
+         auto vk = dispatch_VkInstance(boxed_instance);
+ 
++        // AEmulator: the first read of the installed GPU identity, and the only place it is logged.
++        // A silent identity override is unfalsifiable from a boot log — and this one deliberately
++        // makes the renderer lie to the guest, so "what did it claim on this run" has to be
++        // recoverable after the fact. Once per process, whether or not anything is overridden.
++        static bool sLoggedGpuIdentity = false;
++        if (!sLoggedGpuIdentity) {
++            sLoggedGpuIdentity = true;
++            if (gpuIdentityIsPassthrough(sGpuIdentity)) {
++                INFO("[gfxstream] gpu identity: PASSTHROUGH — the guest sees the host driver's own "
++                     "vendorID/deviceID/deviceName/pipelineCacheUUID unmodified");
++            } else {
++                INFO("[gfxstream] gpu identity: vendorID=0x%04x deviceID=0x%04x name='%s' "
++                     "pipelineCacheUUID=%s maxViewports=%u subgroupSize=%u flags=0x%x "
++                     "(0 / \"\" / all-zero = host value kept)",
++                     sGpuIdentity.vendorId, sGpuIdentity.deviceId,
++                     sGpuIdentity.deviceName[0] ? sGpuIdentity.deviceName : "<host>",
++                     gpuIdentityHasPipelineCacheUuid(sGpuIdentity) ? "<overridden>" : "<host>",
++                     sGpuIdentity.maxViewports, sGpuIdentity.subgroupSize, sGpuIdentity.flags);
++            }
++        }
++
+         std::vector<VkPhysicalDevice> physicalDevices;
+         auto res = GetPhysicalDevices(instance, vk, physicalDevices);
+         if (res != VK_SUCCESS) {
+@@ -1337,6 +1522,53 @@ class VkDecoderGlobalState::Impl {
+         return res;
+     }
+ 
++    // AEmulator: report the mobile-plausible subset of the host's feature set to the GUEST.
++    //
++    // THIS FUNCTION MAY ONLY EVER CLEAR BITS, AND THERE IS NO SAFE VERSION THAT SETS ONE. Reporting
++    // VK_FALSE for something the host supports costs the guest a capability. Reporting VK_TRUE for
++    // something the host does NOT support makes the guest put it in VkDeviceCreateInfo, the host
++    // driver answers VK_ERROR_FEATURE_NOT_PRESENT, and vkCreateDevice fails — no graphics at all,
++    // for every app, at boot. In particular:
++    //
++    //   NEVER FORCE geometryShader OR wideLines TO VK_TRUE. Both are VK_FALSE on the recorded
++    //   KosmicKrisp/Apple baseline. They are the two an "impersonate a Qualcomm Adreno" edit reaches
++    //   for first, because a real Adreno has them, and they are exactly the two that would take the
++    //   whole device down. Whatever the identity says the GPU is, the features it reports are still
++    //   bounded by what this host can actually deliver.
++    //
++    // Only the base VkPhysicalDeviceFeatures is touched: these two bits exist nowhere else (unlike
++    // the Vulkan1x feature aggregates, which cover promoted extension features, not core 1.0 ones).
++    void clampGpuIdentityFeatures(VkPhysicalDeviceFeatures* pFeatures) {
++        const VkDecoderGlobalState::GpuIdentity& id = sGpuIdentity;
++        if (!(id.flags & VkDecoderGlobalState::kGpuIdentityClampMobileFeatures)) return;
++
++        // BC/DXT. TRUE on the recorded baseline, and no mobile GPU implements it — on Android the
++        // texture formats are ETC2 and ASTC, both of which this renderer already forces on above.
++        pFeatures->textureCompressionBC = VK_FALSE;
++
++        // multiViewport and maxViewports are ONE change, not two. The Vulkan spec requires
++        // maxViewports == 1 whenever multiViewport is unsupported, and maxViewports is applied from
++        // a different field in a different handler (applyGpuIdentity). Clearing the bit while the
++        // limit still says 16 — the baseline value — yields a device that is internally INVALID,
++        // which a validation layer flags on the spot and which is a far louder tell than the
++        // identity being hidden. So the bit is cleared only when the limit really is being reported
++        // as 1, and a caller that asks for one without the other gets a loud complaint instead of a
++        // broken device.
++        if (id.maxViewports == 1) {
++            pFeatures->multiViewport = VK_FALSE;
++        } else if (pFeatures->multiViewport) {
++            static bool sWarnedMultiViewport = false;
++            if (!sWarnedMultiViewport) {
++                sWarnedMultiViewport = true;
++                WARN("[gfxstream] gpu identity: CLAMP_MOBILE_FEATURES asked to hide multiViewport, "
++                     "but max_viewports is %u, not 1. Keeping multiViewport=TRUE — the spec requires "
++                     "maxViewports==1 when multiViewport is unsupported, and half of that pair is an "
++                     "invalid device. Set max_viewports=1 in stream_renderer_set_gpu_identity().",
++                     id.maxViewports);
++            }
++        }
++    }
++
+     void on_vkGetPhysicalDeviceFeatures(android::base::BumpPool* pool,
+                                         VkPhysicalDevice boxed_physicalDevice,
+                                         VkPhysicalDeviceFeatures* pFeatures) {
+@@ -1346,6 +1578,7 @@ class VkDecoderGlobalState::Impl {
+         vk->vkGetPhysicalDeviceFeatures(physicalDevice, pFeatures);
+         pFeatures->textureCompressionETC2 |= enableEmulatedEtc2(physicalDevice, vk);
+         pFeatures->textureCompressionASTC_LDR |= enableEmulatedAstc(physicalDevice, vk);
++        clampGpuIdentityFeatures(pFeatures);
+     }
+ 
+     void on_vkGetPhysicalDeviceFeatures2(android::base::BumpPool* pool,
+@@ -1387,6 +1620,7 @@ class VkDecoderGlobalState::Impl {
+ 
+         pFeatures->features.textureCompressionETC2 |= enableEmulatedEtc2(physicalDevice, vk);
+         pFeatures->features.textureCompressionASTC_LDR |= enableEmulatedAstc(physicalDevice, vk);
++        clampGpuIdentityFeatures(&pFeatures->features);
+         VkPhysicalDeviceSamplerYcbcrConversionFeatures* ycbcrFeatures =
+             vk_find_struct<VkPhysicalDeviceSamplerYcbcrConversionFeatures>(pFeatures);
+         if (ycbcrFeatures != nullptr) {
+@@ -1618,6 +1852,106 @@ class VkDecoderGlobalState::Impl {
+         }
+     }
+ 
++    // AEmulator: rewrite the GUEST-FACING physical-device properties from the installed identity.
++    //
++    // Call this AFTER the driver call and AFTER the kMaxSafeVersion apiVersion clamp, from BOTH
++    // on_vkGetPhysicalDeviceProperties and on_vkGetPhysicalDeviceProperties2 — a guest that reads the
++    // 1.0 entry point and a guest that reads the 1.1 one must not get different answers, and
++    // "disagrees with itself" is a louder tell than anything either answer could contain.
++    //
++    // NEVER MOVE THIS TO physdevInfo.props OR emu->deviceInfo.physdevProps. Spoofing at either cache
++    // looks like a simplification and is not: on_vkGetPhysicalDeviceProperties2 and
++    // on_vkGetPhysicalDeviceFeatures2 branch on physdevInfo.props.apiVersion >= 1.1 to choose
++    // between vkGetPhysicalDeviceProperties2 and the KHR alias, and getHostFeatureSupport() reads
++    // emu->deviceInfo.physdevProps to decide what the HOST can do. Writing a fabricated vendor or
++    // limit there changes the renderer's own decisions, and it is deliberately the ONE thing
++    // on_vkGetPipelineCacheData relies on being true, because it needs the real identity to restore.
++    //
++    // Fields deliberately NOT written, all verified dead rather than forgotten:
++    //   * driverID / driverName / driverInfo, and the VkPhysicalDeviceIDProperties UUIDs — Mesa's
++    //     guest ResourceTracker::on_vkGetPhysicalDeviceProperties2 overwrites every one of them
++    //     AFTER this answer arrives (driverID := MESA_GFXSTREAM, UUIDs := zero). A host write there
++    //     is dead code that reads as an attempted spoof.
++    //   * deviceType, and the "Virtio-GPU GFXStream (...)" deviceName prefix — same guest code, same
++    //     reason. The inner name is still worth setting; the prefix is not removable from here.
++    //   * VkPhysicalDeviceDrmPropertiesEXT / VkPhysicalDevicePCIBusInfoPropertiesEXT — the guest
++    //     vk_extract_struct()s both out of the chain before the request reaches us and fills them in
++    //     itself, so we never see them.
++    void applyGpuIdentity(VkPhysicalDeviceProperties2* pProperties) {
++        const VkDecoderGlobalState::GpuIdentity& id = sGpuIdentity;
++        VkPhysicalDeviceProperties& base = pProperties->properties;
++
++        if (id.vendorId != 0) {
++            base.vendorID = id.vendorId;
++        }
++        if (id.deviceId != 0) {
++            base.deviceID = id.deviceId;
++        }
++        if (id.deviceName[0] != '\0') {
++            // Both arrays are VK_MAX_PHYSICAL_DEVICE_NAME_SIZE and the transport already
++            // NUL-terminated its copy; re-terminate anyway so this cannot become the one place a
++            // future ABI widening silently produces an unterminated name.
++            static_assert(sizeof(base.deviceName) == sizeof(id.deviceName),
++                          "GpuIdentity::deviceName must be VK_MAX_PHYSICAL_DEVICE_NAME_SIZE");
++            memcpy(base.deviceName, id.deviceName, sizeof(base.deviceName));
++            base.deviceName[sizeof(base.deviceName) - 1] = '\0';
++        }
++        if (gpuIdentityHasPipelineCacheUuid(id)) {
++            memcpy(base.pipelineCacheUUID, id.pipelineCacheUuid, sizeof(base.pipelineCacheUUID));
++        }
++        if (id.maxViewports != 0) {
++            // Paired with multiViewport in clampGpuIdentityFeatures(); see the invariant there.
++            base.limits.maxViewports = id.maxViewports;
++        }
++
++        // ---- pNext walk. Nothing walked this chain before this change. -------------------------
++        if (id.subgroupSize != 0) {
++            if (auto* subgroup = vk_find_struct<VkPhysicalDeviceSubgroupProperties>(pProperties)) {
++                subgroup->subgroupSize = id.subgroupSize;
++            }
++            if (auto* vulkan11 = vk_find_struct<VkPhysicalDeviceVulkan11Properties>(pProperties)) {
++                vulkan11->subgroupSize = id.subgroupSize;
++            }
++            if (auto* vulkan13 = vk_find_struct<VkPhysicalDeviceVulkan13Properties>(pProperties)) {
++                // min/max too, or the device claims a subgroup size outside its own advertised
++                // range — an internal contradiction, and one a validation layer will name.
++                vulkan13->minSubgroupSize = id.subgroupSize;
++                vulkan13->maxSubgroupSize = id.subgroupSize;
++            }
++        }
++
++        // conformanceVersion. There is deliberately NO conformance field in the transport struct: a
++        // fabricated conformance version is a fresh inconsistency, not a fix. What IS a fix is
++        // making it agree with the apiVersion this renderer actually reports — gfxstream clamps
++        // apiVersion to kMaxSafeVersion a few lines above every caller of this function, and the
++        // host driver's own conformance claim (1.4.3.2 on the recorded KosmicKrisp baseline) then
++        // out-runs the version we just said we support. That incoherence is gfxstream's own, and no
++        // shipping Vulkan implementation has ever reported one. So: clamp major.minor down to the
++        // reported apiVersion, leave subminor/patch alone, and never raise anything.
++        //
++        // Gated on CLAMP_MOBILE_FEATURES because it must not fire under an all-sentinel install
++        // (that has to stay byte-identical to no install), and because it is the same kind of claim
++        // that bit: no mobile GPU driver reports a 1.4 conformance version either.
++        if (id.flags & VkDecoderGlobalState::kGpuIdentityClampMobileFeatures) {
++            const uint32_t reportedMajor = VK_VERSION_MAJOR(base.apiVersion);
++            const uint32_t reportedMinor = VK_VERSION_MINOR(base.apiVersion);
++            const auto clampConformance = [&](VkConformanceVersion* conformance) {
++                if (conformance->major < reportedMajor) return;
++                if (conformance->major == reportedMajor && conformance->minor <= reportedMinor) {
++                    return;
++                }
++                conformance->major = static_cast<uint8_t>(reportedMajor);
++                conformance->minor = static_cast<uint8_t>(reportedMinor);
++            };
++            if (auto* driver = vk_find_struct<VkPhysicalDeviceDriverProperties>(pProperties)) {
++                clampConformance(&driver->conformanceVersion);
++            }
++            if (auto* vulkan12 = vk_find_struct<VkPhysicalDeviceVulkan12Properties>(pProperties)) {
++                clampConformance(&vulkan12->conformanceVersion);
++            }
++        }
++    }
++
+     void on_vkGetPhysicalDeviceProperties(android::base::BumpPool* pool,
+                                           VkPhysicalDevice boxed_physicalDevice,
+                                           VkPhysicalDeviceProperties* pProperties) {
+@@ -1629,6 +1963,17 @@ class VkDecoderGlobalState::Impl {
+         if (pProperties->apiVersion > kMaxSafeVersion) {
+             pProperties->apiVersion = kMaxSafeVersion;
+         }
++
++        // AEmulator: the same identity pass the 1.1 path below runs, through the same code. The 1.0
++        // entry point has no pNext, so wrap it — duplicating the field list here is how the two
++        // paths would drift apart.
++        VkPhysicalDeviceProperties2 wrapped = {
++            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
++            nullptr,
++        };
++        wrapped.properties = *pProperties;
++        applyGpuIdentity(&wrapped);
++        *pProperties = wrapped.properties;
+     }
+ 
+     void on_vkGetPhysicalDeviceProperties2(android::base::BumpPool* pool,
+@@ -1671,6 +2016,8 @@ class VkDecoderGlobalState::Impl {
+         if (pProperties->properties.apiVersion > kMaxSafeVersion) {
+             pProperties->properties.apiVersion = kMaxSafeVersion;
+         }
++
++        applyGpuIdentity(pProperties);
+     }
+ 
+     void on_vkGetPhysicalDeviceQueueFamilyProperties(
+@@ -1804,17 +2151,11 @@ class VkDecoderGlobalState::Impl {
          auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
          auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
  
@@ -2243,24 +2743,35 @@ index 9a4c1a363..d96312345 100644
          std::vector<VkExtensionProperties> properties;
          VkResult result =
              enumerateDeviceExtensionProperties(vk, physicalDevice, pLayerName, properties);
-@@ -1823,8 +1929,14 @@ class VkDecoderGlobalState::Impl {
+@@ -1822,17 +2163,16 @@ class VkDecoderGlobalState::Impl {
+             return result;
          }
  
- #if defined(__APPLE__) && defined(VK_MVK_moltenvk)
+-#if defined(__APPLE__) && defined(VK_MVK_moltenvk)
 -        // Guest will check for VK_MVK_moltenvk extension for enabling AHB support
 -        if (m_emu->instanceSupportsMoltenVK &&
-+        // LEGACY-GUEST ALIAS — this is NOT a claim that MoltenVK is in use (it is not; the host
-+        // driver is Mesa KosmicKrisp). Modern gfxstream_vk gates AHB support on
-+        // VK_EXT_external_memory_metal appearing in this list (ResourceTracker.cpp,
-+        // metalExtMemAvailable). Older guest images key off VK_MVK_moltenvk instead, and the
-+        // guest driver ships inside the system image, so it cannot be audited from here. Cost of
-+        // keeping it: one string in an enumerate result. Cost of removing it on an old image:
-+        // AHB silently disappears. Gate it on what it actually means.
-+        if (hasDeviceExtension(properties, VK_EXT_EXTERNAL_MEMORY_METAL_EXTENSION_NAME) &&
-             !hasDeviceExtension(properties, VK_MVK_MOLTENVK_EXTENSION_NAME)) {
-             VkExtensionProperties mvk_props;
-             strncpy(mvk_props.extensionName, VK_MVK_MOLTENVK_EXTENSION_NAME,
-@@ -1842,6 +1954,49 @@ class VkDecoderGlobalState::Impl {
+-            !hasDeviceExtension(properties, VK_MVK_MOLTENVK_EXTENSION_NAME)) {
+-            VkExtensionProperties mvk_props;
+-            strncpy(mvk_props.extensionName, VK_MVK_MOLTENVK_EXTENSION_NAME,
+-                    sizeof(mvk_props.extensionName));
+-            mvk_props.specVersion = VK_MVK_MOLTENVK_SPEC_VERSION;
+-            properties.push_back(mvk_props);
+-        }
+-#endif
++        // The VK_MVK_moltenvk synthesis that used to be here is GONE. It manufactured that name
++        // whenever VK_EXT_external_memory_metal was present, as an AHB-support alias for pre-Mesa
++        // guest images. No Mesa gfxstream_vk guest has ever looked at it — ResourceTracker gates AHB
++        // on external_memory_metal / _host / _fd, never on MoltenVK — so this is a hygiene deletion
++        // and NOT a detection win: nothing reachable was reading it. What it was, was a renderer
++        // volunteering the string "MoltenVK" to anything that asked, in a tree whose driver_pin.rs
++        // tests exist to assert MoltenVK is not reachable. Deleted rather than left as a name a
++        // future reader would have to re-derive the irrelevance of. VK_MVK_MOLTENVK_EXTENSION_NAME
++        // stays in kEmulatedDeviceExtensions as a cheap belt-and-braces filter on the host's own
++        // vkCreateDevice; see the note there.
+ 
+         if (m_emu->enableYcbcrEmulation &&
+             !hasDeviceExtension(properties, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME)) {
+@@ -1842,6 +2182,120 @@ class VkDecoderGlobalState::Impl {
              ycbcr_props.specVersion = VK_KHR_SAMPLER_YCBCR_CONVERSION_SPEC_VERSION;
              properties.push_back(ycbcr_props);
          }
@@ -2307,10 +2818,81 @@ index 9a4c1a363..d96312345 100644
 +            }
 +        }
 +
++        // AEmulator: hide the four host-platform-specific device extensions that identify the host
++        // by name. Gated on STREAM_RENDERER_GPU_IDENTITY_STRIP_PLATFORM_EXTS so the default stays
++        // exact passthrough.
++        //
++        // FOUR NAMES, NOT FIFTEEN, and the short list is the point. Verified against this pin:
++        //   * The VK_KHR_maintenance7/8/9/10 + shader_fma + present_id2 group never reaches a guest
++        //     app anyway — Mesa's own ALLOWED_ANDROID_VERSION gate hides it inside the guest driver.
++        //     Stripping it here would be a filter with no observer.
++        //   * VK_GOOGLE_decorate_string and VK_GOOGLE_hlsl_functionality1 ARE shipped by real
++        //     Qualcomm drivers on real phones. Removing them makes this device MORE unusual, not
++        //     less. This is the trap in "strip everything that looks emulator-ish".
++        // What is left is genuinely host-shaped: a Metal external-memory extension, and three that
++        // no Android Vulkan driver advertises.
++        //
++        // Plain string literals on purpose. Two of these names only have macros behind a platform
++        // #define, and a header bump that renames or drops a macro should not silently turn a strip
++        // into a no-op — a literal keeps matching the string the driver actually reports.
++        if (sGpuIdentity.flags & VkDecoderGlobalState::kGpuIdentityStripPlatformExts) {
++            static const char* const kPlatformExtensionsToStrip[] = {
++                "VK_EXT_custom_resolve",
++                "VK_EXT_primitive_restart_index",
++                "VK_AMD_shader_image_load_store_lod",
++            };
++            const size_t beforeStrip = properties.size();
++            properties.erase(
++                std::remove_if(properties.begin(), properties.end(),
++                               [](const VkExtensionProperties& prop) {
++                                   for (const char* name : kPlatformExtensionsToStrip) {
++                                       if (strcmp(prop.extensionName, name) == 0) return true;
++                                   }
++                                   return false;
++                               }),
++                properties.end());
++
++            // VK_EXT_external_memory_metal is the one name here that carries a capability, so it is
++            // conditional. The guest's AHB support gates on an OR:
++            // ResourceTracker's hostHasExternalMemorySupport is (win32 || fd || metal || host ||
++            // ...). Dropping metal while external_memory_host survives costs nothing. Dropping it
++            // when host is ALSO absent turns AHB off in the guest — which surfaces as a rendering
++            // bug somewhere else entirely, days later, and not as a configuration error. So the
++            // precondition is mandatory, not defensive, and its failure is loud.
++            const bool hostMem = hasDeviceExtension(properties, "VK_EXT_external_memory_host");
++            const bool metalMem = hasDeviceExtension(properties, "VK_EXT_external_memory_metal");
++            if (metalMem && hostMem) {
++                properties.erase(std::remove_if(properties.begin(), properties.end(),
++                                                [](const VkExtensionProperties& prop) {
++                                                    return strcmp(prop.extensionName,
++                                                                  "VK_EXT_external_memory_metal") ==
++                                                           0;
++                                                }),
++                                 properties.end());
++            } else if (metalMem) {
++                static bool sWarnedMetalMemKept = false;
++                if (!sWarnedMetalMemKept) {
++                    sWarnedMetalMemKept = true;
++                    WARN("[gfxstream] gpu identity: KEEPING VK_EXT_external_memory_metal in the "
++                         "guest's device extension list — VK_EXT_external_memory_host is NOT "
++                         "advertised by this host driver, and the guest's AHB support is an OR of "
++                         "the two. Stripping the last one would silently disable AndroidHardware"
++                         "Buffer in the guest. A host-name tell is worth far less than AHB.");
++                }
++            }
++
++            static bool sLoggedPlatformStrip = false;
++            if (!sLoggedPlatformStrip) {
++                sLoggedPlatformStrip = true;
++                INFO("[gfxstream] gpu identity: stripped %zu host-platform device extensions of %zu",
++                     beforeStrip - properties.size(), beforeStrip);
++            }
++        }
++
          if (pProperties == nullptr) {
              *pPropertyCount = properties.size();
          } else {
-@@ -1944,63 +2099,6 @@ class VkDecoderGlobalState::Impl {
+@@ -1944,63 +2398,6 @@ class VkDecoderGlobalState::Impl {
              }
          }
  
@@ -2374,7 +2956,163 @@ index 9a4c1a363..d96312345 100644
  
          // Filter device memory report as callbacks can not be passed between guest and host.
          vk_struct_chain_filter<VkDeviceDeviceMemoryReportCreateInfoEXT>(&createInfoFiltered);
-@@ -5069,9 +5167,10 @@ class VkDecoderGlobalState::Impl {
+@@ -4002,6 +4399,111 @@ class VkDecoderGlobalState::Impl {
+         destroyShaderModuleLocked(device, deviceDispatch, shaderModule, pAllocator);
+     }
+ 
++    // ---- AEmulator: pipeline-cache header identity -----------------------------------------------
++    //
++    // vkGetPipelineCacheData's blob starts with a 32-byte VkPipelineCacheHeaderVersionOne that the
++    // driver fills from the REAL vendorID (bytes 8..12), deviceID (12..16) and pipelineCacheUUID
++    // (16..32). Recorded on this host, unmodified:
++    //
++    //   20000000 01000000 6b100000 64000000 1655d6f09ee4d2a99972c55da30e2a0c
++    //                     ^^^^^^^^ 0x106b   ^^^^^^^^ 0x64  ^^ the stable per-machine UUID
++    //
++    // So any app that creates a pipeline cache and reads it back recovers the true vendor, the true
++    // device, AND a permanent unpermissioned cross-app device identifier — no matter what
++    // vkGetPhysicalDeviceProperties said. That makes this, not vendorID, the highest-value item in
++    // the whole identity workstream, and it is the one an identity change is most likely to miss,
++    // because upstream has no handler here at all.
++    //
++    // The rewrite is SYMMETRIC on purpose. Outbound only would mean every blob the guest saves is
++    // rejected by vkCreatePipelineCache on reload (the driver checks the header against itself), so
++    // every app would recompile its shaders on every launch: a real performance regression, and a
++    // timing signature of its own that is arguably easier to spot than the UUID was.
++    //
++    // The real values come from mPhysdevInfo[..].props, which applyGpuIdentity deliberately never
++    // touches. That is the second reason that rule exists.
++
++    // The identity this renderer REPORTS for `device` (spoofed where a field is non-sentinel, host
++    // value otherwise), and the identity the host driver actually has. False if unknown.
++    // Caller must hold mLock.
++    bool pipelineCacheIdentityLocked(VkDevice device, uint32_t* reportedVendorId,
++                                     uint32_t* reportedDeviceId, const uint8_t** reportedUuid,
++                                     uint32_t* realVendorId, uint32_t* realDeviceId,
++                                     const uint8_t** realUuid) {
++        auto* deviceInfo = android::base::find(mDeviceInfo, device);
++        if (!deviceInfo) return false;
++        auto* physdevInfo = android::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
++        if (!physdevInfo) return false;
++
++        const VkPhysicalDeviceProperties& real = physdevInfo->props;
++        *realVendorId = real.vendorID;
++        *realDeviceId = real.deviceID;
++        *realUuid = real.pipelineCacheUUID;
++
++        const VkDecoderGlobalState::GpuIdentity& id = sGpuIdentity;
++        *reportedVendorId = id.vendorId != 0 ? id.vendorId : real.vendorID;
++        *reportedDeviceId = id.deviceId != 0 ? id.deviceId : real.deviceID;
++        *reportedUuid =
++            gpuIdentityHasPipelineCacheUuid(id) ? id.pipelineCacheUuid : real.pipelineCacheUUID;
++        return true;
++    }
++
++    static bool pipelineCacheHeaderIdentityIs(const uint8_t* header, uint32_t vendorId,
++                                              uint32_t deviceId, const uint8_t* uuid) {
++        uint32_t headerVersion = 0;
++        memcpy(&headerVersion, header + 4, sizeof(headerVersion));
++        if (headerVersion != kPipelineCacheHeaderVersionOne) return false;
++        return memcmp(header + kPipelineCacheHeaderVendorIdOffset, &vendorId, sizeof(vendorId)) ==
++                   0 &&
++               memcmp(header + kPipelineCacheHeaderDeviceIdOffset, &deviceId, sizeof(deviceId)) ==
++                   0 &&
++               memcmp(header + kPipelineCacheHeaderUuidOffset, uuid, VK_UUID_SIZE) == 0;
++    }
++
++    static void pipelineCacheHeaderSetIdentity(uint8_t* header, uint32_t vendorId,
++                                               uint32_t deviceId, const uint8_t* uuid) {
++        memcpy(header + kPipelineCacheHeaderVendorIdOffset, &vendorId, sizeof(vendorId));
++        memcpy(header + kPipelineCacheHeaderDeviceIdOffset, &deviceId, sizeof(deviceId));
++        memcpy(header + kPipelineCacheHeaderUuidOffset, uuid, VK_UUID_SIZE);
++    }
++
++    VkResult on_vkGetPipelineCacheData(android::base::BumpPool* pool, VkDevice boxed_device,
++                                       VkPipelineCache pipelineCache, size_t* pDataSize,
++                                       void* pData) {
++        auto device = unbox_VkDevice(boxed_device);
++        auto deviceDispatch = dispatch_VkDevice(boxed_device);
++
++        VkResult result =
++            deviceDispatch->vkGetPipelineCacheData(device, pipelineCache, pDataSize, pData);
++        // VK_INCOMPLETE still means *pDataSize bytes were written, so it gets the rewrite too. Any
++        // other non-success result wrote nothing.
++        if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
++            return result;
++        }
++        if (!pData || !pDataSize || *pDataSize < kPipelineCacheHeaderBytes) {
++            // A size query (pData == nullptr) or a buffer too small to hold a header: nothing that
++            // could carry the identity, and the size itself is unchanged by the rewrite.
++            return result;
++        }
++
++        uint32_t reportedVendorId = 0, reportedDeviceId = 0, realVendorId = 0, realDeviceId = 0;
++        const uint8_t* reportedUuid = nullptr;
++        const uint8_t* realUuid = nullptr;
++        {
++            std::lock_guard<std::recursive_mutex> lock(mLock);
++            if (!pipelineCacheIdentityLocked(device, &reportedVendorId, &reportedDeviceId,
++                                             &reportedUuid, &realVendorId, &realDeviceId,
++                                             &realUuid)) {
++                ERR("on_vkGetPipelineCacheData: no properties for device %p; the cache header is "
++                    "being passed through with the HOST identity in it.",
++                    device);
++                return result;
++            }
++            pipelineCacheHeaderSetIdentity(static_cast<uint8_t*>(pData), reportedVendorId,
++                                           reportedDeviceId, reportedUuid);
++        }
++        return result;
++    }
++
+     VkResult on_vkCreatePipelineCache(android::base::BumpPool* pool, VkDevice boxed_device,
+                                       const VkPipelineCacheCreateInfo* pCreateInfo,
+                                       const VkAllocationCallbacks* pAllocator,
+@@ -4009,8 +4511,41 @@ class VkDecoderGlobalState::Impl {
+         auto device = unbox_VkDevice(boxed_device);
+         auto deviceDispatch = dispatch_VkDevice(boxed_device);
+ 
+-        VkResult result =
+-            deviceDispatch->vkCreatePipelineCache(device, pCreateInfo, pAllocator, pPipelineCache);
++        // AEmulator: the inbound half of the header rewrite. If the guest is handing back a blob
++        // whose header carries the identity WE reported, put the host's real identity back before
++        // the driver validates it — otherwise the driver rejects its own cache and the app
++        // recompiles every shader, every launch.
++        //
++        // pInitialData IS GUEST MEMORY (the decoder's read buffer, which the guest still owns).
++        // Rewriting it in place would be a guest-memory corruption bug whose symptoms appear far
++        // from here, so the swap goes into a BumpPool copy that lives exactly as long as this call.
++        const VkPipelineCacheCreateInfo* forwardedCreateInfo = pCreateInfo;
++        VkPipelineCacheCreateInfo rewrittenCreateInfo;
++        if (pool && pCreateInfo && pCreateInfo->pInitialData &&
++            pCreateInfo->initialDataSize >= kPipelineCacheHeaderBytes) {
++            uint32_t reportedVendorId = 0, reportedDeviceId = 0, realVendorId = 0, realDeviceId = 0;
++            const uint8_t* reportedUuid = nullptr;
++            const uint8_t* realUuid = nullptr;
++            std::lock_guard<std::recursive_mutex> lock(mLock);
++            const auto* guestHeader = static_cast<const uint8_t*>(pCreateInfo->pInitialData);
++            if (pipelineCacheIdentityLocked(device, &reportedVendorId, &reportedDeviceId,
++                                            &reportedUuid, &realVendorId, &realDeviceId,
++                                            &realUuid) &&
++                pipelineCacheHeaderIdentityIs(guestHeader, reportedVendorId, reportedDeviceId,
++                                              reportedUuid) &&
++                !pipelineCacheHeaderIdentityIs(guestHeader, realVendorId, realDeviceId, realUuid)) {
++                void* copy = pool->alloc(pCreateInfo->initialDataSize);
++                memcpy(copy, pCreateInfo->pInitialData, pCreateInfo->initialDataSize);
++                pipelineCacheHeaderSetIdentity(static_cast<uint8_t*>(copy), realVendorId,
++                                               realDeviceId, realUuid);
++                rewrittenCreateInfo = *pCreateInfo;
++                rewrittenCreateInfo.pInitialData = copy;
++                forwardedCreateInfo = &rewrittenCreateInfo;
++            }
++        }
++
++        VkResult result = deviceDispatch->vkCreatePipelineCache(device, forwardedCreateInfo,
++                                                               pAllocator, pPipelineCache);
+         if (result != VK_SUCCESS) {
+             return result;
+         }
+@@ -5069,9 +5604,10 @@ class VkDecoderGlobalState::Impl {
                  bool opaqueFd = true;
  
  #if defined(__APPLE__)
@@ -2388,7 +3126,7 @@ index 9a4c1a363..d96312345 100644
  
                      extern VkImage getColorBufferVkImage(uint32_t colorBufferHandle);
                      if (dedicatedAllocInfoPtr == nullptr || localDedicatedAllocInfo.image == VK_NULL_HANDLE) {
-@@ -5145,7 +5244,7 @@ class VkDecoderGlobalState::Impl {
+@@ -5145,7 +5681,7 @@ class VkDecoderGlobalState::Impl {
  
              bool opaqueFd = true;
  #ifdef __APPLE__
@@ -2397,7 +3135,7 @@ index 9a4c1a363..d96312345 100644
                  MTLResource_id bufferMetalMemoryHandle =
                      getBufferMetalMemoryHandle(importBufferInfoPtr->buffer);
  
-@@ -5158,7 +5257,9 @@ class VkDecoderGlobalState::Impl {
+@@ -5158,7 +5694,9 @@ class VkDecoderGlobalState::Impl {
                      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
                  }
  
@@ -2408,7 +3146,7 @@ index 9a4c1a363..d96312345 100644
                  importInfoMetalHandle.handle = bufferMetalMemoryHandle;
  
                  vk_append_struct(&structChainIter, &importInfoMetalHandle);
-@@ -5317,13 +5418,11 @@ class VkDecoderGlobalState::Impl {
+@@ -5317,13 +5855,11 @@ class VkDecoderGlobalState::Impl {
                  VkExternalMemoryHandleTypeFlags handleTypes;
  
  #if defined(__APPLE__)
@@ -2427,7 +3165,7 @@ index 9a4c1a363..d96312345 100644
  #elif defined(_WIN32)
                  handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
  #elif defined(__unix__)
-@@ -5890,9 +5989,9 @@ class VkDecoderGlobalState::Impl {
+@@ -5890,9 +6426,9 @@ class VkDecoderGlobalState::Impl {
  #endif
  
  #ifdef __APPLE__
@@ -2439,7 +3177,7 @@ index 9a4c1a363..d96312345 100644
              }
  #endif
  
-@@ -8112,21 +8211,10 @@ class VkDecoderGlobalState::Impl {
+@@ -8112,21 +8648,10 @@ class VkDecoderGlobalState::Impl {
              res.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
          }
  #elif defined(__APPLE__)
@@ -2465,7 +3203,7 @@ index 9a4c1a363..d96312345 100644
          }
  #endif
  
-@@ -8190,12 +8278,6 @@ class VkDecoderGlobalState::Impl {
+@@ -8190,12 +8715,6 @@ class VkDecoderGlobalState::Impl {
              res.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
          }
  
@@ -2478,7 +3216,7 @@ index 9a4c1a363..d96312345 100644
  
          return res;
      }
-@@ -8557,6 +8639,15 @@ class VkDecoderGlobalState::Impl {
+@@ -8557,6 +9076,15 @@ class VkDecoderGlobalState::Impl {
      }
  
      void destroyInstanceObjects(InstanceObjects& objects) {
@@ -2494,6 +3232,104 @@ index 9a4c1a363..d96312345 100644
          VkInstance instance = objects.instance.key();
          InstanceInfo& instanceInfo = objects.instance.mapped();
  
+@@ -9075,6 +9603,16 @@ void VkDecoderGlobalState::reset() {
+     sGlobalDecoderState = nullptr;
+ }
+ 
++// AEmulator. Deliberately does NOT touch sGlobalDecoderState: this is legal (and only legal) before
++// stream_renderer_init(), i.e. before that singleton or any renderer thread exists, so it must not
++// be the thing that brings it into being. Note that reset() above does NOT clear the identity —
++// it destroys the decoder state, not the VMM's configuration of it, and a re-init must see the same
++// identity the first one did or the guest would observe two different GPUs in one process.
++void VkDecoderGlobalState::setGpuIdentity(const VkDecoderGlobalState::GpuIdentity& identity) {
++    sGpuIdentity = identity;
++    sGpuIdentity.deviceName[sizeof(sGpuIdentity.deviceName) - 1] = '\0';
++}
++
+ // Snapshots
+ bool VkDecoderGlobalState::snapshotsEnabled() const { return mImpl->snapshotsEnabled(); }
+ bool VkDecoderGlobalState::batchedDescriptorSetUpdateEnabled() const { return mImpl->batchedDescriptorSetUpdateEnabled(); }
+@@ -9507,6 +10045,13 @@ void VkDecoderGlobalState::on_vkDestroyPipelineCache(android::base::BumpPool* po
+     mImpl->on_vkDestroyPipelineCache(pool, boxed_device, pipelineCache, pAllocator);
+ }
+ 
++VkResult VkDecoderGlobalState::on_vkGetPipelineCacheData(android::base::BumpPool* pool,
++                                                         VkDevice boxed_device,
++                                                         VkPipelineCache pipelineCache,
++                                                         size_t* pDataSize, void* pData) {
++    return mImpl->on_vkGetPipelineCacheData(pool, boxed_device, pipelineCache, pDataSize, pData);
++}
++
+ VkResult VkDecoderGlobalState::on_vkCreateGraphicsPipelines(
+     android::base::BumpPool* pool, VkDevice boxed_device, VkPipelineCache pipelineCache,
+     uint32_t createInfoCount, const VkGraphicsPipelineCreateInfo* pCreateInfos,
+diff --git a/host/vulkan/VkDecoderGlobalState.h b/host/vulkan/VkDecoderGlobalState.h
+index eb455a399..8ed2edd67 100644
+--- a/host/vulkan/VkDecoderGlobalState.h
++++ b/host/vulkan/VkDecoderGlobalState.h
+@@ -74,6 +74,46 @@ class VkDecoderGlobalState {
+     // For testing only - destroys the global instance of VkDecoderGlobalState.
+     static void reset();
+ 
++    // ---- AEmulator: guest-facing GPU identity ------------------------------------------------
++    // Plain-old-data mirror of `struct stream_renderer_gpu_identity` (the public C ABI in
++    // gfxstream/virtio-gpu-gfxstream-renderer-unstable.h), minus that struct's `struct_size` guard,
++    // which the transport consumes and validates so nothing downstream has to.
++    //
++    // SENTINEL CONVENTION, and it is the whole contract: 0 / "" / all-zero means KEEP THE HOST
++    // VALUE. A default-constructed instance is therefore exact passthrough, which is precisely the
++    // state the renderer runs in when stream_renderer_set_gpu_identity() is never called — the
++    // default must stay byte-identical to an unpatched renderer, so every write in
++    // applyGpuIdentity() and clampGpuIdentityFeatures() is gated on its own field, never on "an
++    // identity was installed".
++    //
++    // THIS SIDE IS A DUMB APPLIER. It never invents a value, never derives one field from another,
++    // and holds no notion of which GPU is being described. That policy lives in AEmulator's
++    // `aemulator-identity` crate, where it is a plain Rust struct with tests, on the theory that a
++    // claim about hardware should be reviewable somewhere other than inside a Vulkan proxy.
++    struct GpuIdentity {
++        uint32_t vendorId = 0;
++        uint32_t deviceId = 0;
++        uint32_t flags = 0;
++        uint32_t maxViewports = 0;
++        uint32_t subgroupSize = 0;
++        char deviceName[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE] = {};
++        uint8_t pipelineCacheUuid[VK_UUID_SIZE] = {};
++    };
++
++    // Mirrors STREAM_RENDERER_GPU_IDENTITY_* in the public header; static_assert'd equal there.
++    static constexpr uint32_t kGpuIdentityClampMobileFeatures = 0x00000001u;
++    static constexpr uint32_t kGpuIdentityStripPlatformExts = 0x00000002u;
++
++    // Install the identity that the guest-facing vkGetPhysicalDevice*/vkEnumerateDeviceExtension*/
++    // vkGetPipelineCacheData handlers apply.
++    //
++    // Deliberately static and lock-free: it writes one file-static in VkDecoderGlobalState.cpp,
++    // touches no singleton, and constructs nothing, so it is callable BEFORE stream_renderer_init()
++    // — which is the only time it is legal to call it. The value is first read at
++    // on_vkEnumeratePhysicalDevices() time, on renderer threads that do not exist yet when the
++    // write happens; that ordering, not a mutex, is what makes the read race-free.
++    static void setGpuIdentity(const GpuIdentity& identity);
++
+     enum SnapshotState {
+         Normal,
+         Saving,
+@@ -318,6 +358,15 @@ class VkDecoderGlobalState {
+                                    VkPipelineCache pipelineCache,
+                                    const VkAllocationCallbacks* pAllocator);
+ 
++    // AEmulator: intercepted for GPU identity only. Upstream has no handler here at all — VkDecoder
++    // called the driver directly — and that is a hole, not an omission: Mesa builds the 32-byte
++    // VkPipelineCacheHeaderVersionOne out of the REAL vendorID, deviceID and pipelineCacheUUID, so a
++    // guest app recovers the true hardware identity (and a permanent cross-app device id) from a
++    // cache blob no matter what the properties call reported. See the .cpp for the inbound half.
++    VkResult on_vkGetPipelineCacheData(android::base::BumpPool* pool, VkDevice device,
++                                       VkPipelineCache pipelineCache, size_t* pDataSize,
++                                       void* pData);
++
+     VkResult on_vkCreateGraphicsPipelines(android::base::BumpPool* pool, VkDevice device,
+                                           VkPipelineCache pipelineCache, uint32_t createInfoCount,
+                                           const VkGraphicsPipelineCreateInfo* pCreateInfos,
 diff --git a/host/vulkan/VulkanDispatch.cpp b/host/vulkan/VulkanDispatch.cpp
 index fd3048888..9126c8281 100644
 --- a/host/vulkan/VulkanDispatch.cpp
@@ -2640,6 +3476,30 @@ index bd76867c1..18d5bff8d 100644
              abort();
          }
      }
+diff --git a/host/vulkan/cereal/common/vk_struct_id.h b/host/vulkan/cereal/common/vk_struct_id.h
+index 081d6795f..21da52efa 100644
+--- a/host/vulkan/cereal/common/vk_struct_id.h
++++ b/host/vulkan/cereal/common/vk_struct_id.h
+@@ -77,6 +77,19 @@ REGISTER_VK_STRUCT_ID(VkPhysicalDeviceIDProperties,
+                       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES);
+ REGISTER_VK_STRUCT_ID(VkPhysicalDeviceDriverProperties,
+                       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES);
++// AEmulator: the promoted-core property structs. Needed so on_vkGetPhysicalDeviceProperties2's
++// identity pass can reach subgroupSize and conformanceVersion through vk_find_struct<> in BOTH the
++// forms a guest can ask for them: the standalone VkPhysicalDeviceSubgroupProperties /
++// VkPhysicalDeviceDriverProperties, and the aggregate VkPhysicalDeviceVulkan1{1,2,3}Properties. A
++// guest that asks only via the aggregate would otherwise see the host's real values.
++REGISTER_VK_STRUCT_ID(VkPhysicalDeviceSubgroupProperties,
++                      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES);
++REGISTER_VK_STRUCT_ID(VkPhysicalDeviceVulkan11Properties,
++                      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES);
++REGISTER_VK_STRUCT_ID(VkPhysicalDeviceVulkan12Properties,
++                      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES);
++REGISTER_VK_STRUCT_ID(VkPhysicalDeviceVulkan13Properties,
++                      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES);
+ REGISTER_VK_STRUCT_ID(VkPhysicalDeviceDescriptorIndexingFeaturesEXT,
+                       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT);
+ REGISTER_VK_STRUCT_ID(VkSemaphoreTypeCreateInfoKHR,
 diff --git a/host/vulkan/meson.build b/host/vulkan/meson.build
 index c11957070..acb960602 100644
 --- a/host/vulkan/meson.build

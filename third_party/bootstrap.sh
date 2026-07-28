@@ -393,9 +393,10 @@ if [ "$VERIFY_ONLY" = 0 ]; then
     ninja -C "$TP_GFXSTREAM_BUILD_HOST" gfxstream_backend >/dev/null || die "gfxstream build failed"
     [ -f "$TP_GFXSTREAM_DYLIB" ] || die "gfxstream: no dylib at $TP_GFXSTREAM_DYLIB"
     # The patches are only real if they reached the artifact. Check a symbol from each phase.
-    nm -gU "$TP_GFXSTREAM_DYLIB" | grep -cE '_stream_renderer_(present_to_metal_layer|release_metal_layer)$' | grep -qx 2 \
-        || die "gfxstream: dylib built but does not export both stream_renderer_present_to_metal_layer
-    and stream_renderer_release_metal_layer — the patch series did not reach the artifact (stale build dir?)"
+    nm -gU "$TP_GFXSTREAM_DYLIB" | grep -cE '_stream_renderer_(present_to_metal_layer|release_metal_layer|set_gpu_identity)$' | grep -qx 3 \
+        || die "gfxstream: dylib built but does not export all three of stream_renderer_present_to_metal_layer,
+    stream_renderer_release_metal_layer and stream_renderer_set_gpu_identity — the patch series did
+    not reach the artifact (stale build dir?)"
     nm -gU "$TP_GFXSTREAM_DYLIB" | grep -q "_stream_renderer_get_color_buffer_mtl_texture" \
         && die "gfxstream: dylib still exports the removed metal_objects entry point — stale build"
     ok "gfxstream dylib built and patch-verified: $TP_GFXSTREAM_DYLIB"
