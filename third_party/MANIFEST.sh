@@ -18,6 +18,14 @@
 # something that silently lost our changes.
 
 # ---------------------------------------------------------------------------------------------
+# Host floor. KosmicKrisp is built on Metal APIs that only exist on macOS 26+, and with MoltenVK
+# removed there is nothing to fall back to — so this is a hard requirement, not a preference. It
+# lived only in ci/hvf-doctor.sh, which meant a bootstrap on an older host cheerfully spent 45
+# minutes BUILDING a driver the doctor then rejected. Recorded here so both agree by construction.
+# ---------------------------------------------------------------------------------------------
+TP_MACOS_MIN_MAJOR="26"
+
+# ---------------------------------------------------------------------------------------------
 # gfxstream — the guest<->host graphics protocol decoder. We carry REAL patches on this one; see
 # third_party/patches/gfxstream/. Without them the host renderer cannot drive a conformant
 # (non-portability) Vulkan driver and has no in-Vulkan present path at all.
@@ -26,6 +34,21 @@ TP_GFXSTREAM_NAME="gfxstream"
 TP_GFXSTREAM_URL="https://github.com/BlissOS/platform_hardware_google_gfxstream"
 TP_GFXSTREAM_SHA="5c5fe539389dc4fc6b0566f8f9785285f0144af9"
 TP_GFXSTREAM_PATCHES="gfxstream"   # subdir of third_party/patches, applied in sorted order
+
+# Digest of the checkout's ENTIRE working-tree delta against the pinned SHA above: `git diff HEAD`
+# (spelled with every formatting knob pinned) plus one `?? <blob-sha> <path>` line per untracked file.
+#
+# WHY IT EXISTS. The patch series is verified with `git apply --check --reverse`, which proves each
+# hunk is PRESENT and nothing more. An edit made OUTSIDE every hunk's context reverse-applies exactly
+# as cleanly — so a hand-edit to host/vulkan/VkDecoderGlobalState.cpp used to ship into the built
+# dylib with `bootstrap.sh --verify` (and therefore ci/hvf-doctor.sh, and therefore ci/check.sh)
+# still green. That matters because the patch file is the ONLY record of our host C++ changes.
+# This value moves for any byte of difference anywhere in the tree, hunk or not.
+#
+# RE-RECORD IT whenever the patch series legitimately changes — the digest is a function of the
+# series, so it goes stale on every regeneration:
+#     bash third_party/bootstrap.sh --record-digest      # recomputes and rewrites the line below
+TP_GFXSTREAM_TREE_DIGEST="78a4fb880ac4f4ca89924003aa2997534f7c88a6"
 
 # ---------------------------------------------------------------------------------------------
 # aemu — aemu-base / aemu-host-common. A build-time dependency of gfxstream's SYSTEM dependency
