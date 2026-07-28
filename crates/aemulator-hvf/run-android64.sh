@@ -62,8 +62,19 @@ if [ "${SWRENDER:-0}" = "1" ]; then GPU_PROPS="$SWRENDER_PROPS"; GPU3D=1; fi
 #  · prep-super.sh: camera-APEX de-dup (no-op on 64-bit-only — single APEX) + 32-bit boringssl
 #    self-test disable (inert here; abilist32 is empty so they never fire — commenting is harmless).
 #  · prep-data-unencrypted.sh: drop /data FBE/metadata-encryption flags + lay a real empty ext4.
-#  · prep-disable-32bit.sh: neuter any 32-bit zygote_secondary/drm/media (defensive; ro.zygote=
-#    zygote64 means the secondary is never imported, so this mostly no-ops here).
+#
+# NOT run here: prep-disable-32bit-dualabi.sh. It was applied to this image for a long time on the
+# theory that it was a defensive no-op, and that was wrong. Its step 4 unconditionally rewrites
+# `service media /system/bin/mediaserver`'s `class main` -> `class hvfx` (a class no `class_start`
+# ever names). On the dual-ABI `cf` image that is correct — mediaserver is 32-bit there and cannot
+# exec on Apple Silicon. On THIS 64-bit-only image mediaserver is arm64 and runs fine, so all the
+# patch achieved was to stop it starting, which means `media.player` and `media.resource_manager`
+# never register. system_server, mediaprovider_app and platform_app then retry the lazy AIDL
+# start ~1/s forever: `init: Could not find 'aidl/media.resource_manager'` +
+# `libbinder.ServiceManagerCppClient: Waited one second for media.resource_manager`. The script's
+# own header says it targets `testdata/cf/img/super.raw.img`; it should never have been pointed at
+# cf64. (The zygote_secondary/drmserver edits genuinely were inert here: ro.zygote=zygote64 imports
+# init.zygote64.rc, so the patched declaration is never read.)
 if [ "${SKIP_PREP_SUPER:-0}" != "1" ]; then
   echo "== prep super.raw.img (apex de-dup + 32-bit self-test disable) =="
   "$HERE/prep-super.sh" "$SUPER"
@@ -72,11 +83,6 @@ if [ "${SKIP_PREP_DATA:-0}" != "1" ]; then
   echo "== prep /data unencrypted =="
   "$HERE/prep-data-unencrypted.sh" "$SUPER"
 fi
-if [ "${SKIP_PREP_32BIT:-0}" != "1" ]; then
-  echo "== prep disable 32-bit services (defensive; mostly no-op on 64-bit-only) =="
-  "$HERE/prep-disable-32bit.sh" "$SUPER"
-fi
-
 # Duplicate-APEX prune (idempotent). This image ships 3 vendor APEX modules with multiple variant
 # files declaring the SAME module name → apexd-bootstrap fatal (reboot,bootstrap-apexd-failed). The
 # ro.boot.vendor.apex.<module> selection property is too long to survive the bootconfig→property
@@ -87,15 +93,26 @@ if [ "${SKIP_PREP_APEX:-0}" != "1" ]; then
   "$HERE/prep-apex-dedup.sh" "$SUPER"
 fi
 
-# Neutralize the crashing vsock-dependent Cuttlefish HALs (light/sensors/threadnetwork). Without a
-# host vsock backend they abort + crash-loop forever; while DECLARED in VINTF they block system_server
-# (LightsService in startBootstrapServices -> Watchdog -> boot_completed never fires) and, even
-# undeclared, their respawn churn starves system_server at phase 500. This VINTF-undeclares them +
-# neuters the sensors init service + disables the light/threadnetwork APEXes. See pass 10. Skip with
-# SKIP_PREP_VSOCK_HALS=1.
+# Per-HAL enable/disable for the three HALs that used to be neutered wholesale (light, sensors,
+# threadnetwork). Historically all three were disabled because each aborted and crash-looped without a
+# host backend — and while DECLARED in VINTF they blocked system_server (LightsService in
+# startBootstrapServices -> Watchdog -> boot_completed never fires). `aemulator-hal` now provides the
+# backends, so they are re-enabled per HAL instead. Skip the whole step with SKIP_PREP_VSOCK_HALS=1.
+#
+# PREP_VSOCK_HALS_ARGS forwards per-HAL flags so an enable survives a re-run of this script, e.g.
+#   PREP_VSOCK_HALS_ARGS="--revert=sensors,light" ./run-android64.sh     # the default
+#   PREP_VSOCK_HALS_ARGS="--revert=sensors --probe=light" ./run-android64.sh
+# sensors and light are reverted by default: both have host backends now (aemulator-hal).
+# threadnetwork is NOT, and the reason is worth knowing. Its `ro.boot.openthread_node_id` blocker is
+# fixed (the VMM emits it), but its bundled `ot-rcp` uses OpenThread's simulation platform, which opens
+# a multicast socket on the interface its `-L` argument names (`-Leth1`) — and this guest has only eth0.
+# So `utilsInitSocket() at simul_utils.c:370: Failure` kills ot-rcp, the HAL exits 5, and four respawns
+# make init reset every server-configurable flag. Add `--revert=threadnetwork` once a second guest NIC
+# exists.
 if [ "${SKIP_PREP_VSOCK_HALS:-0}" != "1" ]; then
-  echo "== prep disable vsock HALs (light/sensors/threadnetwork undeclare + neuter) =="
-  "$HERE/prep-disable-vsock-hals.sh" "$SUPER"
+  echo "== prep vsock-HAL enable/disable =="
+  # shellcheck disable=SC2086 # deliberate word-splitting: the var carries multiple flags
+  "$HERE/prep-disable-vsock-hals.sh" "$SUPER" ${PREP_VSOCK_HALS_ARGS-"--revert=sensors,light"}
 fi
 
 # Phase 5 (stealth): in-place de-brand of the uncompressed odm/system_ext build.prop identity

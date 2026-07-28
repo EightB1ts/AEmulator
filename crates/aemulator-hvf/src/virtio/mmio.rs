@@ -13,6 +13,7 @@ use super::gpu::Gpu;
 use super::input::Input;
 use super::net::Net;
 use super::rng::Rng;
+use super::vsock;
 use super::{Mem, QUEUE_SIZE, VIRTIO_ID_CONSOLE};
 use virtio_queue::{Queue, QueueT};
 
@@ -72,6 +73,7 @@ pub enum Backend {
     Gpu(Gpu),
     Input(Input),
     Net(Net),
+    Vsock(vsock::Vsock),
 }
 
 impl Backend {
@@ -84,6 +86,7 @@ impl Backend {
             Backend::Gpu(d) => d.device_type(),
             Backend::Input(d) => d.device_type(),
             Backend::Net(d) => d.device_type(),
+            Backend::Vsock(d) => d.device_type(),
         }
     }
     pub fn features(&self) -> u64 {
@@ -95,6 +98,7 @@ impl Backend {
             Backend::Gpu(d) => d.features(),
             Backend::Input(d) => d.features(),
             Backend::Net(d) => d.features(),
+            Backend::Vsock(d) => d.features(),
         }
     }
     pub fn num_queues(&self) -> usize {
@@ -106,6 +110,7 @@ impl Backend {
             Backend::Gpu(d) => d.num_queues(),
             Backend::Input(d) => d.num_queues(),
             Backend::Net(d) => d.num_queues(),
+            Backend::Vsock(d) => d.num_queues(),
         }
     }
     pub fn config_read(&self, off: u64, len: usize) -> u64 {
@@ -117,6 +122,7 @@ impl Backend {
             Backend::Gpu(d) => d.config_read(off, len),
             Backend::Input(d) => d.config_read(off, len),
             Backend::Net(d) => d.config_read(off, len),
+            Backend::Vsock(d) => d.config_read(off, len),
         }
     }
     pub fn config_write(&mut self, off: u64, val: u64, len: usize) {
@@ -128,6 +134,7 @@ impl Backend {
             Backend::Gpu(d) => d.config_write(off, val, len),
             Backend::Input(d) => d.config_write(off, val, len),
             Backend::Net(d) => d.config_write(off, val, len),
+            Backend::Vsock(d) => d.config_write(off, val, len),
         }
     }
     pub fn process_queue(&mut self, idx: u16, mem: &Mem, queue: &mut Queue) -> bool {
@@ -139,6 +146,7 @@ impl Backend {
             Backend::Gpu(d) => d.process_queue(idx, mem, queue),
             Backend::Input(d) => d.process_queue(idx, mem, queue),
             Backend::Net(d) => d.process_queue(idx, mem, queue),
+            Backend::Vsock(d) => d.process_queue(idx, mem, queue),
         }
     }
 }
@@ -310,11 +318,17 @@ impl MmioTransport {
         // Disjoint field borrows: `self.queues[idx]` and `self.backend` are distinct fields.
         // A console needs BOTH queues in one notify (a secure channel writes its RX response while
         // draining the TX request), so route it through `on_notify(&mut [Queue])`.
-        let produced = if let Backend::Console(c) = &mut self.backend {
-            c.on_notify(idx, mem, &mut self.queues)
-        } else {
-            let q = &mut self.queues[idx as usize];
-            self.backend.process_queue(idx, mem, q)
+        // vsock needs the same treatment: a guest packet may require an immediate reply on the rx
+        // queue. Two explicit arms rather than a trait: only 2 of 8 backends need this, and adding an
+        // abstraction for two cases would put an indirection on the hot MMIO dispatch path that this
+        // enum exists to keep direct. A third consumer is the signal to factor it out.
+        let produced = match &mut self.backend {
+            Backend::Console(c) => c.on_notify(idx, mem, &mut self.queues),
+            Backend::Vsock(v) => v.on_notify(idx, mem, &mut self.queues),
+            _ => {
+                let q = &mut self.queues[idx as usize];
+                self.backend.process_queue(idx, mem, q)
+            }
         };
         if produced {
             self.interrupt_status |= VIRTIO_MMIO_INT_VRING;

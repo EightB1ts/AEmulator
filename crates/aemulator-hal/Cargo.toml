@@ -1,0 +1,12 @@
+[package]
+name = "aemulator-hal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Host-side guest-HAL protocol state machines (sensors, NCI, HCI, NMEA, AT, vsock) — pure bytes-in/bytes-out, no VMM or platform dependency."
+
+# Deliberately dependency-free (not even serde): every module here is a pure state machine over
+# byte slices, so it is buildable on any target and reusable by BOTH the macOS/HVF VMM
+# (`aemulator-hvf`) and the future Linux/KVM crosvm backend (`aemulator-vmm::crosvm_backend`).
+[dependencies]

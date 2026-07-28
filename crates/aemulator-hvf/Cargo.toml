@@ -48,6 +48,10 @@ path = "src/bin/aemu-cereal-gap.rs"
 # macOS-buildable, so the default build stays hermetic.
 aemulator-identity = { path = "../aemulator-identity" }
 aemulator-dtb = { path = "../aemulator-dtb" }
+# Guest-HAL protocol state machines (sensors/NCI/HCI/NMEA/AT/vsock). Pure bytes-in/bytes-out with no
+# platform dependency, so it lives in the workspace (and under ci/check.sh) rather than in this
+# macOS-only spike — the Linux/KVM crosvm backend needs the identical state machines.
+aemulator-hal = { path = "../aemulator-hal" }
 # The lib stays dependency-free raw FFI. These deps power the run-linux VMM binary (memory,
 # arm64 Image loader, FDT builder). Kept minimal + macOS/aarch64-buildable (no Linux-only crates).
 libc = "0.2"

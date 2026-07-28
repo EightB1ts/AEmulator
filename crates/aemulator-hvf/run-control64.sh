@@ -42,9 +42,14 @@ if [ "${SWRENDER:-0}" = "1" ]; then GPU_PROPS="$SWRENDER_PROPS"; GPU3D=1; fi
 # Idempotent image prep — SAME scripts as run-android64.sh (skip each with its SKIP_* env).
 [ "${SKIP_PREP_SUPER:-0}" != "1" ] && { echo "== prep super.raw.img =="; "$HERE/prep-super.sh" "$SUPER"; }
 [ "${SKIP_PREP_DATA:-0}" != "1" ] && { echo "== prep /data unencrypted =="; "$HERE/prep-data-unencrypted.sh" "$SUPER"; }
-[ "${SKIP_PREP_32BIT:-0}" != "1" ] && { echo "== prep disable 32-bit services =="; "$HERE/prep-disable-32bit.sh" "$SUPER"; }
+# NOT prep-disable-32bit-dualabi.sh — it is for the dual-ABI `cf` image only. Applying it here
+# disabled mediaserver (arm64 and healthy on this image), which cost us media.player +
+# media.resource_manager and a ~1 Hz lazy-start retry storm. See run-android64.sh's header.
 [ "${SKIP_PREP_APEX:-0}" != "1" ] && { echo "== prep apex dedup =="; "$HERE/prep-apex-dedup.sh" "$SUPER"; }
-[ "${SKIP_PREP_VSOCK_HALS:-0}" != "1" ] && { echo "== prep disable vsock HALs =="; "$HERE/prep-disable-vsock-hals.sh" "$SUPER"; }
+# PREP_VSOCK_HALS_ARGS forwards per-HAL flags (--revert=/--probe=) so a re-enable survives a re-run;
+# see run-android64.sh for why sensors+light are on by default and threadnetwork is not.
+# shellcheck disable=SC2086 # deliberate word-splitting: the var carries multiple flags
+[ "${SKIP_PREP_VSOCK_HALS:-0}" != "1" ] && { echo "== prep vsock-HAL enable/disable =="; "$HERE/prep-disable-vsock-hals.sh" "$SUPER" ${PREP_VSOCK_HALS_ARGS-"--revert=sensors,light"}; }
 [ "${SKIP_PREP_DEBRAND:-0}" != "1" ] && { echo "== prep de-brand identity =="; "$HERE/prep-debrand.sh" "$SUPER"; }
 
 echo "== build =="

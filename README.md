@@ -182,6 +182,7 @@ workspace. `aemulator-studio/` stays its own pnpm root and owns its lockfile and
 | `aemulator-detection` | the adversary's-eye view (leaf): blocklist + rnidbg probe catalogue, `scan_dir`/`lint_properties` |
 | `aemulator-dtb` | hand-authored device tree via `vm-fdt`; `assert_no_vm_tells` byte-scan |
 | `aemulator-control` | LLM control-plane contract (`UiTree`/`Observation`/`Action` + generation counter) + a fully-tested in-memory `MockController` |
+| `aemulator-hal` | host-side **guest-HAL protocol state machines** (leaf, dependency-free): sensors (goldfish ASCII + a coherent motion model), NFC (NCI), Bluetooth (HCI H4), GNSS (NMEA), RIL (AT/27.007), and virtio-vsock packets + a host service registry. Pure bytes-in/bytes-out, so `aemulator-hvf` and the future crosvm backend share one implementation |
 | `aemulator-vmm` | identity injection + HVF launcher-arg generation; the KVM/crosvm seam behind `feature=kvm` + `cfg(linux)` |
 | `aemulator-supervisor` | device lifecycle (state machine) wiring vmm + control |
 | `attestation-relay` | OPTIONAL Phase-5 per-flow relay to real rooted devices (leaf) |

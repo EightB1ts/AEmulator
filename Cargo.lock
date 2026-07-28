@@ -59,6 +59,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aemulator-hal"
+version = "0.0.1"
+
+[[package]]
 name = "aemulator-identity"
 version = "0.0.1"
 dependencies = [

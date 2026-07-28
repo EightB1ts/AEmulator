@@ -5,6 +5,7 @@ members = [
     "crates/aemulator-detection",
     "crates/aemulator-dtb",
     "crates/aemulator-control",
+    "crates/aemulator-hal",
     "crates/aemulator-vmm",
     "crates/aemulator-supervisor",
     "crates/attestation-relay",

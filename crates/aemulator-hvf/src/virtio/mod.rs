@@ -31,6 +31,7 @@ pub mod rng;
 /// (`#[cfg(test)]`), so it never reaches a shipped binary.
 #[cfg(test)]
 pub mod testkit;
+pub mod vsock;
 
 pub use gpu::ScanoutHandle;
 pub use mmio::{Backend, MmioTransport};
@@ -58,6 +59,7 @@ pub const VIRTIO_ID_CONSOLE: u32 = 3;
 pub const VIRTIO_ID_RNG: u32 = 4;
 pub const VIRTIO_ID_GPU: u32 = 16;
 pub const VIRTIO_ID_INPUT: u32 = 18;
+pub const VIRTIO_ID_VSOCK: u32 = 19;
 
 /// `VIRTIO_F_VERSION_1` (feature bit 32) — mandatory for a modern (v2) device.
 pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;

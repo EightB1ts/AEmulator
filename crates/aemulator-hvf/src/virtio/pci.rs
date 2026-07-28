@@ -559,11 +559,15 @@ impl PciDevice {
         }
         // A console needs BOTH queues in one notify (a secure HAL channel writes its RX response as
         // it drains the TX request), so route it through `on_notify(&mut [Queue])`.
-        let produced = if let Backend::Console(c) = &mut self.backend {
-            c.on_notify(idx, mem, &mut self.queues)
-        } else {
-            let q = &mut self.queues[idx as usize];
-            self.backend.process_queue(idx, mem, q)
+        // vsock needs the same treatment: a guest packet may require an immediate reply on the rx
+        // queue. Two explicit arms rather than a trait — see the matching comment in mmio.rs.
+        let produced = match &mut self.backend {
+            Backend::Console(c) => c.on_notify(idx, mem, &mut self.queues),
+            Backend::Vsock(v) => v.on_notify(idx, mem, &mut self.queues),
+            _ => {
+                let q = &mut self.queues[idx as usize];
+                self.backend.process_queue(idx, mem, q)
+            }
         };
         if produced {
             self.isr |= VIRTIO_ISR_QUEUE;
@@ -820,6 +824,56 @@ impl PciBus {
             }
         }
         None
+    }
+
+    /// Take the vsock device's doorbell receiver, if a vsock device is present. Available once.
+    pub fn take_vsock_doorbell(&mut self) -> Option<std::sync::mpsc::Receiver<()>> {
+        for d in &mut self.devices {
+            if let Backend::Vsock(v) = &mut d.backend {
+                return v.take_doorbell();
+            }
+        }
+        None
+    }
+
+    /// Flush whatever host vsock services have queued into the guest's receive queue, returning the
+    /// device INTID to raise if a buffer was completed. Called from the vsock delivery thread.
+    pub fn flush_vsock_pending(&mut self, mem: &Mem) -> Option<u32> {
+        for d in &mut self.devices {
+            if let Backend::Vsock(v) = &mut d.backend {
+                if v.flush_pending(mem, &mut d.queues) {
+                    d.isr |= VIRTIO_ISR_QUEUE;
+                    return Some(d.intid);
+                }
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Push unsolicited host bytes into the console at fleet index `hvc`, returning the device INTID to
+    /// raise if a receive buffer was completed.
+    ///
+    /// The async-push counterpart of [`PciBus::feed_console_input`], which only ever feeds the
+    /// interactive terminal from stdin. This one addresses a specific HAL channel by number, because a
+    /// sensor sample belongs on hvc19 and nowhere else. Fleet index equals the guest's `hvcN` number by
+    /// construction — consoles are pushed first, in order (see `machine::PORT_ROLES`) — and that
+    /// identity was confirmed against a live guest by the port probe.
+    ///
+    /// Bytes must already be framed by the caller: the framing belongs to the port's protocol, and only
+    /// the caller knows which port it is targeting.
+    pub fn push_hal_bytes(&mut self, hvc: usize, bytes: &[u8], mem: &Mem) -> Option<u32> {
+        let d = self.devices.get_mut(hvc)?;
+        let Backend::Console(c) = &mut d.backend else {
+            debug_assert!(false, "fleet index {hvc} is not a console");
+            return None;
+        };
+        if c.push_host_bytes(bytes, mem, &mut d.queues) {
+            d.isr |= VIRTIO_ISR_QUEUE;
+            Some(d.intid)
+        } else {
+            None
+        }
     }
 }
 

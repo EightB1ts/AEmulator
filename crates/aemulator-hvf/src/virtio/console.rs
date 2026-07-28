@@ -26,6 +26,7 @@
 
 use super::{Mem, VIRTIO_F_VERSION_1, VIRTIO_ID_CONSOLE};
 use crate::secure_env::{SecChannel, SecureEnv};
+use aemulator_hal::{HalPort, Reassembler};
 use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -47,6 +48,41 @@ pub enum ConsoleRole {
     Secure {
         channel: SecChannel,
         env: Arc<Mutex<SecureEnv>>,
+    },
+    /// **Diagnostic** drain for a port whose real backend has not landed yet: behaves as
+    /// [`ConsoleRole::Sink`], but hex-dumps the first bytes the guest ever writes, tagged with the
+    /// port number and role.
+    ///
+    /// This is how the wire framing of each HAL channel gets *observed* rather than assumed — the
+    /// question that blocks writing any protocol handler. Read the dump: leading printable ASCII
+    /// (`list-sensors`, `$GPGGA`) means a text/newline protocol; a small integer followed by a
+    /// plausible little-endian length means Cuttlefish's `RawMessage` envelope; an NCI/H4 packet
+    /// header means a self-delimiting binary protocol.
+    ///
+    /// It doubles as the check on the load-bearing assumption that the guest's `hvcN` numbering
+    /// follows PCI slot order: NFC's first write must appear tagged `hvc12`, Bluetooth's on `hvc5`.
+    /// Every real HAL opens its port and writes immediately, so no synthetic probe traffic is needed
+    /// — and injecting any would be actively harmful on the NCI/H4 channels.
+    ///
+    /// Empirically this is exactly how the framings in use were established:
+    /// ```text
+    /// hvc18 sensors: 00 00 00 00 0c 00 00 00 6c 69 73 74 2d 73 65 6e 73 6f 72 73
+    ///               |command=0    |len=12      |"list-sensors"      -> Framing::RawMessage
+    /// hvc5  bt:      01 03 0c 00  -> H4 command, opcode 0x0c03 = HCI_Reset  -> Framing::Bare
+    /// hvc12 nfc:     20 00 01 01  -> NCI CORE_RESET_CMD, plen 1             -> Framing::Bare
+    /// hvc9  uwb:     20 00 00 01 00 -> UCI CORE_DEVICE_RESET                -> Framing::Bare
+    /// ```
+    Probe { hvc: usize, label: &'static str },
+    /// A real host-side protocol backend: guest bytes are de-framed per the port's
+    /// [`aemulator_hal::Framing`], each complete message is handed to the [`HalPort`], and its replies
+    /// are framed and pushed back through RX in the same notify cycle.
+    ///
+    /// One variant covers every protocol (NFC, Bluetooth, sensors, …) because the queue mechanics are
+    /// identical and only the state machine differs — the same reason `Gpu` holds a
+    /// `Box<dyn Renderer3d>` rather than growing a variant per renderer.
+    Hal {
+        port: Box<dyn HalPort>,
+        reasm: Reassembler,
     },
 }
 
@@ -96,6 +132,19 @@ impl Console {
     /// A silent drain (channels we don't surface but must exist so the guest HAL can open them).
     pub fn sink() -> Self {
         Self::with_role(ConsoleRole::Sink)
+    }
+
+    /// A drain that hex-dumps the first bytes the guest writes, so the channel's wire framing can be
+    /// read off the boot log. See [`ConsoleRole::Probe`].
+    pub fn probe(hvc: usize, label: &'static str) -> Self {
+        Self::with_role(ConsoleRole::Probe { hvc, label })
+    }
+
+    /// A channel served by a real host-side protocol backend. The framing comes from the port itself,
+    /// so a port is never wired to the wrong envelope.
+    pub fn hal(port: Box<dyn HalPort>) -> Self {
+        let reasm = Reassembler::new(port.framing());
+        Self::with_role(ConsoleRole::Hal { port, reasm })
     }
 
     pub fn device_type(&self) -> u32 {
@@ -151,7 +200,7 @@ impl Console {
                     _ => false,
                 }
             }
-            ConsoleRole::Log { .. } | ConsoleRole::Sink => {
+            ConsoleRole::Log { .. } | ConsoleRole::Sink | ConsoleRole::Probe { .. } => {
                 // Drain the transmitq (to stdout or the void). Receiveq notifies just reclaim nothing.
                 if idx == TRANSMITQ {
                     if let Some(q) = queues.get_mut(TRANSMITQ as usize) {
@@ -161,7 +210,114 @@ impl Console {
                 false
             }
             ConsoleRole::Secure { .. } => self.on_notify_secure(idx, mem, queues),
+            ConsoleRole::Hal { .. } => self.on_notify_hal(idx, mem, queues),
         }
+    }
+
+    /// HAL-channel notify: drain the TX ring, de-frame it, run each complete message through the
+    /// [`HalPort`], frame the replies, and fill the guest's already-posted RX buffers — all within one
+    /// notify, exactly as the secure channel does. A HAL that expects a synchronous answer (NCI, HCI)
+    /// would otherwise time out waiting for a second interrupt.
+    fn on_notify_hal(&mut self, idx: u16, mem: &Mem, queues: &mut [Queue]) -> bool {
+        let mut produced = false;
+        if idx == TRANSMITQ {
+            if let Some(txq) = queues.get_mut(TRANSMITQ as usize) {
+                let (bytes, used) = Self::drain_tx_bytes(mem, txq);
+                produced |= used;
+                if let ConsoleRole::Hal { port, reasm } = &mut self.role {
+                    if !bytes.is_empty() {
+                        let tag = port.label();
+                        Self::dump_first_bytes(&mut self.dumped_raw, tag, &bytes);
+                    }
+                    for msg in reasm.feed(&bytes) {
+                        for reply in port.on_message(&msg) {
+                            self.input.extend(reasm.frame_out(&reply));
+                        }
+                    }
+                    if reasm.desynced() {
+                        eprintln!(
+                            "[hal] {}: framing desync — stream dropped and resynced",
+                            port.label()
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(rxq) = queues.get_mut(RECEIVEQ as usize) {
+            produced |= self.fill_rx(mem, rxq);
+        }
+        produced
+    }
+
+    /// Drain every read-only TX descriptor into one byte buffer, returning it plus whether any chain
+    /// was completed. Factored out so the HAL path shares the exact descriptor walk the secure and
+    /// log paths use.
+    fn drain_tx_bytes(mem: &Mem, queue: &mut Queue) -> (Vec<u8>, bool) {
+        let mut collected = Vec::new();
+        let mut used = false;
+        while let Some(chain) = queue.pop_descriptor_chain(mem) {
+            let head = chain.head_index();
+            for desc in chain {
+                if !desc.is_write_only() {
+                    let mut buf = vec![0u8; desc.len() as usize];
+                    if mem
+                        .read_slice(&mut buf, GuestAddress(desc.addr().0))
+                        .is_ok()
+                    {
+                        collected.extend_from_slice(&buf);
+                    }
+                }
+            }
+            let _ = queue.add_used(mem, head, 0);
+            used = true;
+        }
+        (collected, used)
+    }
+
+    /// Push unsolicited host bytes into the guest's receiveq, bypassing any request/reply cycle.
+    ///
+    /// This is the path for data the guest never asked for — a sensor sample, an NMEA fix, an HCI
+    /// event — driven from a VMM pump thread rather than a vCPU trap. Bytes must already be framed by
+    /// the caller (pump threads own the port's [`Reassembler`] choice), because the framing a push
+    /// needs is the same one its port's [`HalPort`] declared.
+    pub fn push_host_bytes(&mut self, bytes: &[u8], mem: &Mem, queues: &mut [Queue]) -> bool {
+        self.input.extend(bytes.iter().copied());
+        queues
+            .get_mut(RECEIVEQ as usize)
+            .map(|q| self.fill_rx(mem, q))
+            .unwrap_or(false)
+    }
+
+    /// Hex-dump the first bytes ever seen on a channel, once, alongside a printable-ASCII rendering.
+    ///
+    /// The ASCII column is the point: it is what distinguishes a text protocol from Cuttlefish's
+    /// binary `RawMessage` envelope at a glance, and therefore what settles which `Framing` a port's
+    /// handler must use. `tag` identifies the port and role so the dump also proves the hvcN↔PCI-slot
+    /// mapping.
+    fn dump_first_bytes(dumped: &mut bool, tag: &str, bytes: &[u8]) {
+        if *dumped || bytes.is_empty() {
+            return;
+        }
+        *dumped = true;
+        let n = bytes.len().min(64);
+        let hex: String = bytes[..n]
+            .iter()
+            .map(|b| format!("{b:02x} "))
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        let ascii: String = bytes[..n]
+            .iter()
+            .map(|&b| {
+                if (0x20..0x7f).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
+        eprintln!("[probe] {tag} first {n}B of {}: {hex}", bytes.len());
+        eprintln!("[probe] {tag} ascii: |{ascii}|");
     }
 
     /// Secure-channel notify: on a transmitq notify, drain the request bytes, reassemble complete
@@ -213,18 +369,19 @@ impl Console {
             ConsoleRole::Secure { channel, env } => (*channel, env.clone()),
             _ => return,
         };
-        if !self.dumped_raw && !self.rx_frame.is_empty() {
-            self.dumped_raw = true;
-            let n = self.rx_frame.len().min(64);
-            let hex: String = self.rx_frame[..n]
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
-            eprintln!(
-                "[secure_env] {} RAW first {n}B (total {}): {hex}",
-                channel.label(),
-                self.rx_frame.len()
-            );
+        // Dump the first request bytes once. This is the same probe the not-yet-implemented ports get
+        // (see [`ConsoleRole::Probe`]) and it matters here too: `aemulator-hal`'s framing analysis of
+        // `libcuttlefish_transport.so` says the envelope is an 8-byte little-endian
+        // `[u32 command|is_response][u32 payload_size]` header, whereas the loop below parses a 4-byte
+        // BIG-endian length with no command word. Only oemlock (hvc10) has a live guest peer in this
+        // image — `prep-apex-dedup.sh` selects the software `nonsecure` keymint/gatekeeper APEXes,
+        // which never open hvc3/hvc4/hvc11 — so this dump is what tells us whether the mismatch is
+        // real or whether the path is simply dead.
+        {
+            let tag = format!("secure {}", channel.label());
+            let frame = std::mem::take(&mut self.rx_frame);
+            Self::dump_first_bytes(&mut self.dumped_raw, &tag, &frame);
+            self.rx_frame = frame;
         }
         loop {
             if self.rx_frame.len() < 4 {
@@ -301,6 +458,10 @@ impl Console {
             }
             let _ = queue.add_used(mem, head, 0);
             used = true;
+        }
+        if let ConsoleRole::Probe { hvc, label } = &self.role {
+            let tag = format!("hvc{hvc} {label}");
+            Self::dump_first_bytes(&mut self.dumped_raw, &tag, &collected);
         }
         if let ConsoleRole::Log { prefix } = &self.role {
             if !collected.is_empty() {

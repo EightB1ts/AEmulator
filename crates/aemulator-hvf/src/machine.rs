@@ -58,6 +58,206 @@ pub const DEFAULT_DISPLAY_CMDLINE: &str = "earlycon=pl011,0x9000000 console=ttyA
 /// shell prompt.
 pub const DEFAULT_MAX_ITERS: u64 = 100_000_000;
 
+/// What one virtio-console channel is for.
+///
+/// The assignment is dictated by the **guest image**, not by us: Cuttlefish's `ueventd.rc` fixes the
+/// owner/mode of each `/dev/hvcN`, and each HAL's init `service` line names its port outright
+/// (`nfc_hal_service … --virtio-dev-path /dev/hvc12`, `bt_hci … --serial ${vendor.ser.bt-uart}` with
+/// `vendor.ser.bt-uart=/dev/hvc5`). [`PORT_ROLES`] transcribes that map; changing it changes which
+/// guest HAL we answer, so it is data, not policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortRole {
+    /// hvc0 — interactive console: TX→host stdout, RX←host stdin.
+    Terminal,
+    /// A channel the guest declares but nothing in this image opens. Drained.
+    Unused,
+    /// hvc2 — `logd` serial logging, copied to host stdout with a prefix.
+    Logcat,
+    /// hvc3 — legacy C++ keymaster. Bridged to the host `secure_env`.
+    Keymaster,
+    /// hvc4 — gatekeeper. Bridged to the host `secure_env`.
+    Gatekeeper,
+    /// hvc5 — Bluetooth HCI H4 (`vendor.ser.bt-uart`).
+    Bluetooth,
+    /// hvc6 — GNSS, symlinked to `/dev/gnss0`.
+    Gnss0,
+    /// hvc7 — GNSS, symlinked to `/dev/gnss1`.
+    Gnss1,
+    /// hvc8 — confirmationui. Ships `disabled`, gated on `ro.boot.enable_confirmationui`.
+    ConfirmationUi,
+    /// hvc9 — UWB UCI (`ro.vendor.uwb.dev`).
+    Uwb,
+    /// hvc10 — oemlock. Bridged to the host `secure_env`; the only live secure consumer in this image.
+    Oemlock,
+    /// hvc11 — Rust KeyMint. Bridged to the host `secure_env`.
+    Keymint,
+    /// hvc12 — NFC NCI (`--virtio-dev-path`).
+    Nfc,
+    /// hvc13 — explicitly a sink in the guest's own `ueventd.rc` (`# /dev/hvc13 sink`).
+    Sink,
+    /// hvc14 — MCU control. No host backend in this image.
+    Mcu0,
+    /// hvc15 — MCU UART. No host backend in this image.
+    Mcu1,
+    /// hvc16 — Ti50 emulator. No host binary ships for it, so nothing opens this.
+    Ti50,
+    /// hvc17 — jcardsimulator (lives inside `secure_env` on real Cuttlefish, needs a JVM). Unused here.
+    Jcardsim,
+    /// hvc18 — sensors **control**: `list-sensors` / `set:` / `set-delay:` / `time:`.
+    SensorsControl,
+    /// hvc19 — sensors **data**: the host pushes samples; the guest never writes.
+    SensorsData,
+}
+
+/// The HVC channel map, transcribed from the guest image's `ueventd.rc`. **Index == hvc number**, an
+/// identity the fleet-build loop maintains by pushing consoles first, in order (see the
+/// `hvc_index_matches_named_constants` test and the boot-time map print).
+///
+/// A wrong length is a compile error; the construction loop matches this enum exhaustively, so a new
+/// variant is also a compile error rather than a silent `Console::sink()`.
+pub const PORT_ROLES: [PortRole; 20] = [
+    PortRole::Terminal,       // hvc0
+    PortRole::Unused,         // hvc1
+    PortRole::Logcat,         // hvc2
+    PortRole::Keymaster,      // hvc3
+    PortRole::Gatekeeper,     // hvc4
+    PortRole::Bluetooth,      // hvc5
+    PortRole::Gnss0,          // hvc6
+    PortRole::Gnss1,          // hvc7
+    PortRole::ConfirmationUi, // hvc8
+    PortRole::Uwb,            // hvc9
+    PortRole::Oemlock,        // hvc10
+    PortRole::Keymint,        // hvc11
+    PortRole::Nfc,            // hvc12
+    PortRole::Sink,           // hvc13
+    PortRole::Mcu0,           // hvc14
+    PortRole::Mcu1,           // hvc15
+    PortRole::Ti50,           // hvc16
+    PortRole::Jcardsim,       // hvc17
+    PortRole::SensorsControl, // hvc18
+    PortRole::SensorsData,    // hvc19
+];
+
+/// Named indices for the ports a host backend or pump thread addresses directly. Pinned to
+/// [`PORT_ROLES`] by a unit test so an accidental reorder fails `cargo test`, not a boot.
+pub const HVC_BLUETOOTH: usize = 5;
+pub const HVC_GNSS0: usize = 6;
+pub const HVC_GNSS1: usize = 7;
+pub const HVC_NFC: usize = 12;
+pub const HVC_SENSORS_CONTROL: usize = 18;
+pub const HVC_SENSORS_DATA: usize = 19;
+
+/// The process-wide sensor state, shared by the hvc18 control port (driven by whichever vCPU thread
+/// takes the MMIO trap) and the hvc19 data pump (a VMM timer thread).
+///
+/// A `OnceLock` singleton, mirroring [`crate::secure_env::shared`], so the control plane's `sensor`
+/// verbs can reach the same state without threading a handle through `Config`/`DisplayBridge`.
+///
+/// **Lock order** (no cycles; see `net/slirp.rs` for the same convention):
+/// `ctx.pci` ⊃ `SensorsState`. The vCPU path takes `ctx.pci` and then, inside the console's notify,
+/// `SensorsState`. The pump thread does the reverse *sequentially, never nested*: it locks
+/// `SensorsState`, formats its samples, drops it, and only then takes `ctx.pci`. `ctx.pci` and
+/// `ctx.gic` are likewise never held together — the vCPU trap path releases one before taking the
+/// other — so there is no pair of locks acquired in opposite orders anywhere.
+pub fn sensors_shared() -> Arc<std::sync::Mutex<aemulator_hal::SensorsState>> {
+    use std::sync::OnceLock;
+    static STATE: OnceLock<Arc<std::sync::Mutex<aemulator_hal::SensorsState>>> = OnceLock::new();
+    STATE
+        .get_or_init(|| Arc::new(std::sync::Mutex::new(aemulator_hal::SensorsState::new())))
+        .clone()
+}
+
+/// vsock port the host modem simulator listens on, and the value emitted as
+/// `androidboot.modem_simulator_ports` so the guest RIL dials the right place. We own both ends, so the
+/// number need not match real Cuttlefish's own allocation — it only has to agree with itself.
+pub const VSOCK_PORT_MODEM: u32 = 9600;
+/// vsock port for the lights HAL (`ro.boot.vsock_lights_port`).
+pub const VSOCK_PORT_LIGHTS: u32 = 9601;
+
+/// The process-wide vsock service registry, with the host services registered.
+///
+/// A `OnceLock` singleton like [`sensors_shared`], so the bootconfig emitter and the device can agree on
+/// the port map without threading a handle through `Config`.
+pub fn vsock_registry() -> Arc<aemulator_hal::VsockRegistry> {
+    use std::sync::OnceLock;
+    static REG: OnceLock<Arc<aemulator_hal::VsockRegistry>> = OnceLock::new();
+    REG.get_or_init(|| {
+        let reg = aemulator_hal::VsockRegistry::new();
+        // One shared modem across every channel the RIL opens: it may use several, and they must all
+        // see the same registration and PDP state.
+        let modem = Arc::new(std::sync::Mutex::new(aemulator_hal::ModemState::new()));
+        reg.register(
+            VSOCK_PORT_MODEM,
+            Box::new(move || Box::new(aemulator_hal::ModemChannel::new(modem.clone()))),
+        );
+        reg.register(VSOCK_PORT_LIGHTS, Box::new(|| Box::new(LightsService)));
+        reg
+    })
+    .clone()
+}
+
+/// The process-wide GNSS source, shared by the hvc6/hvc7 pump and the control plane's `gps` verb.
+///
+/// Same `OnceLock` pattern as [`sensors_shared`]; see that function for the lock-order discipline.
+pub fn gnss_shared() -> Arc<std::sync::Mutex<aemulator_hal::NmeaSource>> {
+    use std::sync::OnceLock;
+    static SRC: OnceLock<Arc<std::sync::Mutex<aemulator_hal::NmeaSource>>> = OnceLock::new();
+    SRC.get_or_init(|| Arc::new(std::sync::Mutex::new(aemulator_hal::NmeaSource::new())))
+        .clone()
+}
+
+/// The lights HAL's host end.
+///
+/// Stage 1 only: accept the connection and log what arrives. The Cuttlefish host package ships no
+/// lights daemon, so unlike every other protocol here its wire format could not be recovered from an
+/// artifact — implementing a guess would be worse than admitting the gap. Accepting the connection is
+/// still the whole point: it stops `vendor.light-cuttlefish` aborting on connect, which is why the APEX
+/// had to be disabled. The dump names the bytes so the format can be settled from a real session.
+struct LightsService;
+
+impl aemulator_hal::VsockService for LightsService {
+    fn on_connect(&mut self, _conn: aemulator_hal::ConnHandle) {
+        println!("[hal:lights] guest connected on vsock port {VSOCK_PORT_LIGHTS}");
+    }
+
+    fn on_data(&mut self, data: &[u8]) {
+        let n = data.len().min(32);
+        let hex: String = data[..n].iter().map(|b| format!("{b:02x} ")).collect();
+        eprintln!(
+            "[hal:lights] {} byte(s), first {n}: {}",
+            data.len(),
+            hex.trim_end()
+        );
+    }
+}
+
+/// Human-readable name for a port role — used for the boot-time channel map and to tag the
+/// first-bytes probe dump, so a hexdump line names both the protocol and the port it arrived on.
+pub fn role_label(role: PortRole) -> &'static str {
+    match role {
+        PortRole::Terminal => "terminal",
+        PortRole::Unused => "unused",
+        PortRole::Logcat => "logcat",
+        PortRole::Keymaster => "keymaster (secure_env)",
+        PortRole::Gatekeeper => "gatekeeper (secure_env)",
+        PortRole::Bluetooth => "bluetooth HCI H4",
+        PortRole::Gnss0 => "gnss0",
+        PortRole::Gnss1 => "gnss1",
+        PortRole::ConfirmationUi => "confirmationui",
+        PortRole::Uwb => "uwb UCI",
+        PortRole::Oemlock => "oemlock (secure_env)",
+        PortRole::Keymint => "keymint (secure_env)",
+        PortRole::Nfc => "nfc NCI",
+        PortRole::Sink => "sink",
+        PortRole::Mcu0 => "mcu control",
+        PortRole::Mcu1 => "mcu uart",
+        PortRole::Ti50 => "ti50",
+        PortRole::Jcardsim => "jcardsim",
+        PortRole::SensorsControl => "sensors control",
+        PortRole::SensorsData => "sensors data",
+    }
+}
+
 /// One host input frame headed for the guest's virtio-input device: a coherent set of
 /// `(type, code, value)` events (the transport appends the trailing `EV_SYN`/`SYN_REPORT`).
 pub type InputFrame = Vec<(u16, u16, i32)>;
@@ -122,6 +322,46 @@ pub struct Config<'a> {
     /// path → the FDT keeps its Phase-1/2/3 placeholder root, so those regression boots stay
     /// byte-identical.
     pub dt_identity: Option<(Vec<String>, String)>,
+}
+
+/// Set by [`request_halt`]; polled by every vCPU run loop (see `Vcpu::run`).
+static HALT: AtomicBool = AtomicBool::new(false);
+
+/// Ask every vCPU to stop, so the VMM thread returns from `run_linux*` and runs the **ordered
+/// shutdown** at the end of `run_linux_inner` — the secondary-vCPU join, then
+/// [`crate::display::metal::teardown_gfxstream`], then `ram.unmap_from_vm()`.
+///
+/// # Why this exists at all
+///
+/// It is what makes `stream_renderer_teardown()` reachable on the two exit paths that a human
+/// actually uses. Both `run-control64.sh` (`quit` over the control socket) and the windowed run
+/// (close the window) used to end like this: the host-facing loop returned on the **main** thread,
+/// the VMM worker thread was left running the guest, `main` returned, and libc `exit()` ran
+/// `libgfxstream_backend.dylib`'s C++ static destructors instead of a teardown. That is not a late
+/// teardown; it is an invalid one — the Vulkan loader and the ICD are finalized and unloaded before
+/// gfxstream's own destructors run, so `~FrameBuffer()` reaches `teardownGlobalVkEmulation()` and
+/// calls Vulkan entry points that no longer exist. It aborted 100% of the time (`libc++abi:
+/// terminating … mutex lock failed: Invalid argument`, exit 134), at the very end of an otherwise
+/// successful Android boot. The renderer's own defences against that are in
+/// `host/vulkan/MetalLayerPresenterVk.cpp` and `host/gl/gl-host-common/opengles.cpp`; this is the
+/// half that makes the ordered teardown actually happen rather than merely be survivable to skip.
+///
+/// # Contract
+///
+/// Process-global and one-way — a VM is never restarted in-process, and both callers are on the
+/// "we are exiting now" path, so there is nothing for a reset to be correct *for*. Observed within
+/// one run-loop iteration: the loop's longest blocking step is `handle_wfx`, which sleeps at most
+/// 5 ms, so a halt lands in single-digit milliseconds without needing an `hv_vcpus_exit` kick.
+///
+/// Safe to call from any thread and any number of times. Pair it with a join of the VMM thread —
+/// the flag only starts the shutdown; the join is what waits for it.
+pub fn request_halt() {
+    HALT.store(true, Ordering::Release);
+}
+
+/// Whether [`request_halt`] has been called. Polled once per vCPU run-loop iteration.
+pub fn halt_requested() -> bool {
+    HALT.load(Ordering::Acquire)
 }
 
 /// Boot a Linux kernel and stream its earlycon output to stdout (headless). Returns the stop reason.
@@ -227,25 +467,61 @@ fn boot_and_run(
     if let Some(specs) = cfg.composite_partitions {
         // ---- Android: the whole fleet over virtio-PCI ----
         let mut devs: Vec<PciDevice> = Vec::new();
-        // The 12 HVC console channels (hvc0..hvc11), placed FIRST so the guest's virtio_console
-        // driver numbers them hvc0..hvc11 in PCI probe (slot) order. The HAL channels bridge to the
-        // host secure_env; hvc11 is the KeyMint HAL the whole keystore2/apexd chain waits on.
+        // The HVC console channels ([`PORT_ROLES`], hvc0..hvc19), placed FIRST so the guest's
+        // virtio_console driver numbers them hvc0..hvcN in PCI probe (slot) order — fleet index ==
+        // hvc number. The guest image demands all 20: the NFC HAL opens /dev/hvc12 outright and the
+        // sensors sub-HAL opens /dev/hvc18 + /dev/hvc19, so a 12-port fleet gives them ENOENT and
+        // they crash-loop.
         let env = secure_env::shared();
-        for hvc in 0..12usize {
-            let console = match hvc {
-                0 => Console::new(),            // hvc0: interactive console
-                2 => Console::log("[logcat] "), // hvc2: logd → host stdout
-                3 => Console::secure(SecChannel::Keymaster, env.clone()), // hvc3: keymaster
-                4 => Console::secure(SecChannel::Gatekeeper, env.clone()), // hvc4: gatekeeper
-                10 => Console::secure(SecChannel::Oemlock, env.clone()), // hvc10: oemlock
-                11 => Console::secure(SecChannel::Keymint, env.clone()), // hvc11: KeyMint (blocker)
-                _ => Console::sink(),           // hvc1/5/6/7/8/9: drain
+        for (hvc, role) in PORT_ROLES.iter().enumerate() {
+            // Exhaustive on purpose (no `_` arm): a new PortRole must be given a backend here, or
+            // the build fails rather than silently defaulting to a sink.
+            let console = match role {
+                PortRole::Terminal => Console::new(),
+                PortRole::Logcat => Console::log("[logcat] "),
+                PortRole::Keymaster => Console::secure(SecChannel::Keymaster, env.clone()),
+                PortRole::Gatekeeper => Console::secure(SecChannel::Gatekeeper, env.clone()),
+                PortRole::Oemlock => Console::secure(SecChannel::Oemlock, env.clone()),
+                PortRole::Keymint => Console::secure(SecChannel::Keymint, env.clone()),
+                // NFC: a real NCI controller with no tag in its field. Confirmed by the boot probe to
+                // speak raw NCI — the guest's first write on hvc12 is `20 00 01 01`, a CORE_RESET_CMD.
+                PortRole::Nfc => Console::hal(Box::new(aemulator_hal::NciPort::new())),
+                // Sensors control: answers `list-sensors` with the available bitmask and tracks
+                // `set:`/`set-delay:`. Its replies must reach the guest in the same notify cycle, which
+                // is what ConsoleRole::Hal provides.
+                PortRole::SensorsControl => Console::hal(Box::new(
+                    aemulator_hal::SensorsControlPort::new(sensors_shared()),
+                )),
+                // Sensors data is write-only from our side — the guest never sends on it — so it needs
+                // no HalPort. `spawn_sensors_pump_thread` pushes samples into it.
+                PortRole::SensorsData => Console::sink(),
+                // Bluetooth: an HCI controller with no peers in range. Confirmed by the boot probe to
+                // speak bare H4 — the guest's first write on hvc5 is `01 03 0c 00`, HCI_Reset.
+                PortRole::Bluetooth => Console::hal(Box::new(aemulator_hal::BtPort::new())),
+                // GNSS is write-only from our side — the boot probe recorded no guest writes on either
+                // port — so it needs no HalPort; `spawn_gnss_pump_thread` feeds it NMEA.
+                PortRole::Gnss0 | PortRole::Gnss1 => Console::sink(),
+                // Remaining backends land per-protocol later; until then these are probe sinks, which is
+                // already better than absent — the HAL opens its port successfully instead of aborting
+                // on ENOENT, and the dump records its framing for when we do implement it.
+                PortRole::ConfirmationUi | PortRole::Uwb => Console::probe(hvc, role_label(*role)),
+                PortRole::Unused
+                | PortRole::Sink
+                | PortRole::Mcu0
+                | PortRole::Mcu1
+                | PortRole::Ti50
+                | PortRole::Jcardsim => Console::sink(),
             };
             devs.push(pci_dev(Backend::Console(console), devs.len()));
         }
         println!(
-            "[ok] virtio-pci consoles: 12 HVC channels (hvc0..hvc11); secure_env on hvc3/4/10/11"
+            "[ok] virtio-pci consoles: {} HVC channels (hvc0..hvc{})",
+            PORT_ROLES.len(),
+            PORT_ROLES.len() - 1
         );
+        for (hvc, role) in PORT_ROLES.iter().enumerate() {
+            println!("        hvc{hvc}: {}", role_label(*role));
+        }
         // rng
         devs.push(pci_dev(Backend::Rng(Rng::new()), devs.len()));
         // composite GPT block (slot 3) — /dev/vda carrying the by-name partitions
@@ -287,6 +563,21 @@ fn boot_and_run(
         // net (slot 6)
         if cfg.netdev {
             devs.push(pci_dev(Backend::Net(build_net()), devs.len()));
+        }
+        // vsock — the transport the RIL and lights HALs dial. Without it the RIL cannot even create its
+        // socket, and its crash loop makes init reset every server-configurable flag on the device.
+        {
+            let reg = vsock_registry();
+            let ports = reg.ports();
+            devs.push(pci_dev(
+                Backend::Vsock(crate::virtio::vsock::Vsock::new(reg)),
+                devs.len(),
+            ));
+            println!(
+                "[ok] virtio-pci vsock: guest CID {}, host services on port(s) {:?}",
+                aemulator_hal::vsock::GUEST_CID,
+                ports
+            );
         }
         for (i, d) in devs.iter().enumerate() {
             println!(
@@ -489,6 +780,9 @@ fn boot_and_run_common(
     // libslirp NAT: drive the slirp poll loop on a dedicated thread and flush inbound frames into
     // the guest receiveq (raising the net device's SPI). No-op if there is no NAT-backed NIC.
     spawn_slirp_poll_thread(&ctx);
+    spawn_sensors_pump_thread(&ctx);
+    spawn_vsock_pump_thread(&ctx);
+    spawn_gnss_pump_thread(&ctx);
 
     // In **control mode** (Phase 6) stdin is the command REPL, so the guest console must NOT be fed
     // from stdin (env-gated to keep the display/headless paths byte-identical). Instead the guest
@@ -792,6 +1086,166 @@ fn spawn_gpu_fence_thread(ctx: &Arc<VmContext>) {
 /// `slirp_pollfds_fill/poll` forever; after each tick it flushes any host->guest frames into the
 /// guest receiveq and raises the net device's SPI so the guest reclaims/receives them. No-op if
 /// there is no NAT-backed NIC.
+/// Push sensor samples into the guest on hvc19 at the rate the guest asked for.
+///
+/// Sensors are the one HAL here whose traffic is mostly *unsolicited*: after `set:<name>:1` the guest
+/// simply expects a stream. So unlike NFC or Bluetooth this cannot ride the vCPU notify path and needs
+/// a timer thread.
+///
+/// Shape follows [`spawn_slirp_poll_thread`]: compute with no VM lock held, take `ctx.pci` briefly to
+/// deliver, drop it, then take `ctx.gic` separately to raise the SPI. `ctx.pci` and `ctx.gic` are never
+/// held simultaneously by anyone, so no lock-order cycle exists (see [`sensors_shared`]).
+///
+/// Self-gating: returns immediately on the Linux/MMIO path, where the fleet has no hvc19.
+fn spawn_sensors_pump_thread(ctx: &Arc<VmContext>) {
+    if ctx.pci.lock().unwrap().devices.len() <= HVC_SENSORS_DATA {
+        return;
+    }
+    let state = sensors_shared();
+    let ctx = Arc::clone(ctx);
+    std::thread::Builder::new()
+        .name("sensors-pump".into())
+        .spawn(move || {
+            // The guest's own sample framing. Held in one place so a framing correction is one edit.
+            let reasm =
+                aemulator_hal::Reassembler::new(aemulator_hal::sensors::SENSORS_DATA_FRAMING);
+            let mut last = Instant::now();
+            let mut logged = false;
+            loop {
+                let now = Instant::now();
+                let dt = now.duration_since(last).as_secs_f64();
+                last = now;
+                // Lock the sensor state ALONE: advance the model and format samples, then drop it
+                // before touching any VM lock.
+                let (delay_ms, lines) = {
+                    let mut st = match state.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                    st.advance(dt);
+                    (st.delay_ms(), st.enabled_samples())
+                };
+                if !lines.is_empty() {
+                    if !logged {
+                        logged = true;
+                        println!(
+                            "[hal:sensors] guest enabled {} sensor(s); streaming on hvc{} every {} ms",
+                            lines.len(),
+                            HVC_SENSORS_DATA,
+                            delay_ms
+                        );
+                    }
+                    let mut bytes = Vec::new();
+                    for l in &lines {
+                        bytes.extend(reasm.frame_out(l.as_bytes()));
+                    }
+                    let intid = ctx
+                        .pci
+                        .lock()
+                        .unwrap()
+                        .push_hal_bytes(HVC_SENSORS_DATA, &bytes, &ctx.mem);
+                    if let Some(id) = intid {
+                        let target = ctx.gic.lock().unwrap().set_spi(id);
+                        ctx.kick(target);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(delay_ms as u64));
+            }
+        })
+        .ok();
+}
+
+/// Feed NMEA sentences to the guest's GNSS HAL at 1 Hz, the rate a real receiver reports at.
+///
+/// Written to **both** hvc6 and hvc7: the two ports correspond to `gnss_grpc_proxy`'s separate
+/// `gnss_*` and `fixed_location_*` fd pairs, but nothing in the host package ties either pair to a
+/// specific console index, so rather than guess we feed both. The cost is one extra write per second.
+///
+/// Self-gating on the Linux/MMIO path, which has no hvc7.
+fn spawn_gnss_pump_thread(ctx: &Arc<VmContext>) {
+    if ctx.pci.lock().unwrap().devices.len() <= HVC_GNSS1 {
+        return;
+    }
+    let src = gnss_shared();
+    let ctx = Arc::clone(ctx);
+    std::thread::Builder::new()
+        .name("gnss-pump".into())
+        .spawn(move || {
+            // Seconds-of-day advanced locally: the guest only needs a monotonic, well-formed timestamp,
+            // and deriving it here keeps the pump independent of host wall-clock jumps.
+            let mut tod: u32 = 12 * 3600;
+            let mut logged = false;
+            loop {
+                let burst = {
+                    let s = match src.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                    // The date field is fixed: the guest's GNSS HAL uses the sentence time, and the
+                    // framework takes wall-clock from the system clock, not from NMEA.
+                    s.burst(tod, "010125")
+                };
+                if !logged {
+                    logged = true;
+                    println!(
+                        "[hal:gnss] streaming NMEA on hvc{HVC_GNSS0} + hvc{HVC_GNSS1} at 1 Hz"
+                    );
+                }
+                for port in [HVC_GNSS0, HVC_GNSS1] {
+                    let intid =
+                        ctx.pci
+                            .lock()
+                            .unwrap()
+                            .push_hal_bytes(port, burst.as_bytes(), &ctx.mem);
+                    if let Some(id) = intid {
+                        let target = ctx.gic.lock().unwrap().set_spi(id);
+                        ctx.kick(target);
+                    }
+                }
+                tod = tod.wrapping_add(1);
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        })
+        .ok();
+}
+
+/// Deliver vsock data that host services produced asynchronously.
+///
+/// Unlike the console HALs, a vsock service may speak without being spoken to (an unsolicited AT result
+/// code, a lights update), so its output cannot rely on the vCPU notify path. `ConnHandle::send` rings a
+/// doorbell; this thread wakes and flushes. The 200 ms poll timeout is a safety net, not the mechanism —
+/// it covers a coalesced or lost nudge so data is never stranded.
+///
+/// Lock discipline matches every other pump thread here: `ctx.pci` and `ctx.gic` are taken separately,
+/// never nested, so there is no ordering cycle with the vCPU trap path.
+fn spawn_vsock_pump_thread(ctx: &Arc<VmContext>) {
+    let doorbell = {
+        let mut pci = ctx.pci.lock().unwrap();
+        pci.take_vsock_doorbell()
+    };
+    // No vsock device on this path (the Linux/MMIO fleet has none) — nothing to pump.
+    let Some(doorbell) = doorbell else {
+        return;
+    };
+    let ctx = Arc::clone(ctx);
+    std::thread::Builder::new()
+        .name("vsock-pump".into())
+        .spawn(move || loop {
+            // recv_timeout rather than recv: the timeout is the safety net described above.
+            match doorbell.recv_timeout(Duration::from_millis(200)) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                // The device is gone (VM shut down); nothing left to deliver.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+            let intid = ctx.pci.lock().unwrap().flush_vsock_pending(&ctx.mem);
+            if let Some(id) = intid {
+                let target = ctx.gic.lock().unwrap().set_spi(id);
+                ctx.kick(target);
+            }
+        })
+        .ok();
+}
+
 fn spawn_slirp_poll_thread(ctx: &Arc<VmContext>) {
     let slirp = {
         let pci = ctx.pci.lock().unwrap();
@@ -1119,5 +1573,43 @@ mod tests {
             !body.contains('\''),
             "the body is embedded in a single-quoted wrapper; a quote truncates it: {body}"
         );
+    }
+
+    /// The `HVC_*` constants are used by pump threads and control verbs to address a port directly, so
+    /// they must never drift from [`PORT_ROLES`]. A reorder of the table has to fail here rather than
+    /// silently push sensor samples at, say, the Bluetooth HAL.
+    #[test]
+    fn hvc_index_matches_named_constants() {
+        assert_eq!(PORT_ROLES[HVC_BLUETOOTH], PortRole::Bluetooth);
+        assert_eq!(PORT_ROLES[HVC_GNSS0], PortRole::Gnss0);
+        assert_eq!(PORT_ROLES[HVC_GNSS1], PortRole::Gnss1);
+        assert_eq!(PORT_ROLES[HVC_NFC], PortRole::Nfc);
+        assert_eq!(PORT_ROLES[HVC_SENSORS_CONTROL], PortRole::SensorsControl);
+        assert_eq!(PORT_ROLES[HVC_SENSORS_DATA], PortRole::SensorsData);
+    }
+
+    /// Every port must have a distinct role apart from the deliberately-repeated drains, and the fleet
+    /// must fit the PCI slot space. `PciBus` decodes a 5-bit device number and `pci::device_slot(i)`
+    /// returns `i + 1`, so slot 0 is unused and 31 devices is the hard ceiling; the consoles share that
+    /// budget with rng, the composite block, gpu, input and net.
+    #[test]
+    fn console_fleet_fits_the_pci_slot_space() {
+        const FIXED_DEVICES: usize = 5; // rng, composite block, gpu, input, net
+        assert!(
+            PORT_ROLES.len() + FIXED_DEVICES <= 31,
+            "{} consoles + {FIXED_DEVICES} fixed devices exceeds the 31-slot PCI ceiling",
+            PORT_ROLES.len()
+        );
+        // The guest image's ueventd.rc declares exactly hvc0..hvc19.
+        assert_eq!(PORT_ROLES.len(), 20);
+    }
+
+    /// `role_label` feeds the boot-time channel map and the probe dump tags; an empty label would make
+    /// a hexdump untraceable to a port.
+    #[test]
+    fn every_role_has_a_label() {
+        for role in PORT_ROLES {
+            assert!(!role_label(role).is_empty(), "{role:?} has no label");
+        }
     }
 }

@@ -36,10 +36,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aemulator-hal"
+version = "0.0.1"
+
+[[package]]
 name = "aemulator-hvf"
 version = "0.0.1"
 dependencies = [
  "aemulator-dtb",
+ "aemulator-hal",
  "aemulator-identity",
  "cc",
  "libc",

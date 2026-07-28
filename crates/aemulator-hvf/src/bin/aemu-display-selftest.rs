@@ -28,9 +28,17 @@
 //!     enforces both. N ≥ 2 is what proves the second init sees a genuinely clean host.
 //!     Needs the Vulkan loader + KosmicKrisp ICD staged, exactly like `--gfxstream`.
 //!
+//!   * **--exit-without-teardown** — headless: `stream_renderer_init` and then return, WITHOUT
+//!     calling `stream_renderer_teardown()`. The renderer is deliberately left running so that
+//!     `exit()` drives gfxstream's own C++ static destructors, and the pass condition is simply a
+//!     clean exit. See [`exit_without_teardown`] for why that is the single sharpest check in this
+//!     binary: it is the only mode that reproduces the real `--control` shutdown crash, and it does
+//!     so in about a second with no guest, no window and no VM.
+//!
 //! Usage:
 //!   aemu-display-selftest [--gfxstream] [--gles] [--out <png>] [--width N] [--height N]
 //!   aemu-display-selftest --init-teardown-cycles N [--gles] [--width N] [--height N]
+//!   aemu-display-selftest --exit-without-teardown [--gles] [--width N] [--height N]
 
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -53,6 +61,7 @@ fn main() {
     // --setup-window to empirically reproduce the abort.
     let mut call_setup_window = false;
     let mut cycles: u32 = 0;
+    let mut exit_without_teardown = false;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -61,6 +70,7 @@ fn main() {
             "--gfxstream" => use_gfxstream = true,
             "--gles" => use_gles = true,
             "--setup-window" => call_setup_window = true,
+            "--exit-without-teardown" => exit_without_teardown = true,
             "--init-teardown-cycles" => {
                 i += 1;
                 match args.get(i).and_then(|v| v.parse::<u32>().ok()) {
@@ -92,6 +102,14 @@ fn main() {
             other => eprintln!("[selftest] ignoring unknown arg: {other}"),
         }
         i += 1;
+    }
+
+    if exit_without_teardown {
+        std::process::exit(exit_without_teardown_check(
+            width as i32,
+            height as i32,
+            use_gles,
+        ));
     }
 
     if cycles > 0 {
@@ -219,6 +237,52 @@ fn init_teardown_cycles(cycles: u32, w: i32, h: i32, use_gles: bool) -> i32 {
         metal::teardown_gfxstream();
     }
     println!("[selftest] DONE — {cycles} init/teardown cycle(s), no crash");
+    0
+}
+
+/// Bring the host renderer up and then **exit with it still running** — no
+/// `stream_renderer_teardown()`. Returns 0 if `stream_renderer_init` succeeded; the check that
+/// matters happens *after* this returns, inside `exit()`.
+///
+/// WHY THIS EXISTS, and why it is a different test from `--init-teardown-cycles`.
+///
+/// `init_teardown_cycles` above only ever exercises the ORDERED shutdown, and it therefore cannot
+/// see the failure mode that actually crashed a real `--control` Android boot: nobody called
+/// `stream_renderer_teardown()` at all, and libc's `exit()` ran the gfxstream dylib's C++ static
+/// destructors instead. Those are not an equivalent teardown — they run in reverse
+/// initializer order, which for `libgfxstream_backend.dylib` is:
+///
+///   `__TEXT,__init_offsets` idx  3 = `opengles.cpp`             (`static RendererPtr sRenderer`)
+///   `__TEXT,__init_offsets` idx 14 = `MetalLayerPresenterVk.cpp` (`static std::mutex sPresentersMutex`)
+///
+/// `__cxa_atexit` runs LIFO, so idx 14 is destroyed FIRST. Destroying `sRenderer` (idx 3) then
+/// drives `~RendererImpl` → `~RenderWindow` → `CMD_FINALIZE` → `FrameBuffer::finalize()` →
+/// `~FrameBuffer()` → `vk::teardownGlobalVkEmulation()` → `teardownMetalLayerPresenters()`, which
+/// locks `sPresentersMutex` — a `std::mutex` whose `pthread_mutex_destroy` has already run. Apple's
+/// pthread returns `EINVAL` for that, libc++'s `std::mutex::lock()` turns a non-zero return into
+/// `throw std::system_error(ec, "mutex lock failed")`, nothing catches it, and `libc++abi` aborts
+/// the process. Exit status 134, at the very end of a successful boot.
+///
+/// So: this mode needs no guest, no `VkInstance`, no window and no VM, and it reproduces that abort
+/// in about a second. It stays valuable even now that the VMM always reaches the ordered teardown,
+/// because "the process exited without tearing the renderer down" is reachable from every panic,
+/// error return and signal path there is — this asserts it is survivable rather than assuming no
+/// caller will ever do it.
+fn exit_without_teardown_check(w: i32, h: i32, use_gles: bool) -> i32 {
+    println!("[selftest] exit-without-teardown size={w}x{h} gles={use_gles}");
+    let rc = metal::init_gfxstream(w, h, use_gles);
+    println!("[selftest] stream_renderer_init returned {rc}");
+    if rc != 0 {
+        eprintln!(
+            "[selftest] FAIL: stream_renderer_init returned {rc} — the Vulkan loader / KosmicKrisp \
+             ICD are probably not staged (see run-display-selftest.sh)"
+        );
+        return 1;
+    }
+    // Deliberately NO teardown_gfxstream() here. Returning from here reaches `exit()` with the
+    // renderer still up, which is the whole point: the pass condition is that the process exits 0
+    // rather than aborting inside the dylib's static destructors.
+    println!("[selftest] DONE — exiting with the renderer still up (no stream_renderer_teardown)");
     0
 }
 

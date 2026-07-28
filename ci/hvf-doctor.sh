@@ -247,29 +247,45 @@ LC_ALL=C grep -qa "libslirp" "$BIN" \
     || fail "binary links no NAT backend (STALE build) — rebuild:  pnpm hvf:build"
 ok "libslirp present and linked in"
 
-step "host renderer init/teardown cycle (the shutdown path, end to end)"
-# The ONLY check here that actually RUNS the host renderer, and the guard for three separate
-# findings that all surface at the same instant:
+step "host renderer shutdown paths (ordered teardown, and exit without one)"
+# The ONLY checks here that actually RUN the host renderer. TWO exits are exercised, because the
+# renderer has two of them and they fail in completely different ways:
 #
-#   * stream_renderer_teardown() is called at all. It has one live call site (machine.rs, after the
-#     vCPU join loop) and nothing else proves it is reachable.
-#   * a per-layer stream_renderer_release_metal_layer() exists and is exported, so the cached
-#     VkSurfaceKHR/swapchain is destroyed while its CAMetalLayer and the VkDevice are both alive.
-#   * teardown does not CRASH. Teardown runs ~FrameBuffer(), which runs any surviving
-#     process-cleanup callback registered by on_vkCreateInstance. That callback unboxes a
-#     VkInstance box the destroy path already deleted: gfxstream logs "Failed to unbox" and hands
-#     VK_NULL_HANDLE to vkDestroyInstanceImpl, which without its null guard reaches
-#     node_type::key() on an EMPTY node handle and null-derefs inside libc++.
+#   A. --init-teardown-cycles 2 — the ORDERED exit. stream_renderer_init -> stream_renderer_teardown,
+#      twice, so the second init proves the first teardown left a clean host. Also the only proof
+#      that stream_renderer_teardown() is reachable at all, and that a per-layer
+#      stream_renderer_release_metal_layer() exists and is exported.
 #
-# So the pass condition is BOTH a zero exit AND no "Failed to unbox" on stderr. The log line alone
-# is not fatal today (the guards absorb it), which is exactly why it has to be checked: it means a
-# callback outlived its instance, and every future change to that path gets louder, not quieter.
+#   B. --exit-without-teardown — the UNORDERED exit: init, then return from main with the renderer
+#      still up, so libc exit() runs libgfxstream_backend.dylib's C++ static destructors. Reachable
+#      from every panic, error return and signal path in the VMM, and it used to abort 100% of the
+#      time. `__cxa_finalize_ranges` runs the static `RendererPtr sRenderer` destructor, which drives
+#      ~RendererImpl -> ~RenderWindow -> FrameBuffer::finalize -> ~FrameBuffer ->
+#      teardownGlobalVkEmulation() — after the Vulkan loader and the ICD have already been unloaded.
+#      Two crashes, in order of discovery: teardownMetalLayerPresenters() locked a std::mutex whose
+#      pthread_mutex_destroy() had already run (EINVAL -> uncaught std::system_error "mutex lock
+#      failed" -> libc++abi abort, exit 134), then ~CompositorVk called vkQueueWaitIdle through a
+#      dispatch pointer into the unloaded ICD (EXC_BAD_ACCESS, exit 139). Both are fixed by making
+#      those two statics immortal, so this exit is a leak-and-go instead. THIS is the check that
+#      catches the crash a real `--control` Android boot hit at `quit`.
+#
+# ON "Failed to unbox", AND WHY THIS STEP NO LONGER CLAIMS TO CHECK IT.
+# The previous version of this step asserted that "Failed to unbox" never appears, and pointed at the
+# surviving-process-cleanup-callback bug as the thing it was guarding. That assertion was hollow:
+# `Failed to unbox` comes from a process-cleanup callback registered by on_vkCreateInstance, and
+# neither mode below ever creates a GUEST VkInstance (that needs a guest feeding marshalled Vulkan
+# commands through the ASG ring), so on_vkCreateInstance never runs, no callback is ever registered,
+# and the path cannot produce the line no matter how broken it is. The step passed while a real
+# Android boot printed three of them. It is now checked opportunistically and reported, not asserted,
+# so a pass here is never mistaken for coverage of that path. The only place the callback path is
+# genuinely exercised is a real guest boot; the null guards in
+# vkDestroyInstanceImpl/destroyInstanceObjects are what keep it from being a null-deref there.
 SELFTEST=""
 for _p in release debug; do
     [ -x "$HVF/target/$_p/aemu-display-selftest" ] && { SELFTEST="$HVF/target/$_p/aemu-display-selftest"; break; }
 done
 if [ -z "$SELFTEST" ]; then
-    warn "no aemu-display-selftest binary — SKIPPING the renderer init/teardown check. Build it:
+    warn "no aemu-display-selftest binary — SKIPPING both renderer shutdown checks. Build it:
     cargo build --release --manifest-path crates/aemulator-hvf/Cargo.toml --bin aemu-display-selftest"
 else
     # Same staging run-display-selftest.sh does, and for the same reason: with ANDROID_EMU_VK_ICD
@@ -283,17 +299,19 @@ else
     # 2 cycles, not 1: the second init is the one that proves the first teardown left a clean host.
     if VK_DRIVER_FILES="$TP_KOSMICKRISP_ICD" ANDROID_EMU_VK_ICD=kosmickrisp \
        "$SELFTEST" --init-teardown-cycles 2 >/dev/null 2>"$CYCLE_ERR"; then
+        # Opportunistic, NOT an assertion — see the note above on why this mode cannot produce the
+        # line. Surfaced because if it ever DOES appear here, something registered a process-cleanup
+        # callback with no guest in the picture and that is worth reading.
         if LC_ALL=C grep -qa "Failed to unbox" "$CYCLE_ERR"; then
             LC_ALL=C grep -a "Failed to unbox" "$CYCLE_ERR" >&2
-            rm -f "$CYCLE_ERR"
-            fail "the renderer survived teardown but logged \"Failed to unbox\" (above): a
-    process-cleanup callback registered by on_vkCreateInstance outlived the VkInstance box it
-    captured, so unbox_VkInstance() resolved a deleted handle and the destroy path ran on
-    VK_NULL_HANDLE. Only the null guards in vkDestroyInstanceImpl/destroyInstanceObjects are
-    keeping that from being a null-deref — the registration/unregistration keying is the real bug."
+            warn "the ordered teardown logged \"Failed to unbox\" (above) with no guest VkInstance in
+    play — unexpected, and worth investigating: a process-cleanup callback outlived the VkInstance box
+    it captured, so unbox_VkInstance() resolved a deleted handle and the destroy path ran on
+    VK_NULL_HANDLE. Only the null guards in vkDestroyInstanceImpl/destroyInstanceObjects keep that
+    from being a null-deref."
         fi
         rm -f "$CYCLE_ERR"
-        ok "2 stream_renderer_init/teardown cycles, clean exit, no \"Failed to unbox\""
+        ok "2 stream_renderer_init/teardown cycles, clean exit"
     else
         _rc=$?
         printf '%s\n' "$(tail -40 "$CYCLE_ERR")" >&2
@@ -305,6 +323,35 @@ else
     aemu-display-selftest ; a non-zero stream_renderer_init means the loader / KosmicKrisp ICD are
     not staged (see crates/aemulator-hvf/run-display-selftest.sh); otherwise
     stream_renderer_teardown() itself crashed, which is the finding this step exists for."
+    fi
+
+    # (B) The unordered exit. Asserts the process actually EXITS 0 — this is the check that catches
+    # the abort/segfault inside gfxstream's own static destructors, which is what a real `--control`
+    # Android boot hit on every `quit`. Grep too, so a crash that somehow still exits 0 is caught.
+    EXIT_ERR="$(mktemp)"
+    if VK_DRIVER_FILES="$TP_KOSMICKRISP_ICD" ANDROID_EMU_VK_ICD=kosmickrisp \
+       "$SELFTEST" --exit-without-teardown >/dev/null 2>"$EXIT_ERR"; then
+        if LC_ALL=C grep -qaE "libc\+\+abi|terminating due to uncaught exception" "$EXIT_ERR"; then
+            LC_ALL=C grep -aE "libc\+\+abi|terminating due to uncaught exception" "$EXIT_ERR" >&2
+            rm -f "$EXIT_ERR"
+            fail "aemu-display-selftest --exit-without-teardown exited 0 but reported a C++
+    terminate (above). Something on the static-destructor path is throwing."
+        fi
+        rm -f "$EXIT_ERR"
+        ok "exit with the renderer still up is survivable (no stream_renderer_teardown, clean exit)"
+    else
+        _rc=$?
+        printf '%s\n' "$(tail -40 "$EXIT_ERR")" >&2
+        rm -f "$EXIT_ERR"
+        fail "aemu-display-selftest --exit-without-teardown exited $_rc (stderr above) — a process
+    that reaches exit() with the host renderer still up is crashing in libgfxstream_backend.dylib's
+    C++ static destructors. 134 with \"mutex lock failed: Invalid argument\" means a namespace-scope
+    std::mutex is being locked after its own destructor ran (reverse-initializer-order destruction:
+    check __TEXT,__init_offsets); 139 means a Vulkan dispatch pointer into the already-unloaded ICD
+    was called. Neither is fixable by ordering the destructors — the statics on that path must not be
+    destroyed at all (see host/gl/gl-host-common/opengles.cpp and
+    host/vulkan/MetalLayerPresenterVk.cpp). If instead \"stream_renderer_init returned\" is non-zero,
+    the loader / KosmicKrisp ICD are not staged."
     fi
 fi
 

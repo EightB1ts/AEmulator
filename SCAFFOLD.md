@@ -40,6 +40,9 @@ signatures.
                           
    attestation-relay  (leaf, optional Phase-5, no aemulator deps)
 
+   aemulator-hal      (leaf, dependency-free: guest-HAL protocol state machines. Consumed by the
+                       macOS aemulator-hvf spike today and by crosvm_backend later.)
+
    aemulator-cli ── identity + detection + dtb + vmm
 ```
 
@@ -50,6 +53,7 @@ Edges (X → Y means "X depends on Y"):
 | `aemulator-detection`   | *(none)*                                              | leaf   |
 | `aemulator-control`     | *(none)*                                              | leaf   |
 | `attestation-relay`     | *(none)*                                              | leaf   |
+| `aemulator-hal`         | *(none — no external deps either)*                    | leaf   |
 | `aemulator-identity`    | `aemulator-detection`                                 | lib    |
 | `aemulator-dtb`         | `aemulator-identity` + `vm-fdt`                       | lib    |
 | `aemulator-vmm`         | `aemulator-identity` + `aemulator-dtb`                | lib    |
@@ -261,6 +265,53 @@ pub enum RelayError { NoDeviceAvailable, RelayFailed { device_id, detail: String
 
 Module doc states the honest constraints (correlation / rate / `deviceRecall` / latency / legal).
 Not a v1 promise — ship behind explicit per-app enablement.
+
+### `aemulator-hal` — guest-HAL protocol state machines (leaf, zero dependencies)
+
+Host-side implementations of the protocols the Cuttlefish guest's HALs speak, so those HALs can run
+instead of being binary-patched out of the image. Pure `bytes in → bytes out`: no VMM types, no guest
+memory, no threads, no platform APIs — `#![forbid(unsafe_code)]` and not even `serde`. That is what
+lets `aemulator-hvf` (macOS/HVF) and, later, `aemulator-vmm::crosvm_backend` (Linux/KVM) share one
+implementation, and lets every protocol be tested without a VM.
+
+```rust
+// framing — the wire envelope a HAL channel uses, observed rather than assumed
+pub enum Framing { Bare, Newline, RawMessage }   // RawMessage = Cuttlefish's 8-byte LE transport header
+pub struct Reassembler { … }                      // new(Framing), feed(&[u8]) -> Vec<Vec<u8>>, frame_out(&[u8])
+
+// port — the seam the VMM's virtio-console plumbing calls into
+pub trait HalPort: Send {
+    fn label(&self) -> &'static str;
+    fn framing(&self) -> Framing;
+    fn on_message(&mut self, msg: &[u8]) -> Vec<Vec<u8>>;   // runs on the vCPU thread: must not block or panic
+}
+
+pub struct NciPort;          // NFC (hvc12), NCI — a controller with no tag in the field
+pub struct BtPort;           // Bluetooth (hvc5), HCI H4 — a controller with no peers in range
+pub struct SensorsState;     // sensors (hvc18 control / hvc19 data) + a coherent motion model
+pub struct SensorsControlPort;
+pub struct NmeaSource;       // GNSS (hvc6/hvc7), NMEA 0183 synthesis
+pub struct ModemState;       // RIL, AT / 3GPP 27.007 over vsock
+pub struct ModemChannel;
+
+// vsock — packet layer + host service registry (guest-initiated connections only)
+pub struct VsockHdr { … }    // parse(&[u8]) -> Option<Self>, to_bytes()
+pub trait VsockService: Send { fn on_connect(&mut self, ConnHandle); fn on_data(&mut self, &[u8]); fn on_shutdown(&mut self); }
+pub struct VsockRegistry;    // register(port, factory)
+pub struct VsockCore;        // on_guest_packet(hdr, body) -> Vec<OutPacket>, flush_all()
+```
+
+**Robustness contract (load-bearing).** In the HVF embedding `on_message` runs synchronously on the
+vCPU thread *inside the PCI bus mutex*, so a panic poisons that mutex for the whole virtual bus and
+takes the VM down. Every impl bounds-checks with `get()`/`try_into()`, never `unwrap()`s on guest
+bytes, never blocks, and always terminates on malformed length fields. Each module carries a
+`fuzz_lite` test feeding truncated and pseudo-random input a byte at a time.
+
+**Two failure modes worth knowing before extending it.** A short reply is not a safe default: the
+Android Bluetooth stack parses per-opcode typed views and *aborts the process* on a length mismatch
+(`Read_Local_Extended_Features`) or on a refusal it considers mandatory
+(`Set_Min_Encryption_Key_Size`). Both cost a crash to find, so `BtPort` logs every unmodelled opcode
+and `ModemState` every unhandled AT command — one boot then enumerates the gaps.
 
 ### `aemulator-cli` — the `aemulator` binary (identity + detection + dtb + vmm)
 

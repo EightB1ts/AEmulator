@@ -148,6 +148,9 @@ pub enum StopReason {
     },
     /// An unexpected hv_vcpu_run exit reason.
     UnexpectedExit { cpu: u64, reason: u32, pc: u64 },
+    /// The host asked the VM to stop (`machine::request_halt`) — the control server got `quit`, or
+    /// the display window closed. Not a guest-visible event: the guest is simply not resumed.
+    HaltRequested { cpu: u64 },
 }
 
 pub struct Vcpu {
@@ -265,6 +268,16 @@ impl Vcpu {
         ctx.hvf_ids.lock().unwrap()[self.cpu_index as usize] = Some(self.id);
 
         for _ in 0..ctx.max_iters {
+            // Host-requested stop. Checked here, at the top of the loop and before the guest is
+            // resumed, because this is the only point at which no vCPU is inside `hv_vcpu_run` and
+            // no MMIO exit is half-serviced — which is exactly the state the ordered shutdown in
+            // `run_linux_inner` needs before it may call `stream_renderer_teardown()`. See
+            // `machine::request_halt`.
+            if crate::machine::halt_requested() {
+                return Ok(StopReason::HaltRequested {
+                    cpu: self.cpu_index,
+                });
+            }
             if self.pending_advance_pc {
                 let pc = self.get_reg(HV_REG_PC)?;
                 self.set_reg(HV_REG_PC, pc.wrapping_add(4))?;

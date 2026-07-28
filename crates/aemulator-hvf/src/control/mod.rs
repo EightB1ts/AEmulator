@@ -470,7 +470,95 @@ impl Controller {
                     self.width, self.height, ABS_MAX, gen, nz, h
                 )
             }
-            "help" => "OK verbs: screenshot|shot [path], frame <path> [since=<gen>], tap X Y, swipe X1 Y1 X2 Y2 [ms], text <s>, key <code|name>, keydown <code|name>, keyup <code|name>, launch <pkg>, wait_stable [timeout_ms] [interval_ms], hash, info, quit".to_string(),
+            // Sensors. Reaches the process-wide state via `machine::sensors_shared()`, the same
+            // singleton the hvc18 control port and the hvc19 pump use, so no handle needs threading
+            // through the bridge (same approach as `secure_env::shared()`).
+            //
+            //   sensor list                       show every sensor, its bit, on/off, current value
+            //   sensor <name> <v1> [v2 v3]        pin a value (suspends the motion model for it)
+            //   sensor clear <name>               resume the motion model for that sensor
+            //   sensor motion on|off              run or freeze the whole motion model
+            "sensor" | "sensors" => {
+                let args: Vec<&str> = rest.split_whitespace().collect();
+                let state = crate::machine::sensors_shared();
+                let mut st = match state.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                match args.first().copied() {
+                    None | Some("list") => {
+                        format!(
+                            "OK enabled_mask={:#x} delay_ms={} motion={} | {}",
+                            st.enabled_mask(),
+                            st.delay_ms(),
+                            if st.motion_enabled() { "on" } else { "off" },
+                            st.describe().join(" ")
+                        )
+                    }
+                    Some("motion") => match args.get(1).copied() {
+                        Some("on") => {
+                            st.set_motion(true);
+                            "OK motion on".to_string()
+                        }
+                        Some("off") => {
+                            st.set_motion(false);
+                            "OK motion off".to_string()
+                        }
+                        _ => "ERR sensor motion on|off".to_string(),
+                    },
+                    Some("clear") => match args.get(1) {
+                        Some(name) if st.clear_value(name) => format!("OK cleared {name}"),
+                        Some(name) => format!("ERR unknown sensor: {name}"),
+                        None => "ERR sensor clear <name>".to_string(),
+                    },
+                    Some(name) => {
+                        let vals: Vec<f64> = args[1..]
+                            .iter()
+                            .filter_map(|a| a.parse::<f64>().ok())
+                            .collect();
+                        if vals.is_empty() {
+                            return "ERR sensor <name> <v1> [v2 v3] | list | clear <name> | motion on|off"
+                                .to_string();
+                        }
+                        // Missing axes read as 0.0, so a scalar sensor takes one argument.
+                        let v = [
+                            vals.first().copied().unwrap_or(0.0),
+                            vals.get(1).copied().unwrap_or(0.0),
+                            vals.get(2).copied().unwrap_or(0.0),
+                        ];
+                        if st.set_value(name, v) {
+                            format!("OK {name}={:?}", v)
+                        } else {
+                            format!("ERR unknown sensor: {name}")
+                        }
+                    }
+                }
+            }
+            // `gps <lat> <lon>` — move the synthesized GNSS fix. Reaches the same
+            // `machine::gnss_shared()` source the hvc6/hvc7 NMEA pump reads.
+            "gps" | "geo" => {
+                let args: Vec<&str> = rest.split_whitespace().collect();
+                let lat = args.first().and_then(|s| s.parse::<f64>().ok());
+                let lon = args.get(1).and_then(|s| s.parse::<f64>().ok());
+                match (lat, lon) {
+                    (Some(lat), Some(lon)) => {
+                        // Reject out-of-range coordinates rather than emitting sentences that parse but
+                        // place the device somewhere impossible.
+                        if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+                            return "ERR latitude must be -90..90 and longitude -180..180".to_string();
+                        }
+                        let src = crate::machine::gnss_shared();
+                        let mut g = match src.lock() {
+                            Ok(g) => g,
+                            Err(p) => p.into_inner(),
+                        };
+                        g.set_position(lat, lon);
+                        format!("OK gps {lat} {lon}")
+                    }
+                    _ => "ERR gps <lat> <lon>".to_string(),
+                }
+            }
+            "help" => "OK verbs: screenshot|shot [path], frame <path> [since=<gen>], tap X Y, swipe X1 Y1 X2 Y2 [ms], text <s>, key <code|name>, keydown <code|name>, keyup <code|name>, launch <pkg>, wait_stable [timeout_ms] [interval_ms], sensor <list|motion on|off|clear <name>|<name> v1 [v2 v3]>, gps <lat> <lon>, hash, info, quit".to_string(),
             "quit" | "shutdown" | "exit" => {
                 self.stop.store(true, Ordering::Release);
                 "OK bye".to_string()

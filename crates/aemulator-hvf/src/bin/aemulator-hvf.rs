@@ -179,9 +179,10 @@ mod macos {
             Err(_) => eprintln!("[FAIL] VMM stopped before the control bridge was ready"),
         }
 
-        if vmm_done.load(std::sync::atomic::Ordering::Acquire) {
-            let _ = worker.join();
-        }
+        // The control server stopped (`quit`, or the guest halted under it) — bring the VM down in
+        // order before exiting. See `shutdown_vm`: returning from here with the guest still running
+        // is what turned every `quit` into a `libc++abi` abort inside gfxstream's static destructors.
+        shutdown_vm(worker, &vmm_done);
         0
     }
 
@@ -405,12 +406,62 @@ mod macos {
             Err(_) => eprintln!("[FAIL] VMM stopped before the display bridge was ready"),
         }
 
-        // The window closed (or the guest stopped). The VMM keeps running until the guest halts; the
-        // process exits when this returns, tearing it down. Join briefly if it's already finishing.
-        if vmm_done.load(std::sync::atomic::Ordering::Acquire) {
-            let _ = worker.join();
-        }
+        // The window closed (or the guest stopped) — bring the VM down in order before exiting.
+        shutdown_vm(worker, &vmm_done);
         0
+    }
+
+    /// How long to wait for the VMM thread to finish its ordered shutdown before giving up on it.
+    /// Generous: the vCPUs observe the halt in single-digit milliseconds, but the shutdown behind it
+    /// drains host GPU work and joins gfxstream's render/sync/post threads.
+    const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+    /// Stop the guest and wait for the VMM thread's ordered shutdown — `request_halt()` then join.
+    ///
+    /// **This is the only correct way to end a `--display` or `--control` session, and skipping it
+    /// crashed every single shutdown.** The host-facing loop (winit event loop, or the control-socket
+    /// accept loop) runs on the main thread while the VMM runs the guest on `worker`; when the loop
+    /// ends, returning from here without stopping the VM means `main` returns with the guest still
+    /// executing, and libc `exit()` then runs `libgfxstream_backend.dylib`'s C++ static destructors.
+    /// Those are not a substitute for `stream_renderer_teardown()`: `__cxa_finalize_ranges` has
+    /// already unloaded the Vulkan loader and the ICD by the time it reaches them, so
+    /// `~FrameBuffer()` → `teardownGlobalVkEmulation()` calls through dangling dispatch pointers.
+    /// Observed on a real Android boot: `libc++abi: terminating due to uncaught exception of type
+    /// std::__1::system_error: mutex lock failed: Invalid argument`, exit 134.
+    ///
+    /// `request_halt()` makes the vCPU run loops return, which lets `run_linux_inner` reach its
+    /// documented shutdown sequence (join the secondary vCPUs → `teardown_gfxstream()` →
+    /// `ram.unmap_from_vm()`); the join here is what guarantees that finished before `exit()`.
+    ///
+    /// The wait is bounded because a wedged guest must not turn a shutdown into a hang. On timeout we
+    /// leave via `_exit`, which skips atexit/static destructors entirely: with vCPU threads still
+    /// live we cannot tear the renderer down safely, and running the dylib's static destructors
+    /// against them is precisely the crash above. The kernel reclaims the GPU resources either way.
+    fn shutdown_vm(worker: std::thread::JoinHandle<()>, vmm_done: &Arc<AtomicBool>) {
+        use std::sync::atomic::Ordering;
+
+        aemulator_hvf::machine::request_halt();
+
+        let deadline = std::time::Instant::now() + SHUTDOWN_TIMEOUT;
+        while !vmm_done.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if vmm_done.load(Ordering::Acquire) {
+            let _ = worker.join();
+            return;
+        }
+
+        eprintln!(
+            "[warn] the guest did not stop within {SHUTDOWN_TIMEOUT:?} of the halt request — \
+             exiting without the ordered host-renderer teardown. The kernel reclaims the host GPU \
+             resources; nothing is corrupted, but stream_renderer_teardown() did not run."
+        );
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        // Safety: `_exit` makes no allocations and touches no CRT state; it is the documented way to
+        // leave a process whose other threads cannot be quiesced.
+        unsafe { libc::_exit(0) }
     }
 
     /// `run-android` — boot the Cuttlefish (aosp_cf_arm64) images under HVF and stream the guest
@@ -709,13 +760,37 @@ mod macos {
 
             // Base bootconfig (the vendor bootconfig.txt Cuttlefish ships) + the launch-time
             // androidboot.* Cuttlefish's host tool would normally inject. Appended to the initrd.
+            //
+            // DUPLICATE KEYS ARE FATAL — and were, silently, for a long time. Linux's bootconfig
+            // parser rejects a redefined key and then discards the **whole blob**:
+            //     Failed to parse bootconfig: Value is redefined at 138.
+            // Byte 138 was our `androidboot.hardware=cutf_cvm`, which the vendor bootconfig.txt
+            // already sets. So /proc/bootconfig was empty on every boot, and the only reason the
+            // device came up correctly is that the same androidboot.* values are also placed on the
+            // kernel cmdline below. Anything bootconfig-only silently never arrived — which is
+            // exactly what happened to androidboot.openthread_node_id. Dedupe by key so the blob
+            // parses; the cmdline remains the belt-and-braces path.
             let vendor_bc = std::fs::read(cf.join("bootconfig.txt")).unwrap_or_default();
             let mut bootconfig = String::from_utf8_lossy(&vendor_bc).into_owned();
             if !bootconfig.is_empty() && !bootconfig.ends_with('\n') {
                 bootconfig.push('\n');
             }
             let fsc = if first_stage_console { 1 } else { 0 };
-            bootconfig.push_str(&format!(
+            // openthread_node_id: the threadnetwork HAL reads `ro.boot.openthread_node_id` and
+            // asserts `node_id > 0` before anything else, so unset it abort()s at startup — the
+            // entire reason that HAL was disabled. It needs no host backend: it forks its own bundled
+            // `ot-rcp` over a pty (`spinel+hdlc+forkpty:///apex/…/ot-rcp`) and speaks Spinel to it
+            // inside the guest. Real Cuttlefish's assemble_cvd derives it per instance; we run one.
+            // This makes `IThreadChip/chip0` register and answer RCP queries — it does NOT make
+            // Thread networking functional, since a lone ot-rcp has no peers.
+            //
+            // The two vsock ports. These name AF_VSOCK ports the host services listen on, so they are
+            // only meaningful now that the VMM presents a virtio-vsock device — advertising them
+            // earlier would just have changed which error the RIL died with. The port numbers come from
+            // `machine`, which is also what registers the services, so the two cannot drift.
+            let modem_port = aemulator_hvf::machine::VSOCK_PORT_MODEM;
+            let lights_port = aemulator_hvf::machine::VSOCK_PORT_LIGHTS;
+            let launch_bc = format!(
                 "androidboot.hardware=cutf_cvm\n\
                  androidboot.serialno={serialno}\n\
                  androidboot.boot_devices={boot_devices}\n\
@@ -725,8 +800,36 @@ mod macos {
                  androidboot.veritymode=disabled\n\
                  androidboot.selinux={selinux}\n\
                  androidboot.first_stage_console={fsc}\n\
-                 androidboot.fstab_suffix={fstab_suffix}\n"
-            ));
+                 androidboot.fstab_suffix={fstab_suffix}\n\
+                 androidboot.openthread_node_id=1\n\
+                 androidboot.modem_simulator_ports={modem_port}\n\
+                 androidboot.vsock_lights_port={lights_port}\n"
+            );
+            let existing: std::collections::HashSet<String> = bootconfig
+                .lines()
+                .filter_map(|l| l.split_once('='))
+                .map(|(k, _)| k.trim().to_string())
+                .collect();
+            let mut skipped: Vec<&str> = Vec::new();
+            for line in launch_bc.lines() {
+                let Some((k, _)) = line.split_once('=') else {
+                    continue;
+                };
+                if existing.contains(k.trim()) {
+                    skipped.push(k.trim());
+                    continue;
+                }
+                bootconfig.push_str(line);
+                bootconfig.push('\n');
+            }
+            if !skipped.is_empty() {
+                println!(
+                    "[ok] bootconfig: {} launch key(s) already set by the vendor blob, not re-emitted \
+                     (a redefined key makes the kernel discard the ENTIRE bootconfig): {}",
+                    skipped.len(),
+                    skipped.join(", ")
+                );
+            }
 
             // Kernel command line. androidboot.* are ALSO placed here (init reads both /proc/cmdline
             // and /proc/bootconfig) as belt-and-suspenders; `bootconfig` tells the kernel to scan the

@@ -66,10 +66,15 @@ fi
 # 32-bit services (app_process32/drmserver/mediaserver) Exec-format-error loop. The 32-bit
 # `zygote_secondary`'s `onrestart restart zygote` kills the primary zygote's process group — and the
 # freshly-forked system_server with it — every ~5s, so boot never completes. Neuter them. See
-# prep-disable-32bit.sh. Skip with SKIP_PREP_32BIT=1.
+# prep-disable-32bit-dualabi.sh. Skip with SKIP_PREP_32BIT=1.
+#
+# The `-dualabi` suffix is load-bearing: this script is correct ONLY for this dual-ABI `cf` image. It
+# must never be applied to the 64-bit-only `cf64` image, where those same binaries are arm64 and run
+# fine — disabling mediaserver there costs you media.player + media.resource_manager. See the header
+# of run-android64.sh.
 if [ "${SKIP_PREP_32BIT:-0}" != "1" ]; then
   echo "== prep disable 32-bit services (zygote_secondary loop-breaker + drm/media) =="
-  "$HERE/prep-disable-32bit.sh"
+  "$HERE/prep-disable-32bit-dualabi.sh"
 fi
 
 # NOTE (pass 8): the 32-bit audio-HAL Watchdog wall is NOT bypassable host-side on this dual-ABI
