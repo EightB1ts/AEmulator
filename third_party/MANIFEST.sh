@@ -35,6 +35,19 @@ TP_GFXSTREAM_URL="https://github.com/BlissOS/platform_hardware_google_gfxstream"
 TP_GFXSTREAM_SHA="5c5fe539389dc4fc6b0566f8f9785285f0144af9"
 TP_GFXSTREAM_PATCHES="gfxstream"   # subdir of third_party/patches, applied in sorted order
 
+# The codegen that produced host/vulkan/cereal/** and host/vulkan/VkDecoder*, used by
+# third_party/regen-cereal.sh. It is a REF INTO THE GFXSTREAM CHECKOUT'S OWN HISTORY, not a
+# separate dependency — the commit titled "gfxstream: rerun codegen from external/mesa3d", whose
+# very next commit ("nuke duplicate codegen directory [again]") deleted the directory, which is why
+# it is absent from the worktree. regen-cereal.sh reads it with `git archive`.
+#
+# It is deliberately NOT third_party/mesa's copy of the same generator: the pinned mesa is ~20 months
+# newer and its output contract changed (module names vk_decoder / vk_decoder_snapshot, and
+# lowercase mesa-era includes like "vulkan_stream.h" that exist nowhere in this gfxstream). Running
+# it produces files that do not compile, for reasons unrelated to extensions.
+TP_GFXSTREAM_CODEGEN_REF="838dd1d61"
+TP_GFXSTREAM_CODEGEN_PATCHES="gfxstream-codegen"
+
 # Digest of the checkout's ENTIRE working-tree delta against the pinned SHA above: `git diff HEAD`
 # (spelled with every formatting knob pinned) plus one `?? <blob-sha> <path>` line per untracked file.
 #

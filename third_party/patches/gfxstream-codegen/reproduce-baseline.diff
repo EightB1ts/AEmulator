@@ -1,0 +1,1948 @@
+--- a/host/vulkan/cereal/common/goldfish_vk_deepcopy.h
++++ b/host/vulkan/cereal/common/goldfish_vk_deepcopy.h
+@@ -1874,6 +1874,17 @@
+     VkPipelineRasterizationProvokingVertexStateCreateInfoEXT* to);
+ 
+ #endif
++#ifdef VK_EXT_line_rasterization
++DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceLineRasterizationFeaturesKHR,
++                      deepcopy_VkPhysicalDeviceLineRasterizationFeaturesEXT)
++
++DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceLineRasterizationPropertiesKHR,
++                      deepcopy_VkPhysicalDeviceLineRasterizationPropertiesEXT)
++
++DEFINE_ALIAS_FUNCTION(deepcopy_VkPipelineRasterizationLineStateCreateInfoKHR,
++                      deepcopy_VkPipelineRasterizationLineStateCreateInfoEXT)
++
++#endif
+ #ifdef VK_EXT_index_type_uint8
+ void deepcopy_VkPhysicalDeviceIndexTypeUint8FeaturesEXT(
+     Allocator* alloc, VkStructureType rootType,
+--- a/host/vulkan/cereal/common/goldfish_vk_dispatch.cpp
++++ b/host/vulkan/cereal/common/goldfish_vk_dispatch.cpp
+@@ -681,6 +681,10 @@
+ #ifdef VK_EXT_tooling_info
+     out->vkGetPhysicalDeviceToolPropertiesEXT = (PFN_vkGetPhysicalDeviceToolPropertiesEXT)dlSymFunc(
+         lib, "vkGetPhysicalDeviceToolPropertiesEXT");
++#endif
++#ifdef VK_EXT_line_rasterization
++    out->vkCmdSetLineStippleEXT =
++        (PFN_vkCmdSetLineStippleEXT)dlSymFunc(lib, "vkCmdSetLineStippleEXT");
+ #endif
+ #ifdef VK_EXT_extended_dynamic_state
+     out->vkCmdSetCullModeEXT = (PFN_vkCmdSetCullModeEXT)dlSymFunc(lib, "vkCmdSetCullModeEXT");
+@@ -1658,6 +1662,10 @@
+     out->vkGetPhysicalDeviceToolPropertiesEXT =
+         (PFN_vkGetPhysicalDeviceToolPropertiesEXT)vk->vkGetInstanceProcAddr(
+             instance, "vkGetPhysicalDeviceToolPropertiesEXT");
++#endif
++#ifdef VK_EXT_line_rasterization
++    out->vkCmdSetLineStippleEXT =
++        (PFN_vkCmdSetLineStippleEXT)vk->vkGetInstanceProcAddr(instance, "vkCmdSetLineStippleEXT");
+ #endif
+ #ifdef VK_EXT_extended_dynamic_state
+     out->vkCmdSetCullModeEXT =
+@@ -2643,6 +2651,10 @@
+         (PFN_vkGetPhysicalDeviceToolPropertiesEXT)vk->vkGetDeviceProcAddr(
+             device, "vkGetPhysicalDeviceToolPropertiesEXT");
+ #endif
++#ifdef VK_EXT_line_rasterization
++    out->vkCmdSetLineStippleEXT =
++        (PFN_vkCmdSetLineStippleEXT)vk->vkGetDeviceProcAddr(device, "vkCmdSetLineStippleEXT");
++#endif
+ #ifdef VK_EXT_extended_dynamic_state
+     out->vkCmdSetCullModeEXT =
+         (PFN_vkCmdSetCullModeEXT)vk->vkGetDeviceProcAddr(device, "vkCmdSetCullModeEXT");
+--- a/host/vulkan/cereal/common/goldfish_vk_dispatch.h
++++ b/host/vulkan/cereal/common/goldfish_vk_dispatch.h
+@@ -486,6 +486,9 @@
+ #ifdef VK_EXT_tooling_info
+     PFN_vkGetPhysicalDeviceToolPropertiesEXT vkGetPhysicalDeviceToolPropertiesEXT;
+ #endif
++#ifdef VK_EXT_line_rasterization
++    PFN_vkCmdSetLineStippleEXT vkCmdSetLineStippleEXT;
++#endif
+ #ifdef VK_EXT_extended_dynamic_state
+     PFN_vkCmdSetCullModeEXT vkCmdSetCullModeEXT;
+     PFN_vkCmdSetFrontFaceEXT vkCmdSetFrontFaceEXT;
+--- a/host/vulkan/cereal/common/goldfish_vk_extension_structs.cpp
++++ b/host/vulkan/cereal/common/goldfish_vk_extension_structs.cpp
+@@ -2143,7 +2143,7 @@
+             fprintf(stderr, "Unhandled Vulkan structure type %s [%d], aborting.\n",
+                     string_VkStructureType(VkStructureType(structType)), structType);
+             GFXSTREAM_ABORT(::emugl::FatalError(::emugl::ABORT_REASON_OTHER));
+-            return (size_t)0;
++            return static_cast<size_t>(0);
+         }
+     }
+ }
+@@ -4257,7 +4257,7 @@
+             fprintf(stderr, "Unhandled Vulkan structure type %s [%d], aborting.\n",
+                     string_VkStructureType(VkStructureType(structType)), structType);
+             GFXSTREAM_ABORT(::emugl::FatalError(::emugl::ABORT_REASON_OTHER));
+-            return (size_t)0;
++            return static_cast<size_t>(0);
+         }
+     }
+ }
+--- a/host/vulkan/cereal/common/goldfish_vk_marshaling.cpp
++++ b/host/vulkan/cereal/common/goldfish_vk_marshaling.cpp
+@@ -23101,6 +23101,11 @@
+             return "OP_vkCmdSetPrimitiveTopology";
+         }
+ #endif
++#ifdef VK_EXT_line_rasterization
++        case OP_vkCmdSetLineStippleEXT: {
++            return "OP_vkCmdSetLineStippleEXT";
++        }
++#endif
+ #ifdef VK_EXT_extended_dynamic_state
+         case OP_vkCmdSetCullModeEXT: {
+             return "OP_vkCmdSetCullModeEXT";
+--- a/host/vulkan/cereal/common/goldfish_vk_marshaling.h
++++ b/host/vulkan/cereal/common/goldfish_vk_marshaling.h
+@@ -3525,6 +3525,27 @@
+     VkPipelineRasterizationProvokingVertexStateCreateInfoEXT* forUnmarshaling);
+ 
+ #endif
++#ifdef VK_EXT_line_rasterization
++DEFINE_ALIAS_FUNCTION(marshal_VkPhysicalDeviceLineRasterizationFeaturesKHR,
++                      marshal_VkPhysicalDeviceLineRasterizationFeaturesEXT)
++
++DEFINE_ALIAS_FUNCTION(unmarshal_VkPhysicalDeviceLineRasterizationFeaturesKHR,
++                      unmarshal_VkPhysicalDeviceLineRasterizationFeaturesEXT)
++
++DEFINE_ALIAS_FUNCTION(marshal_VkPhysicalDeviceLineRasterizationPropertiesKHR,
++                      marshal_VkPhysicalDeviceLineRasterizationPropertiesEXT)
++
++DEFINE_ALIAS_FUNCTION(unmarshal_VkPhysicalDeviceLineRasterizationPropertiesKHR,
++                      unmarshal_VkPhysicalDeviceLineRasterizationPropertiesEXT)
++
++DEFINE_ALIAS_FUNCTION(marshal_VkPipelineRasterizationLineStateCreateInfoKHR,
++                      marshal_VkPipelineRasterizationLineStateCreateInfoEXT)
++
++DEFINE_ALIAS_FUNCTION(unmarshal_VkPipelineRasterizationLineStateCreateInfoKHR,
++                      unmarshal_VkPipelineRasterizationLineStateCreateInfoEXT)
++
++#define OP_vkCmdSetLineStippleEXT 263855692
++#endif
+ #ifdef VK_EXT_index_type_uint8
+ void marshal_VkPhysicalDeviceIndexTypeUint8FeaturesEXT(
+     VulkanStream* vkStream, VkStructureType rootType,
+--- a/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.cpp
++++ b/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.cpp
+@@ -38,6 +38,12 @@
+ #include "goldfish_vk_extension_structs.h"
+ #include "goldfish_vk_private_defs.h"
+ 
++// AEmulator: the generated VkStructureType -> owning-extension table, so the abort() below can name
++// which extension put this struct on the wire instead of only which struct it was. Included by
++// relative path on purpose — a quoted include resolves against this file's own directory, so no
++// build system (cmake / meson / Android.bp / bazel) needs to learn about it.
++#include "../../VkDecoderCerealGap.inc"
++
+ namespace gfxstream {
+ namespace vk {
+ 
+@@ -2833,7 +2839,7 @@
+     uint64_t cgen_var_0;
+     memcpy((uint64_t*)&cgen_var_0, *ptr, 1 * 8);
+     *ptr += 1 * 8;
+-    *(VkBuffer*)&forUnmarshaling->buffer = (VkBuffer)unbox_VkBuffer((VkBuffer)(*&cgen_var_0));
++    *(VkBuffer*)&forUnmarshaling->buffer = (VkBuffer)try_unbox_VkBuffer((VkBuffer)(*&cgen_var_0));
+     memcpy((VkDeviceSize*)&forUnmarshaling->offset, *ptr, sizeof(VkDeviceSize));
+     *ptr += sizeof(VkDeviceSize);
+     memcpy((VkDeviceSize*)&forUnmarshaling->range, *ptr, sizeof(VkDeviceSize));
+@@ -16314,9 +16320,31 @@
+         }
+ #endif
+         default: {
+-            // fatal; the switch is only taken if the extension struct is known
+-            fprintf(stderr, " %s, Unhandled Vulkan structure type %s [%d], aborting.\n", __func__,
+-                    string_VkStructureType(VkStructureType(structType)), structType);
++            // FATAL, and deliberately kept that way. The wire carries a single pNext_size for the
++            // whole chain, not a per-struct body length, and the bodies are not fixed size — so a
++            // decoder that does not know this struct cannot know how many bytes to step over.
++            // Skipping it would desynchronise every later field in the stream, which is strictly
++            // worse than dying here. The fix is always upstream: keep the owning extension out of
++            // vkEnumerateDeviceExtensionProperties so the guest never enables it and the struct
++            // never reaches the wire at all.
++            const char* structName = string_VkStructureType(VkStructureType(structType));
++            const char* owner = aemu_cereal_gap::CerealGapExtensionForStructType(structName);
++            fprintf(stderr,
++                    " %s, Unhandled Vulkan structure type %s [%d], aborting.\n"
++                    "  owning extension: %s\n"
++                    "  It reached the wire, so that extension was advertised to the guest. Do NOT\n"
++                    "  fix this by skipping the struct (the stream would desync). Instead:\n"
++                    "    * not listed in host/vulkan/VkDecoderCerealGap.inc? the .inc is stale for\n"
++                    "      this gfxstream pin — regenerate it with `aemu-cereal-gap generate` and\n"
++                    "      re-export third_party/patches/gfxstream/ (ci/hvf-doctor.sh runs\n"
++                    "      `aemu-cereal-gap verify` to catch exactly this drift).\n"
++                    "    * listed, but still advertised? it is in kCerealGapExtensionsKeptAnyway in\n"
++                    "      VkDecoderGlobalState.cpp — drop it from that allowlist — or this process\n"
++                    "      is running with AEMU_GFXSTREAM_NO_EXT_STRIP=1, which disables the strip.\n",
++                    __func__, structName, structType,
++                    owner ? owner
++                          : "UNKNOWN — this struct is in neither cereal gap table, so it is not an "
++                            "extension struct this build can attribute (regenerate the .inc)");
+             abort();
+         }
+     }
+--- a/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.h
++++ b/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.h
+@@ -1855,6 +1855,17 @@
+     VkPipelineRasterizationProvokingVertexStateCreateInfoEXT* forUnmarshaling, uint8_t** ptr);
+ 
+ #endif
++#ifdef VK_EXT_line_rasterization
++DEFINE_ALIAS_FUNCTION(reservedunmarshal_VkPhysicalDeviceLineRasterizationFeaturesKHR,
++                      reservedunmarshal_VkPhysicalDeviceLineRasterizationFeaturesEXT)
++
++DEFINE_ALIAS_FUNCTION(reservedunmarshal_VkPhysicalDeviceLineRasterizationPropertiesKHR,
++                      reservedunmarshal_VkPhysicalDeviceLineRasterizationPropertiesEXT)
++
++DEFINE_ALIAS_FUNCTION(reservedunmarshal_VkPipelineRasterizationLineStateCreateInfoKHR,
++                      reservedunmarshal_VkPipelineRasterizationLineStateCreateInfoEXT)
++
++#endif
+ #ifdef VK_EXT_index_type_uint8
+ void reservedunmarshal_VkPhysicalDeviceIndexTypeUint8FeaturesEXT(
+     VulkanStream* vkStream, VkStructureType rootType,
+--- a/host/vulkan/cereal/common/goldfish_vk_transform.h
++++ b/host/vulkan/cereal/common/goldfish_vk_transform.h
+@@ -3091,7 +3091,27 @@
+ void transform_fromhost_VkPipelineRasterizationProvokingVertexStateCreateInfoEXT(
+     VkDecoderGlobalState* resourceTracker,
+     VkPipelineRasterizationProvokingVertexStateCreateInfoEXT* toTransform);
++
++#endif
++#ifdef VK_EXT_line_rasterization
++DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDeviceLineRasterizationFeaturesKHR,
++                      transform_tohost_VkPhysicalDeviceLineRasterizationFeaturesEXT)
++
++DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPhysicalDeviceLineRasterizationFeaturesKHR,
++                      transform_fromhost_VkPhysicalDeviceLineRasterizationFeaturesEXT)
++
++DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDeviceLineRasterizationPropertiesKHR,
++                      transform_tohost_VkPhysicalDeviceLineRasterizationPropertiesEXT)
+ 
++DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPhysicalDeviceLineRasterizationPropertiesKHR,
++                      transform_fromhost_VkPhysicalDeviceLineRasterizationPropertiesEXT)
++
++DEFINE_ALIAS_FUNCTION(transform_tohost_VkPipelineRasterizationLineStateCreateInfoKHR,
++                      transform_tohost_VkPipelineRasterizationLineStateCreateInfoEXT)
++
++DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPipelineRasterizationLineStateCreateInfoKHR,
++                      transform_fromhost_VkPipelineRasterizationLineStateCreateInfoEXT)
++
+ #endif
+ #ifdef VK_EXT_index_type_uint8
+ void transform_tohost_VkPhysicalDeviceIndexTypeUint8FeaturesEXT(
+--- a/host/vulkan/VkDecoder.cpp
++++ b/host/vulkan/VkDecoder.cpp
+@@ -668,15 +668,12 @@
+                 VkPhysicalDevice physicalDevice;
+                 uint32_t* pQueueFamilyPropertyCount;
+                 VkQueueFamilyProperties* pQueueFamilyProperties;
+-                // Begin non wrapped dispatchable handle unboxing for physicalDevice;
++                // Begin global wrapped dispatchable handle unboxing for physicalDevice;
+                 uint64_t cgen_var_0;
+                 memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
+                 *readStreamPtrPtr += 1 * 8;
+                 *(VkPhysicalDevice*)&physicalDevice =
+                     (VkPhysicalDevice)(VkPhysicalDevice)((VkPhysicalDevice)(*&cgen_var_0));
+-                auto unboxed_physicalDevice = unbox_VkPhysicalDevice(physicalDevice);
+-                auto vk = dispatch_VkPhysicalDevice(physicalDevice);
+-                // End manual dispatchable handle unboxing for physicalDevice;
+                 // Begin manual dispatchable handle unboxing for pQueueFamilyPropertyCount;
+                 vkReadStream->unsetHandleMapping();
+                 // WARNING PTR CHECK
+@@ -722,8 +719,8 @@
+                             (unsigned long long)pQueueFamilyPropertyCount,
+                             (unsigned long long)pQueueFamilyProperties);
+                 }
+-                vk->vkGetPhysicalDeviceQueueFamilyProperties(
+-                    unboxed_physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
++                m_state->on_vkGetPhysicalDeviceQueueFamilyProperties(
++                    &m_pool, physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
+                 vkStream->unsetHandleMapping();
+                 // WARNING PTR CHECK
+                 uint64_t cgen_var_3 = (uint64_t)(uintptr_t)pQueueFamilyPropertyCount;
+@@ -4360,14 +4357,22 @@
+                 VkPipelineCache pipelineCache;
+                 size_t* pDataSize;
+                 void* pData;
+-                // Begin non wrapped dispatchable handle unboxing for device;
++                // AEmulator (Phase 4.9): this opcode used to be a RAW PASSTHROUGH — the generated
++                // code unboxed the device, grabbed the dispatch table and called
++                // vk->vkGetPipelineCacheData() directly, with no VkDecoderGlobalState handler in the
++                // path at all. That let the driver's 32-byte VkPipelineCacheHeaderVersionOne reach
++                // the guest verbatim, carrying the real vendorID, deviceID and pipelineCacheUUID.
++                // Routed through m_state instead, which matches the "global wrapped" form the codegen
++                // emits for every other intercepted call (hence the dropped unboxed_device/vk).
++                //
++                // THIS FILE IS GENERATED. A gfxstream pin bump will conflict here, and that is the
++                // designed behaviour: bootstrap.sh fails loudly rather than quietly restoring the
++                // leak. Re-apply by hand, do not drop the hunk.
++                // Begin global wrapped dispatchable handle unboxing for device;
+                 uint64_t cgen_var_0;
+                 memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
+                 *readStreamPtrPtr += 1 * 8;
+                 *(VkDevice*)&device = (VkDevice)(VkDevice)((VkDevice)(*&cgen_var_0));
+-                auto unboxed_device = unbox_VkDevice(device);
+-                auto vk = dispatch_VkDevice(device);
+-                // End manual dispatchable handle unboxing for device;
+                 uint64_t cgen_var_1;
+                 memcpy((uint64_t*)&cgen_var_1, *readStreamPtrPtr, 1 * 8);
+                 *readStreamPtrPtr += 1 * 8;
+@@ -4403,8 +4408,8 @@
+                             (unsigned long long)pDataSize, (unsigned long long)pData);
+                 }
+                 VkResult vkGetPipelineCacheData_VkResult_return = (VkResult)0;
+-                vkGetPipelineCacheData_VkResult_return =
+-                    vk->vkGetPipelineCacheData(unboxed_device, pipelineCache, pDataSize, pData);
++                vkGetPipelineCacheData_VkResult_return = m_state->on_vkGetPipelineCacheData(
++                    &m_pool, device, pipelineCache, pDataSize, pData);
+                 if ((vkGetPipelineCacheData_VkResult_return) == VK_ERROR_DEVICE_LOST)
+                     m_state->on_DeviceLost();
+                 m_state->on_CheckOutOfMemory(vkGetPipelineCacheData_VkResult_return, opcode,
+@@ -4621,14 +4626,11 @@
+                 const VkComputePipelineCreateInfo* pCreateInfos;
+                 const VkAllocationCallbacks* pAllocator;
+                 VkPipeline* pPipelines;
+-                // Begin non wrapped dispatchable handle unboxing for device;
++                // Begin global wrapped dispatchable handle unboxing for device;
+                 uint64_t cgen_var_0;
+                 memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
+                 *readStreamPtrPtr += 1 * 8;
+                 *(VkDevice*)&device = (VkDevice)(VkDevice)((VkDevice)(*&cgen_var_0));
+-                auto unboxed_device = unbox_VkDevice(device);
+-                auto vk = dispatch_VkDevice(device);
+-                // End manual dispatchable handle unboxing for device;
+                 uint64_t cgen_var_1;
+                 memcpy((uint64_t*)&cgen_var_1, *readStreamPtrPtr, 1 * 8);
+                 *readStreamPtrPtr += 1 * 8;
+@@ -4686,17 +4688,16 @@
+                             (unsigned long long)pAllocator, (unsigned long long)pPipelines);
+                 }
+                 VkResult vkCreateComputePipelines_VkResult_return = (VkResult)0;
+-                vkCreateComputePipelines_VkResult_return =
+-                    vk->vkCreateComputePipelines(unboxed_device, pipelineCache, createInfoCount,
+-                                                 pCreateInfos, pAllocator, pPipelines);
++                vkCreateComputePipelines_VkResult_return = m_state->on_vkCreateComputePipelines(
++                    &m_pool, device, pipelineCache, createInfoCount, pCreateInfos, pAllocator,
++                    pPipelines);
+                 if ((vkCreateComputePipelines_VkResult_return) == VK_ERROR_DEVICE_LOST)
+                     m_state->on_DeviceLost();
+                 m_state->on_CheckOutOfMemory(vkCreateComputePipelines_VkResult_return, opcode,
+                                              context);
+                 vkStream->unsetHandleMapping();
+-                // Begin auto non dispatchable handle create for pPipelines;
+-                if (vkCreateComputePipelines_VkResult_return == VK_SUCCESS)
+-                    vkStream->setHandleMapping(&m_boxedHandleCreateMapping);
++                // Begin manual non dispatchable handle create for pPipelines;
++                vkStream->unsetHandleMapping();
+                 if (((createInfoCount))) {
+                     uint64_t* cgen_var_4;
+                     vkStream->alloc((void**)&cgen_var_4, ((createInfoCount)) * 8);
+@@ -4706,7 +4707,7 @@
+                                                                      ((createInfoCount)));
+                     vkStream->write((VkPipeline*)pPipelines, 8 * ((createInfoCount)));
+                 }
+-                // Begin auto non dispatchable handle create for pPipelines;
++                // Begin manual non dispatchable handle create for pPipelines;
+                 vkStream->setHandleMapping(&m_boxedHandleUnwrapMapping);
+                 vkStream->write(&vkCreateComputePipelines_VkResult_return, sizeof(VkResult));
+                 vkStream->commitWrite();
+@@ -9644,15 +9645,12 @@
+                 VkPhysicalDevice physicalDevice;
+                 uint32_t* pQueueFamilyPropertyCount;
+                 VkQueueFamilyProperties2* pQueueFamilyProperties;
+-                // Begin non wrapped dispatchable handle unboxing for physicalDevice;
++                // Begin global wrapped dispatchable handle unboxing for physicalDevice;
+                 uint64_t cgen_var_0;
+                 memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
+                 *readStreamPtrPtr += 1 * 8;
+                 *(VkPhysicalDevice*)&physicalDevice =
+                     (VkPhysicalDevice)(VkPhysicalDevice)((VkPhysicalDevice)(*&cgen_var_0));
+-                auto unboxed_physicalDevice = unbox_VkPhysicalDevice(physicalDevice);
+-                auto vk = dispatch_VkPhysicalDevice(physicalDevice);
+-                // End manual dispatchable handle unboxing for physicalDevice;
+                 // Begin manual dispatchable handle unboxing for pQueueFamilyPropertyCount;
+                 vkReadStream->unsetHandleMapping();
+                 // WARNING PTR CHECK
+@@ -9698,8 +9696,8 @@
+                             (unsigned long long)pQueueFamilyPropertyCount,
+                             (unsigned long long)pQueueFamilyProperties);
+                 }
+-                vk->vkGetPhysicalDeviceQueueFamilyProperties2(
+-                    unboxed_physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
++                m_state->on_vkGetPhysicalDeviceQueueFamilyProperties2(
++                    &m_pool, physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
+                 vkStream->unsetHandleMapping();
+                 // WARNING PTR CHECK
+                 uint64_t cgen_var_3 = (uint64_t)(uintptr_t)pQueueFamilyPropertyCount;
+@@ -13482,14 +13480,11 @@
+                                       "VkDecoder vkQueuePresentKHR");
+                 VkQueue queue;
+                 const VkPresentInfoKHR* pPresentInfo;
+-                // Begin non wrapped dispatchable handle unboxing for queue;
++                // Begin global wrapped dispatchable handle unboxing for queue;
+                 uint64_t cgen_var_0;
+                 memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
+                 *readStreamPtrPtr += 1 * 8;
+                 *(VkQueue*)&queue = (VkQueue)(VkQueue)((VkQueue)(*&cgen_var_0));
+-                auto unboxed_queue = unbox_VkQueue(queue);
+-                auto vk = dispatch_VkQueue(queue);
+-                // End manual dispatchable handle unboxing for queue;
+                 vkReadStream->alloc((void**)&pPresentInfo, sizeof(const VkPresentInfoKHR));
+                 reservedunmarshal_VkPresentInfoKHR(vkReadStream, VK_STRUCTURE_TYPE_MAX_ENUM,
+                                                    (VkPresentInfoKHR*)(pPresentInfo),
+@@ -13503,7 +13498,7 @@
+                 }
+                 VkResult vkQueuePresentKHR_VkResult_return = (VkResult)0;
+                 vkQueuePresentKHR_VkResult_return =
+-                    vk->vkQueuePresentKHR(unboxed_queue, pPresentInfo);
++                    m_state->on_vkQueuePresentKHR(&m_pool, queue, pPresentInfo);
+                 if ((vkQueuePresentKHR_VkResult_return) == VK_ERROR_DEVICE_LOST)
+                     m_state->on_DeviceLost();
+                 m_state->on_CheckOutOfMemory(vkQueuePresentKHR_VkResult_return, opcode, context);
+@@ -19273,6 +19268,50 @@
+                 break;
+             }
+ #endif
++#ifdef VK_EXT_line_rasterization
++            case OP_vkCmdSetLineStippleEXT: {
++                GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DECODER_CATEGORY,
++                                      "VkDecoder vkCmdSetLineStippleEXT");
++                VkCommandBuffer commandBuffer;
++                uint32_t lineStippleFactor;
++                uint16_t lineStipplePattern;
++                // Begin non wrapped dispatchable handle unboxing for commandBuffer;
++                uint64_t cgen_var_0;
++                memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
++                *readStreamPtrPtr += 1 * 8;
++                *(VkCommandBuffer*)&commandBuffer =
++                    (VkCommandBuffer)(VkCommandBuffer)((VkCommandBuffer)(*&cgen_var_0));
++                auto unboxed_commandBuffer = unbox_VkCommandBuffer(commandBuffer);
++                auto vk = dispatch_VkCommandBuffer(commandBuffer);
++                // End manual dispatchable handle unboxing for commandBuffer;
++                memcpy((uint32_t*)&lineStippleFactor, *readStreamPtrPtr, sizeof(uint32_t));
++                *readStreamPtrPtr += sizeof(uint32_t);
++                memcpy((uint16_t*)&lineStipplePattern, *readStreamPtrPtr, sizeof(uint16_t));
++                *readStreamPtrPtr += sizeof(uint16_t);
++                if (m_logCalls) {
++                    fprintf(stderr,
++                            "stream %p: call vkCmdSetLineStippleEXT 0x%llx 0x%llx 0x%llx \n",
++                            ioStream, (unsigned long long)commandBuffer,
++                            (unsigned long long)lineStippleFactor,
++                            (unsigned long long)lineStipplePattern);
++                }
++                vk->vkCmdSetLineStippleEXT(unboxed_commandBuffer, lineStippleFactor,
++                                           lineStipplePattern);
++                vkStream->unsetHandleMapping();
++                vkReadStream->setReadPos((uintptr_t)(*readStreamPtrPtr) -
++                                         (uintptr_t)snapshotTraceBegin);
++                size_t snapshotTraceBytes = vkReadStream->endTrace();
++                if (m_state->snapshotsEnabled()) {
++                    m_state->snapshot()->vkCmdSetLineStippleEXT(
++                        snapshotTraceBegin, snapshotTraceBytes, &m_pool, commandBuffer,
++                        lineStippleFactor, lineStipplePattern);
++                }
++                vkReadStream->clearPool();
++                if (m_queueSubmitWithCommandsEnabled)
++                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
++                break;
++            }
++#endif
+ #ifdef VK_EXT_extended_dynamic_state
+             case OP_vkCmdSetCullModeEXT: {
+                 GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DECODER_CATEGORY,
+@@ -22768,6 +22807,7 @@
+             }
+         }
+         ptr += packetLen;
++        vkStream->clearPool();
+     }
+     if (m_forSnapshotLoad) {
+         m_state->clearCreatedHandlesForSnapshotLoad();
+--- a/host/vulkan/VkDecoderSnapshot.cpp
++++ b/host/vulkan/VkDecoderSnapshot.cpp
+@@ -786,7 +786,29 @@
+     void vkAllocateDescriptorSets(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
+                                   android::base::BumpPool* pool, VkResult input_result,
+                                   VkDevice device, const VkDescriptorSetAllocateInfo* pAllocateInfo,
+-                                  VkDescriptorSet* pDescriptorSets) {}
++                                  VkDescriptorSet* pDescriptorSets) {
++        if (!pDescriptorSets) return;
++        android::base::AutoLock lock(mLock);
++        // pDescriptorSets create
++        mReconstruction.addHandles((const uint64_t*)pDescriptorSets,
++                                   pAllocateInfo->descriptorSetCount);
++        mReconstruction.addHandleDependency((const uint64_t*)pDescriptorSets,
++                                            pAllocateInfo->descriptorSetCount,
++                                            (uint64_t)(uintptr_t)device);
++        mReconstruction.addHandleDependency(
++            (const uint64_t*)pDescriptorSets, pAllocateInfo->descriptorSetCount,
++            (uint64_t)(uintptr_t)unboxed_to_boxed_non_dispatchable_VkDescriptorPool(
++                pAllocateInfo->descriptorPool));
++        auto apiHandle = mReconstruction.createApiInfo();
++        auto apiInfo = mReconstruction.getApiInfo(apiHandle);
++        mReconstruction.setApiTrace(apiInfo, OP_vkAllocateDescriptorSets, snapshotTraceBegin,
++                                    snapshotTraceBytes);
++        mReconstruction.forEachHandleAddApi((const uint64_t*)pDescriptorSets,
++                                            pAllocateInfo->descriptorSetCount, apiHandle,
++                                            VkReconstruction::CREATED);
++        mReconstruction.setCreatedHandlesForApi(apiHandle, (const uint64_t*)pDescriptorSets,
++                                                pAllocateInfo->descriptorSetCount);
++    }
+     void vkFreeDescriptorSets(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
+                               android::base::BumpPool* pool, VkResult input_result, VkDevice device,
+                               VkDescriptorPool descriptorPool, uint32_t descriptorSetCount,
+@@ -801,7 +823,58 @@
+                                 uint32_t descriptorWriteCount,
+                                 const VkWriteDescriptorSet* pDescriptorWrites,
+                                 uint32_t descriptorCopyCount,
+-                                const VkCopyDescriptorSet* pDescriptorCopies) {}
++                                const VkCopyDescriptorSet* pDescriptorCopies) {
++        android::base::AutoLock lock(mLock);
++        // pDescriptorWrites action
++        VkDecoderGlobalState* m_state = VkDecoderGlobalState::get();
++        if (m_state->batchedDescriptorSetUpdateEnabled()) {
++            return;
++        }
++        uint64_t handle = m_state->newGlobalVkGenericHandle();
++        mReconstruction.addHandles((const uint64_t*)(&handle), 1);
++        auto apiHandle = mReconstruction.createApiInfo();
++        auto apiInfo = mReconstruction.getApiInfo(apiHandle);
++        mReconstruction.setApiTrace(apiInfo, OP_vkUpdateDescriptorSets, snapshotTraceBegin,
++                                    snapshotTraceBytes);
++        for (uint32_t i = 0; i < descriptorWriteCount; ++i) {
++            mReconstruction.addHandleDependency(
++                (const uint64_t*)(&handle), 1,
++                (uint64_t)(uintptr_t)unboxed_to_boxed_non_dispatchable_VkDescriptorSet(
++                    pDescriptorWrites[i].dstSet));
++            for (uint32_t j = 0; j < pDescriptorWrites[i].descriptorCount; ++j) {
++                if ((pDescriptorWrites[i].pImageInfo)) {
++                    if (pDescriptorWrites[i].descriptorType ==
++                        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
++                        mReconstruction.addHandleDependency(
++                            (const uint64_t*)(&handle), 1,
++                            (uint64_t)(uintptr_t)unboxed_to_boxed_non_dispatchable_VkSampler(
++                                pDescriptorWrites[i].pImageInfo[j].sampler));
++                        mReconstruction.addHandleDependency(
++                            (const uint64_t*)(&handle), 1,
++                            (uint64_t)(uintptr_t)unboxed_to_boxed_non_dispatchable_VkImageView(
++                                pDescriptorWrites[i].pImageInfo[j].imageView));
++                    }
++                    if (pDescriptorWrites[i].descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER) {
++                        mReconstruction.addHandleDependency(
++                            (const uint64_t*)(&handle), 1,
++                            (uint64_t)(uintptr_t)unboxed_to_boxed_non_dispatchable_VkSampler(
++                                pDescriptorWrites[i].pImageInfo[j].sampler));
++                    }
++                }
++                if (pDescriptorWrites[i].pBufferInfo) {
++                    if (pDescriptorWrites[i].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
++                        mReconstruction.addHandleDependency(
++                            (const uint64_t*)(&handle), 1,
++                            (uint64_t)(uintptr_t)unboxed_to_boxed_non_dispatchable_VkBuffer(
++                                pDescriptorWrites[i].pBufferInfo[j].buffer));
++                    }
++                }
++            }
++        }
++        mReconstruction.forEachHandleAddApi((const uint64_t*)(&handle), 1, apiHandle,
++                                            VkReconstruction::CREATED);
++        mReconstruction.setCreatedHandlesForApi(apiHandle, (const uint64_t*)(&handle), 1);
++    }
+     void vkCreateFramebuffer(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
+                              android::base::BumpPool* pool, VkResult input_result, VkDevice device,
+                              const VkFramebufferCreateInfo* pCreateInfo,
+@@ -936,7 +1009,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkBeginCommandBuffer, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -950,7 +1024,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkEndCommandBuffer, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -964,7 +1039,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkResetCommandBuffer, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleClearModifyApi((const uint64_t*)(&boxed), 1);
+         }
+     }
+@@ -978,7 +1054,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindPipeline, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -993,7 +1070,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetViewport, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1007,7 +1085,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetScissor, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1021,7 +1100,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetLineWidth, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1036,7 +1116,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthBias, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1050,7 +1131,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetBlendConstants, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1064,7 +1146,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthBounds, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1078,7 +1161,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilCompareMask, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1092,7 +1176,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilWriteMask, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1106,7 +1191,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilReference, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1123,7 +1209,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindDescriptorSets, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1137,7 +1224,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindIndexBuffer, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1152,7 +1240,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindVertexBuffers, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1166,7 +1255,8 @@
+         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDraw, snapshotTraceBegin, snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1181,7 +1271,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDrawIndexed, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1196,7 +1287,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDrawIndirect, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1211,7 +1303,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDrawIndexedIndirect, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1225,7 +1318,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDispatch, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1239,7 +1333,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDispatchIndirect, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1254,7 +1349,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyBuffer, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1270,7 +1366,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyImage, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1286,7 +1383,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBlitImage, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1301,7 +1399,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyBufferToImage, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1316,7 +1415,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyImageToBuffer, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1331,7 +1431,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdUpdateBuffer, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1346,7 +1447,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdFillBuffer, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1362,7 +1464,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdClearColorImage, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1378,7 +1481,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdClearDepthStencilImage, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1393,7 +1497,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdClearAttachments, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1409,7 +1514,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdResolveImage, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1423,7 +1529,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetEvent, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1437,7 +1544,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdResetEvent, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1457,7 +1565,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdWaitEvents, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1477,7 +1586,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdPipelineBarrier, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1491,7 +1601,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginQuery, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1505,7 +1616,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndQuery, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1519,7 +1631,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdResetQueryPool, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1534,7 +1647,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdWriteTimestamp, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1550,7 +1664,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyQueryPoolResults, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1565,7 +1680,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdPushConstants, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1580,7 +1696,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginRenderPass, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1594,7 +1711,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdNextSubpass, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1607,7 +1725,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndRenderPass, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1621,7 +1740,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdExecuteCommands, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1675,7 +1795,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDeviceMask, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1690,7 +1811,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDispatchBase, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1844,7 +1966,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDrawIndirectCount, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1860,7 +1983,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDrawIndexedIndirectCount, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1893,7 +2017,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginRenderPass2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1908,7 +2033,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdNextSubpass2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1922,7 +2048,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndRenderPass2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2001,7 +2128,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetEvent2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2015,7 +2143,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdResetEvent2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2030,7 +2159,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdWaitEvents2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2044,7 +2174,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdPipelineBarrier2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2058,7 +2189,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdWriteTimestamp2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2075,7 +2207,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyBuffer2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2089,7 +2222,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyImage2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2103,7 +2237,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyBufferToImage2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2117,7 +2252,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyImageToBuffer2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2131,7 +2267,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBlitImage2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2145,7 +2282,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdResolveImage2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2159,7 +2297,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginRendering, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2172,7 +2311,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndRendering, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2186,7 +2326,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetCullMode, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2200,7 +2341,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetFrontFace, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2214,7 +2356,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetPrimitiveTopology, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2228,7 +2371,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetViewportWithCount, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2242,7 +2386,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetScissorWithCount, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2258,7 +2403,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindVertexBuffers2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2272,7 +2418,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthTestEnable, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2286,7 +2433,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthWriteEnable, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2300,7 +2448,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthCompareOp, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2314,7 +2463,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthBoundsTestEnable, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2328,7 +2478,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilTestEnable, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2343,7 +2494,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilOp, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2358,7 +2510,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetRasterizerDiscardEnable, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2372,7 +2525,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthBiasEnable, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2387,7 +2541,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetPrimitiveRestartEnable, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2474,7 +2629,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginRenderingKHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2487,7 +2643,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndRenderingKHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2620,7 +2777,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginRenderPass2KHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2635,7 +2793,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdNextSubpass2KHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2649,7 +2808,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndRenderPass2KHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2797,7 +2957,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetEvent2KHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2811,7 +2972,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdResetEvent2KHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2826,7 +2988,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdWaitEvents2KHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2840,7 +3003,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdPipelineBarrier2KHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2855,7 +3019,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdWriteTimestamp2KHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2873,7 +3038,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdWriteBufferMarker2AMD, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2893,7 +3059,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyBuffer2KHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2907,7 +3074,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyImage2KHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2921,7 +3089,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyBufferToImage2KHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2935,7 +3104,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyImageToBuffer2KHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2949,7 +3119,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBlitImage2KHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2963,7 +3134,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdResolveImage2KHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2997,7 +3169,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindIndexBuffer2KHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3028,7 +3201,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetLineStippleKHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3099,7 +3273,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindTransformFeedbackBuffersEXT,
+                                     snapshotTraceBegin, snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3116,7 +3291,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginTransformFeedbackEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3132,7 +3308,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndTransformFeedbackEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3147,7 +3324,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginQueryIndexedEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3161,7 +3339,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndQueryIndexedEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3177,7 +3356,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDrawIndirectByteCountEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3209,7 +3389,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginDebugUtilsLabelEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3222,7 +3403,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndDebugUtilsLabelEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3236,7 +3418,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdInsertDebugUtilsLabelEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3291,6 +3474,23 @@
+                                               VkPhysicalDevice physicalDevice, uint32_t* pToolCount,
+                                               VkPhysicalDeviceToolProperties* pToolProperties) {}
+ #endif
++#ifdef VK_EXT_line_rasterization
++    void vkCmdSetLineStippleEXT(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
++                                android::base::BumpPool* pool, VkCommandBuffer commandBuffer,
++                                uint32_t lineStippleFactor, uint16_t lineStipplePattern) {
++        android::base::AutoLock lock(mLock);
++        // commandBuffer modify
++        auto apiHandle = mReconstruction.createApiInfo();
++        auto apiInfo = mReconstruction.getApiInfo(apiHandle);
++        mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetLineStippleEXT, snapshotTraceBegin,
++                                    snapshotTraceBytes);
++        for (uint32_t i = 0; i < 1; ++i) {
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
++            mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
++        }
++    }
++#endif
+ #ifdef VK_EXT_extended_dynamic_state
+     void vkCmdSetCullModeEXT(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
+                              android::base::BumpPool* pool, VkCommandBuffer commandBuffer,
+@@ -3302,7 +3502,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetCullModeEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3316,7 +3517,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetFrontFaceEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3330,7 +3532,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetPrimitiveTopologyEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3344,7 +3547,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetViewportWithCountEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3358,7 +3562,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetScissorWithCountEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3374,7 +3579,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindVertexBuffers2EXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3388,7 +3594,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthTestEnableEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3402,7 +3609,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthWriteEnableEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3416,7 +3624,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthCompareOpEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3431,7 +3640,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthBoundsTestEnableEXT,
+                                     snapshotTraceBegin, snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3445,7 +3655,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilTestEnableEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3460,7 +3671,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilOpEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3524,7 +3736,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetPatchControlPointsEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3540,7 +3753,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetRasterizerDiscardEnableEXT,
+                                     snapshotTraceBegin, snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3554,7 +3768,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthBiasEnableEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3568,7 +3783,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetLogicOpEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3583,7 +3799,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetPrimitiveRestartEnableEXT,
+                                     snapshotTraceBegin, snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3599,7 +3816,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetColorWriteEnableEXT, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3790,7 +4008,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdTraceRaysKHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3821,7 +4040,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdTraceRaysIndirectKHR, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -3843,7 +4063,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetRayTracingPipelineStackSizeKHR,
+                                     snapshotTraceBegin, snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -6869,6 +7090,14 @@
+     mImpl->vkGetPhysicalDeviceToolPropertiesEXT(snapshotTraceBegin, snapshotTraceBytes, pool,
+                                                 input_result, physicalDevice, pToolCount,
+                                                 pToolProperties);
++}
++#endif
++#ifdef VK_EXT_line_rasterization
++void VkDecoderSnapshot::vkCmdSetLineStippleEXT(
++    const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes, android::base::BumpPool* pool,
++    VkCommandBuffer commandBuffer, uint32_t lineStippleFactor, uint16_t lineStipplePattern) {
++    mImpl->vkCmdSetLineStippleEXT(snapshotTraceBegin, snapshotTraceBytes, pool, commandBuffer,
++                                  lineStippleFactor, lineStipplePattern);
+ }
+ #endif
+ #ifdef VK_EXT_extended_dynamic_state
+--- a/host/vulkan/VkDecoderSnapshot.h
++++ b/host/vulkan/VkDecoderSnapshot.h
+@@ -1346,6 +1346,11 @@
+                                               VkPhysicalDevice physicalDevice, uint32_t* pToolCount,
+                                               VkPhysicalDeviceToolProperties* pToolProperties);
+ #endif
++#ifdef VK_EXT_line_rasterization
++    void vkCmdSetLineStippleEXT(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
++                                android::base::BumpPool* pool, VkCommandBuffer commandBuffer,
++                                uint32_t lineStippleFactor, uint16_t lineStipplePattern);
++#endif
+ #ifdef VK_EXT_extended_dynamic_state
+     void vkCmdSetCullModeEXT(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
+                              android::base::BumpPool* pool, VkCommandBuffer commandBuffer,
+--- a/host/vulkan/VkSubDecoder.cpp
++++ b/host/vulkan/VkSubDecoder.cpp
+@@ -2704,6 +2704,21 @@
+                 break;
+             }
+ #endif
++#ifdef VK_EXT_line_rasterization
++            case OP_vkCmdSetLineStippleEXT: {
++                GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DECODER_CATEGORY,
++                                      "VkSubDecoder vkCmdSetLineStippleEXT");
++                uint32_t lineStippleFactor;
++                uint16_t lineStipplePattern;
++                memcpy((uint32_t*)&lineStippleFactor, *readStreamPtrPtr, sizeof(uint32_t));
++                *readStreamPtrPtr += sizeof(uint32_t);
++                memcpy((uint16_t*)&lineStipplePattern, *readStreamPtrPtr, sizeof(uint16_t));
++                *readStreamPtrPtr += sizeof(uint16_t);
++                vk->vkCmdSetLineStippleEXT((VkCommandBuffer)dispatchHandle, lineStippleFactor,
++                                           lineStipplePattern);
++                break;
++            }
++#endif
+ #ifdef VK_EXT_extended_dynamic_state
+             case OP_vkCmdSetCullModeEXT: {
+                 GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DECODER_CATEGORY,

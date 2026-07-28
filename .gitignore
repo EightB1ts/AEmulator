@@ -37,6 +37,7 @@ Cargo.lock.bak
 !/third_party/MANIFEST.sh
 !/third_party/paths.sh
 !/third_party/bootstrap.sh
+!/third_party/regen-cereal.sh
 !/third_party/patches/
 
 # Editor / OS cruft
