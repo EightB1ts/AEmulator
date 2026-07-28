@@ -17,6 +17,9 @@
 #      in `[workspace].exclude`, so steps 1-3 provably cannot reach them. Without step 6 the whole
 #      VMM + graphics stack and the Studio backend are unformatted, unlinted and untested by this
 #      gate. Steps 5 and 6 are REQUIRED on Apple-Silicon macOS and skipped LOUDLY elsewhere.
+#   7. ci/stub-gfxstream SYMBOL PARITY — the drift guard for the GitHub macos-14 job, which is what
+#      gives `crates/aemulator-hvf` any coverage at all on a hosted runner. Platform-independent
+#      (it runs on the Linux gate too), so this is where stub staleness gets caught first.
 #
 # NOTE the blocklist is grepped against the GUEST-facing artifacts only — NOT `qemu-args`,
 # which is the HOST launcher command line and legitimately contains "qemu-system-aarch64".
@@ -160,6 +163,35 @@ if [ "${AEMU_SKIP_BUILD_CHECKS:-0}" != "1" ]; then
             ok "$(dirname "$m"): fmt + clippy + tests green"
         done
     fi
+fi
+
+# --- 7: the CI link stub's symbol parity with gfxstream/ffi.rs ---------------
+# Step 6 above is REQUIRED-on-macOS/skipped-elsewhere, and `.github/workflows/aemulator-ci.yml`'s
+# ubuntu job therefore skips it — which is why the workflow has a second, macos-14 job that links
+# `crates/aemulator-hvf` against ci/stub-gfxstream (a link-only no-op dylib) instead of a 45-minute
+# gfxstream + Mesa build. That job is the ONLY automated coverage the crate has.
+#
+# The way it silently dies is stub staleness: gfxstream/ffi.rs grows a new `stream_renderer_*` import,
+# the stub does not export it, the macOS job stops linking, and the cheap repair is to delete the job.
+# So re-derive the symbol list from ffi.rs and diff it against a freshly-built stub, here, on EVERY
+# platform — this check needs only a C compiler and `nm`, so unlike steps 5 and 6 it is not
+# macOS-gated and it catches the drift on the Linux gate before the macOS job ever starts.
+#
+# Stronger than "does the macOS job link?": an `extern "C"` declaration that no Rust code calls yet
+# emits no undefined symbol, so a plain build stays green and the stub only breaks on the later commit
+# that first calls it. Checking declarations catches it at the commit that adds them.
+step "ci/stub-gfxstream symbol parity with crates/aemulator-hvf/src/gfxstream/ffi.rs"
+STUB_BUILD="$ROOT/ci/stub-gfxstream/build.sh"
+if [ ! -f "$STUB_BUILD" ]; then
+    fail "ci/stub-gfxstream/build.sh is missing — the macos-14 CI job cannot link aemulator-hvf without
+    it, which means the crate has NO automated coverage on any hosted runner"
+elif ! command -v "${CC:-cc}" >/dev/null 2>&1 || ! command -v nm >/dev/null 2>&1; then
+    printf '%s  ! skipped: no C compiler (%s) or no nm on this host — the CI link stub is UNVERIFIED here%s\n' \
+        "$C_Y" "${CC:-cc}" "$C_0"
+else
+    bash "$STUB_BUILD" --verify || fail "the gfxstream CI link stub is stale — see the missing symbols
+    above and ci/stub-gfxstream/README.md § 'Regenerating the symbol list'"
+    ok "CI link stub exports every gfxstream symbol the crate imports"
 fi
 
 printf '\n%s==> ALL CHECKS PASSED%s\n' "$C_G" "$C_0"

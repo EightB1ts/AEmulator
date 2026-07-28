@@ -1,0 +1,7 @@
+# The link stub is a BUILD ARTIFACT — never commit it. A committed stub dylib is one stray
+# GFXSTREAM_BUILD_HOST away from being linked into a real build, and this repo has already shipped one
+# binary that booted perfectly and was quietly crippled. Rebuild it instead:
+#   bash ci/stub-gfxstream/build.sh
+libgfxstream_backend.dylib
+libgfxstream_backend.so
+*.dSYM/

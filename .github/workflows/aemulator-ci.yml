@@ -7,8 +7,21 @@
 # in sync (the shell script is the source of truth for the gate — CI just runs it).
 #
 # Default cargo features only. The Linux/KVM crosvm backend is behind the `kvm` feature +
-# cfg(target_os="linux") and is NOT built here (this runner is x86-64 Linux; the fleet KVM build is
-# a separate bare-metal-ARM path — see docs/PHASE0-RUNBOOK.md).
+# cfg(target_os="linux") and is NOT built here (the `check` runner is x86-64 Linux; the fleet KVM build
+# is a separate bare-metal-ARM path — see docs/PHASE0-RUNBOOK.md).
+#
+# TWO JOBS, ON PURPOSE:
+#   * `check`      — ubuntu-latest, runs `ci/check.sh`: the hermetic workspace gate (fmt/clippy/test
+#                    over the workspace members) plus the identity-validator blocklist gate. Its step 6
+#                    (the workspace-EXCLUDED crates) skips loudly here, and its step 7 (link-stub symbol
+#                    parity) runs.
+#   * `check-hvf`  — macos-14 (Apple Silicon), the ONLY job that reaches `crates/aemulator-hvf`. That
+#                    crate is workspace-excluded, so `check`'s `cargo fmt --all` / `clippy
+#                    --all-targets` / `test` provably cannot see it — ~10k lines, the whole VMM and
+#                    graphics stack. See the job's own comment for how it links without a 45-minute
+#                    gfxstream + Mesa build.
+# `check` is NOT redundant: it is the gate for every workspace member, it is where the guest-facing
+# blocklist grep runs, and it is the platform-independent half.
 
 name: AEmulator CI
 
@@ -64,3 +77,103 @@ jobs:
       # cargo test, profile-validate, and the props/bootconfig/DTB blocklist grep.
       - name: Run merge gate (ci/check.sh)
         run: bash ci/check.sh
+
+  # ---------------------------------------------------------------------------------------------
+  # The workspace-EXCLUDED crates. This job is the entire reason ci/stub-gfxstream exists.
+  #
+  # `crates/aemulator-hvf` is in `[workspace].exclude`, and its build.rs links -lgfxstream_backend
+  # UNCONDITIONALLY on macOS — there is deliberately no cargo feature to build without the GPU path
+  # (features are how this repo once shipped a binary that booted perfectly and was quietly crippled;
+  # see the invariant comment in crates/aemulator-hvf/Cargo.toml). Building the real renderer here
+  # means gfxstream *plus Mesa*: ~45 minutes on a hosted runner, i.e. a non-starter.
+  #
+  # But every test in that crate is hermetic — mock renderer, mock guest mapper, in-process TestQueue.
+  # None of them CALL into the dylib; they only need the crate to LINK. So ci/stub-gfxstream builds a
+  # dylib exporting exactly the same symbol set as loud, always-failing no-ops (stream_renderer_init
+  # returns non-zero; a constructor announces itself at dyld load time), and that is sufficient.
+  #
+  # WHAT THIS JOB DOES NOT PROVE: that the graphics stack works. Nothing here touches a real renderer,
+  # a Vulkan ICD, or the hypervisor. ci/hvf-doctor.sh is the gate for that and is deliberately NOT run
+  # in CI — it needs the built KosmicKrisp driver, an ad-hoc codesign and a Vulkan ICD manifest, so it
+  # stays a local/macOS-host gate (as does kosmickrisp/run-gate.sh and a real --gpu3d --display boot).
+  check-hvf:
+    name: aemulator-hvf + studio · fmt · clippy · test (gfxstream link stub)
+    # macos-14 is Apple Silicon, matching the crate's macOS/aarch64-only target. Hypervisor.framework
+    # is in the SDK, so `-framework Hypervisor` LINKS on a hosted runner without any entitlement — the
+    # entitlement is only needed for hv_vm_create() at run time, which no hermetic test calls.
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Both crates are their own workspace roots (they are excluded from the root workspace), so each
+      # has its own target/ — neither is under AEmulator/target, and `crates/aemulator-hvf/target` is
+      # the directory ci/hvf-doctor.sh reads binaries out of on a real host.
+      - name: Cache cargo registry + per-crate targets
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            AEmulator/crates/aemulator-hvf/target
+            AEmulator/aemulator-studio/src-tauri/target
+          key: aemulator-hvf-cargo-${{ runner.os }}-${{ hashFiles('AEmulator/crates/aemulator-hvf/Cargo.lock', 'AEmulator/aemulator-studio/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            aemulator-hvf-cargo-${{ runner.os }}-
+
+      # HARD requirement of build.rs, not an optional feature: it resolves `brew --prefix libslirp`,
+      # panics with a real error message if <prefix>/lib is absent, compiles src/net/slirp_shim.c
+      # against <prefix>/include, and links -lslirp. Networking is as non-optional as the GPU path.
+      - name: Install libslirp (build.rs hard-fails without it)
+        run: brew install libslirp
+
+      # Builds the stub into a runner-temp dir and re-derives its symbol list from
+      # crates/aemulator-hvf/src/gfxstream/ffi.rs, failing with the missing NAMES if the stub has gone
+      # stale. Its last line of stdout is the directory to point GFXSTREAM_BUILD_HOST at.
+      #
+      # GFXSTREAM_BUILD_HOST is set per-step below (process-scoped) and NOWHERE in the tree: build.rs
+      # bakes it in as an -rpath, so a stub path in any file a normal build reads would silently cripple
+      # a real developer build. See ci/stub-gfxstream/README.md § "How this could go wrong".
+      - name: Build the gfxstream CI link stub (and check symbol parity with ffi.rs)
+        id: stub
+        run: |
+          set -euo pipefail
+          dir="$(bash ci/stub-gfxstream/build.sh --out "$RUNNER_TEMP/gfxstream-stub" | tail -1)"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      # ~10k lines that no GitHub job could previously reach. Mirrors ci/check.sh step 6 exactly.
+      - name: aemulator-hvf — cargo fmt --check
+        env:
+          GFXSTREAM_BUILD_HOST: ${{ steps.stub.outputs.dir }}
+        run: cargo fmt --manifest-path crates/aemulator-hvf/Cargo.toml --check
+
+      - name: aemulator-hvf — cargo clippy --all-targets -D warnings
+        env:
+          GFXSTREAM_BUILD_HOST: ${{ steps.stub.outputs.dir }}
+        run: cargo clippy --manifest-path crates/aemulator-hvf/Cargo.toml --all-targets -- -D warnings
+
+      # dyld resolves libgfxstream_backend.dylib through the -rpath build.rs baked in, so the stub must
+      # still be at $GFXSTREAM_BUILD_HOST when the test binaries RUN, not just when they link. Every
+      # test binary prints the stub's load banner on stderr — that banner in the log is the proof this
+      # job is testing against the stub and not silently against something else.
+      - name: aemulator-hvf — cargo test
+        env:
+          GFXSTREAM_BUILD_HOST: ${{ steps.stub.outputs.dir }}
+        run: cargo test --manifest-path crates/aemulator-hvf/Cargo.toml
+
+      # The other workspace-excluded crate. Verified to need NO frontend build: tauri-codegen uses
+      # `devUrl` for a debug build, so `frontendDist: "../dist"` is never resolved and no `pnpm install`
+      # / `pnpm build` is required. That holds for debug ONLY — a `--release` build of this crate would
+      # need `dist/` populated first, which is why this job stays on the default (debug) profile.
+      # It has no path dependency on aemulator-hvf, so it needs neither the stub nor libslirp.
+      - name: aemulator-studio/src-tauri — fmt · clippy · test
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path aemulator-studio/src-tauri/Cargo.toml --check
+          cargo clippy --manifest-path aemulator-studio/src-tauri/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path aemulator-studio/src-tauri/Cargo.toml
