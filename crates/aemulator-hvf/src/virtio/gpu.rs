@@ -10,11 +10,13 @@
 //! into it and bumps a generation counter, so a display layer (a future window) can poll for a new
 //! frame via [`ScanoutHandle`]. Reference: crosvm `devices/src/virtio/gpu` 2D path (not copied).
 
+use super::gpu3d::FenceReq;
 use super::{Mem, VIRTIO_F_VERSION_1};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use virtio_queue::{Queue, QueueT};
 use vm_memory::{Bytes, GuestAddress};
 
@@ -54,10 +56,46 @@ const VIRTIO_GPU_F_EDID: u64 = 1 << 1;
 /// Any positive dpi fixes the "dpi -1 / viewport not found" gap; 320 matches Cuttlefish's default.
 const EDID_DPI: u32 = 320;
 
+/// `VIRTIO_GPU_FLAG_FENCE` (bit 0): the command carries a `fence_id` the device must signal when the
+/// work it describes has completed.
 const VIRTIO_GPU_FLAG_FENCE: u32 = 1 << 0;
+
+/// `VIRTIO_GPU_FLAG_INFO_RING_IDX` (bit 1): the header's `ctx_id` + `ring_idx` name a **per-context
+/// timeline** the fence belongs to, instead of the device's single global one.
+///
+/// The guest sets this whenever it fences on a non-default ring (Linux
+/// `virtio_gpu_fence_emit`: `if (fence->ring_idx != 0)`), and Mesa's `gfxstream_vk` asks for
+/// `VIRTGPU_CONTEXT_PARAM_NUM_RINGS = 2` and submits its real Vulkan queue work on ring 1. A device
+/// that drops this bit from its response — as this one did, by masking `flags & FLAG_FENCE` and
+/// zeroing bytes 16..21 — reports every completion as belonging to ring 0 of context 0, so per-ring
+/// fence completion cannot be routed at all.
+const VIRTIO_GPU_FLAG_INFO_RING_IDX: u32 = 1 << 1;
+
 const VIRTIO_GPU_MAX_SCANOUTS: usize = 16;
 const CTRL_HDR_LEN: usize = 24;
 const BPP: u32 = 4;
+
+/// How long a deferred (fenced) command may sit unpublished before [`Gpu::sweep_stale_fences`]
+/// force-completes it.
+///
+/// **This watchdog is not optional.** Deferring a response until the host fence fires converts a
+/// wedged renderer — a lost fence callback, a gfxstream thread stuck in a driver, a context torn
+/// down with work outstanding — from "one stale frame" into "the guest's virtio-gpu ring never
+/// advances again", which is strictly worse than the synchronous behaviour it replaces. 2 s is far
+/// beyond any legitimate host fence (gfxstream's own present acquire is bounded at 100 ms) and far
+/// below the guest's own DRM/dma-fence timeouts, so it only ever fires on a real fault, loudly.
+const FENCE_DEADLINE: Duration = Duration::from_secs(2);
+
+/// Ceiling on simultaneously deferred fenced commands. Past this, [`Gpu::dispatch`] stops deferring
+/// and answers synchronously (the pre-deferral behaviour) instead of growing the pending map without
+/// bound.
+///
+/// The second independent safety net beside [`FENCE_DEADLINE`]: the deadline bounds how *long* a
+/// single wedged fence can stall one command, this bounds how *much* state a renderer that has
+/// stopped signalling altogether can accumulate. 1024 is 4× the control ring's depth
+/// ([`super::QUEUE_SIZE`] = 256), so a guest cannot reach it with in-flight chains alone — only a
+/// host that has stopped completing can.
+const MAX_PENDING_FENCES: usize = 1024;
 
 // =====================================================================================
 // Guest-controlled allocation limits.
@@ -210,6 +248,120 @@ struct Rect {
     y: u32,
     width: u32,
     height: u32,
+}
+
+/// The 24-byte `virtio_gpu_ctrl_hdr` every control command starts with, parsed **once**:
+///
+/// ```text
+/// le32 type | le32 flags | le64 fence_id | le32 ctx_id | u8 ring_idx | u8 padding[3]
+///    0..4       4..8          8..16          16..20         20            21..24
+/// ```
+///
+/// It used to be re-read piecemeal — `cmd_type`/`flags`/`fence` in `dispatch`, `ctx_id` again in
+/// `dispatch_3d`, `ring_idx` again in `route_header_fence`, and never at all when building a
+/// response. Parsing it once and threading it through is what makes the response header able to echo
+/// the fields it is required to echo, and what makes the fence key `(ctx_id, ring_idx, fence_id)`
+/// available at every site that needs it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ReqHdr {
+    cmd_type: u32,
+    flags: u32,
+    fence_id: u64,
+    ctx_id: u32,
+    ring_idx: u8,
+}
+
+impl ReqHdr {
+    /// Parse the header, or `None` if the command is shorter than one.
+    fn parse(cmd: &[u8]) -> Option<Self> {
+        if cmd.len() < CTRL_HDR_LEN {
+            return None;
+        }
+        Some(Self {
+            cmd_type: read_le(cmd, 0, 4) as u32,
+            flags: read_le(cmd, 4, 4) as u32,
+            fence_id: read_le(cmd, 8, 8),
+            ctx_id: read_le(cmd, super::gpu3d::CTRL_HDR_CTX_ID_OFF, 4) as u32,
+            ring_idx: read_le(cmd, super::gpu3d::CTRL_HDR_RING_IDX_OFF, 1) as u8,
+        })
+    }
+
+    /// Whether the guest asked for this command to be fenced.
+    fn fenced(&self) -> bool {
+        self.flags & VIRTIO_GPU_FLAG_FENCE != 0
+    }
+
+    /// The `(ctx_id, ring_idx, fence_id)` identity of this command's fence.
+    fn fence_key(&self) -> FenceKey {
+        FenceKey {
+            ctx_id: self.ctx_id,
+            ring_idx: self.ring_idx,
+            fence_id: self.fence_id,
+        }
+    }
+}
+
+/// Identity of one in-flight fence. `ring_idx` is part of it, not an afterthought: two rings of the
+/// same context carry independent, independently-ordered fence streams.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+struct FenceKey {
+    ctx_id: u32,
+    ring_idx: u8,
+    fence_id: u64,
+}
+
+impl FenceKey {
+    fn of(fence: &FenceReq) -> Self {
+        Self {
+            ctx_id: fence.ctx_id,
+            ring_idx: fence.ring_idx,
+            fence_id: fence.fence_id,
+        }
+    }
+
+    /// Same context + same ring — i.e. the same ordered fence timeline.
+    fn same_ring(&self, other: &Self) -> bool {
+        self.ctx_id == other.ctx_id && self.ring_idx == other.ring_idx
+    }
+}
+
+/// A fenced command whose response is written but **not yet published**: it waits in
+/// [`Gpu::pending_fences`] until the host fence fires (or [`FENCE_DEADLINE`] expires).
+struct PendingFence {
+    /// Descriptor-chain head, i.e. the `id` `add_used` must publish.
+    head: u16,
+    /// The chain's device-writable descriptors, in chain order — where the response goes.
+    writable: Vec<(u64, u32)>,
+    /// The already-built response bytes. Held rather than written immediately so the guest cannot
+    /// observe a half-finished response, and written at the same moment the used entry is published.
+    resp: Vec<u8>,
+    /// When the command was dispatched — the watchdog's clock.
+    since: Instant,
+}
+
+/// What [`Gpu::dispatch`] decided to do with a command.
+///
+/// The whole of item 2.5 is this enum existing. Before it, `process_controlq` wrote the response and
+/// `add_used`'d it the instant `dispatch` returned, and `resp_hdr` echoed the guest's `fence_id` in
+/// that same response — so **every guest fence signalled at submit time, not at completion**.
+/// `vkWaitForFences` returned immediately, Mesa's `VirtioGpuAddressSpaceStream` `execBuffer` +
+/// `blob->wait()` pair both returned instantly, and any host work still in flight was free to tear.
+enum Disposition {
+    /// Publish now: write `0` into the chain's writable descriptors and `add_used`.
+    Complete(Vec<u8>),
+    /// Hold until the host fence identified by `key` completes.
+    Deferred { key: FenceKey, resp: Vec<u8> },
+}
+
+impl Disposition {
+    /// The response bytes, whichever arm this is. Only the test shim `Gpu::dispatch_resp` needs to
+    /// erase the distinction — production has to act on it.
+    #[cfg(test)]
+    fn into_resp(self) -> Vec<u8> {
+        match self {
+            Self::Complete(resp) | Self::Deferred { resp, .. } => resp,
+        }
+    }
 }
 
 /// The guest-address-space mapping boundary `RESOURCE_MAP_BLOB` / `RESOURCE_UNMAP_BLOB` cross.
@@ -367,6 +519,32 @@ pub struct Gpu {
     /// a guest that does not re-kick. Bounding the *present* costs nothing, because only the last
     /// frame of a batch can reach the drawable anyway.
     presented_this_batch: bool,
+    /// Fenced commands whose response is built but withheld until the host fence fires, oldest first
+    /// (see [`Disposition`] and [`Gpu::complete_fence`]). Insertion order is maintained so
+    /// publication order follows submission order.
+    ///
+    /// A `Vec` rather than a `HashMap`: it is bounded at [`MAX_PENDING_FENCES`] and the common
+    /// operation is "complete everything on this ring up to id N", which wants ordered iteration, not
+    /// point lookup.
+    ///
+    /// **Known gap, deliberately not closed here:** these entries hold descriptor-chain heads and
+    /// guest addresses from the ring as it was programmed when the command arrived. A guest device
+    /// reset (`vp_reset` is the very first thing Linux writes at PCI probe) that reprogrammed the ring
+    /// while entries were outstanding would publish them into the new one. This device has no reset
+    /// hook at all today, so adding one is its own change — noted so it is not added casually. The
+    /// exposure is bounded by [`FENCE_DEADLINE`]: after 2 s the map is empty again either way.
+    pending_fences: Vec<(FenceKey, PendingFence)>,
+    /// The [`MAX_PENDING_FENCES`] cap, as a **value** rather than a constant reference.
+    ///
+    /// Only so the fallback is reachable from a test: the control ring holds 256 descriptors, i.e. at
+    /// most 128 two-descriptor chains for the whole life of a `TestQueue`, so no test can push 1025
+    /// real chains to provoke it. A test lowers this; production sets it from the constant, which the
+    /// cap test also pins.
+    max_pending_fences: usize,
+    /// Whether `AEMU_GPU_SYNC_FENCES` forced the pre-deferral behaviour (every fenced command
+    /// completed at submit time). Sampled at construction so the whole of item 2.5 is revertable at
+    /// runtime without a rebuild.
+    sync_fences: bool,
 }
 
 impl Gpu {
@@ -394,6 +572,9 @@ impl Gpu {
             blob_maps: HashMap::new(),
             mapper: Box::new(HvfMapper),
             presented_this_batch: false,
+            pending_fences: Vec::new(),
+            max_pending_fences: MAX_PENDING_FENCES,
+            sync_fences: sync_fences_forced(),
         }
     }
 
@@ -428,6 +609,36 @@ impl Gpu {
         let mut g = Self::with_renderer(width, height, renderer);
         g.mapper = mapper;
         g
+    }
+
+    /// Force the pre-deferral (synchronous) fence behaviour on this device, as
+    /// `AEMU_GPU_SYNC_FENCES=1` does for the whole process.
+    ///
+    /// Test-only, and deliberately a per-device switch rather than an env write: the env is process
+    /// global and the test binary runs its tests in parallel, so mutating it would make every other
+    /// fence test's outcome depend on scheduling.
+    #[cfg(test)]
+    pub(crate) fn set_sync_fences(&mut self, on: bool) {
+        self.sync_fences = on;
+    }
+
+    /// Lower the deferred-fence cap so the [`MAX_PENDING_FENCES`] fallback is reachable without
+    /// pushing 1025 descriptor chains through a 256-entry ring. Test-only.
+    #[cfg(test)]
+    pub(crate) fn set_max_pending_fences(&mut self, n: usize) {
+        self.max_pending_fences = n;
+    }
+
+    /// Dispatch one command and return its response bytes, discarding whether the device would have
+    /// withheld publication until the host fence fired.
+    ///
+    /// Test-only. It exists because most device tests assert on *response content* — the parsed
+    /// fields, the error code, the payload — for which completion timing is irrelevant. The tests
+    /// that assert on timing drive [`Gpu::process_controlq`] + [`Gpu::complete_fence`] over a real
+    /// `TestQueue` instead, which is the only place the deferral is observable anyway.
+    #[cfg(test)]
+    fn dispatch_resp(&mut self, mem: &Mem, cmd: &[u8]) -> Vec<u8> {
+        self.dispatch(mem, cmd).into_resp()
     }
 
     /// A cloneable handle to the scanout framebuffer for the display layer.
@@ -493,7 +704,7 @@ impl Gpu {
             let written = if writable.is_empty() {
                 0
             } else {
-                let hdr = resp_hdr(VIRTIO_GPU_RESP_OK_NODATA, 0, 0);
+                let hdr = resp_hdr(VIRTIO_GPU_RESP_OK_NODATA, &ReqHdr::default());
                 write_scatter(mem, &writable, &hdr)
             };
             let _ = queue.add_used(mem, head, written);
@@ -513,30 +724,207 @@ impl Gpu {
             // `None` ⇒ the chain's device-readable half was rejected before it was assembled (over
             // MAX_CMD_BYTES). The chain is still answered and completed, so the guest ring cannot
             // stall on it.
-            let resp = match cmd {
+            let disposition = match cmd {
                 Some(cmd) => self.dispatch(mem, &cmd),
-                None => resp_hdr(VIRTIO_GPU_RESP_ERR_UNSPEC, 0, 0).to_vec(),
+                None => Disposition::Complete(
+                    resp_hdr(VIRTIO_GPU_RESP_ERR_UNSPEC, &ReqHdr::default()).to_vec(),
+                ),
             };
-            let written = write_scatter(mem, &writable, &resp);
-            let _ = queue.add_used(mem, head, written);
-            used = true;
+            match disposition {
+                Disposition::Complete(resp) => {
+                    let written = write_scatter(mem, &writable, &resp);
+                    let _ = queue.add_used(mem, head, written);
+                    used = true;
+                }
+                // A host fence now exists for this command; the guest must not see the response —
+                // and therefore must not see the fence signalled — until it fires. `Gpu::complete_fence`
+                // (fence thread) or `Gpu::sweep_stale_fences` (watchdog) publishes it later.
+                //
+                // **Insert-before-complete is guaranteed by the transport mutex, and it has to be.**
+                // gfxstream may complete a fence *synchronously* from inside `create_fence` /
+                // `submit_cmd`, i.e. before `dispatch` has even returned — so the completion can
+                // already be sitting in the fence channel when this push happens. That is safe only
+                // because this whole drain runs inside the MMIO exit with `ctx.pci` (or `ctx.virtio`)
+                // held, and the `gpu-fence` thread must take that same lock before it can look at
+                // `pending_fences`. It therefore cannot observe the map until every entry from this
+                // batch is in it. Without that ordering, an instantly-completed fence would find
+                // nothing pending, and the command it belonged to would sit unpublished until the 2 s
+                // watchdog — a 2-second stall per frame rather than a hang, and far harder to see.
+                Disposition::Deferred { key, resp } => {
+                    self.pending_fences.push((
+                        key,
+                        PendingFence {
+                            head,
+                            writable,
+                            resp,
+                            since: Instant::now(),
+                        },
+                    ));
+                }
+            }
         }
         used
     }
 
-    /// Parse one control command from its device-readable bytes and return the response bytes.
-    fn dispatch(&mut self, mem: &Mem, cmd: &[u8]) -> Vec<u8> {
-        if cmd.len() < CTRL_HDR_LEN {
-            return resp_hdr(VIRTIO_GPU_RESP_ERR_UNSPEC, 0, 0).to_vec();
+    /// Complete every deferred command on `fence`'s ring up to and including its fence id: write each
+    /// held response into the chain's writable descriptors and publish the used entry.
+    ///
+    /// Returns whether anything was published — the caller (the `gpu-fence` thread) then sets the
+    /// device ISR bit and raises the device's SPI. **Setting the ISR is not optional**: Linux's
+    /// `vp_interrupt` reads it first and returns `IRQ_NONE` when it is zero, so an SPI raised without
+    /// it is dropped on the floor.
+    ///
+    /// `fence_id <= ` rather than `==` on purpose. Fences on one `(ctx_id, ring_idx)` timeline
+    /// complete **in order**, and the guest's fence ids are a single monotonic counter
+    /// (`drv->current_fence_id`), so a completion at id N implies everything earlier on that ring is
+    /// done. Keying strictly on equality would leave an earlier command wedged forever if gfxstream
+    /// ever coalesced or dropped a callback — a permanent guest hang recoverable only by the watchdog.
+    pub fn complete_fence(&mut self, mem: &Mem, queue: &mut Queue, fence: &FenceReq) -> bool {
+        let signalled = FenceKey::of(fence);
+        let mut published = false;
+        let mut i = 0;
+        while i < self.pending_fences.len() {
+            let (key, _) = &self.pending_fences[i];
+            if key.same_ring(&signalled) && key.fence_id <= signalled.fence_id {
+                let (_, p) = self.pending_fences.remove(i);
+                Self::publish(mem, queue, &p);
+                published = true;
+            } else {
+                i += 1;
+            }
         }
-        let cmd_type = read_le(cmd, 0, 4) as u32;
-        let flags = read_le(cmd, 4, 4) as u32;
-        let fence = read_le(cmd, 8, 8);
-        let ok = |t: u32| resp_hdr(t, flags, fence).to_vec();
+        published
+    }
 
-        match cmd_type {
-            VIRTIO_GPU_CMD_GET_DISPLAY_INFO => self.resp_display_info(flags, fence),
-            VIRTIO_GPU_CMD_GET_EDID => self.resp_edid(flags, fence),
+    /// Force-complete every deferred command whose host fence has not fired within
+    /// [`FENCE_DEADLINE`], loudly. Returns whether anything was published.
+    ///
+    /// See [`FENCE_DEADLINE`] for why this exists at all. `now` is a parameter rather than an
+    /// `Instant::now()` inside so the deadline is testable without sleeping through it.
+    ///
+    /// Loud, but **bounded**: one line naming the oldest offender plus a count. A line per swept
+    /// command would be up to [`MAX_PENDING_FENCES`] lines every sweep tick, which buries the log this
+    /// message exists to be read in.
+    pub fn sweep_stale_fences(&mut self, mem: &Mem, queue: &mut Queue, now: Instant) -> bool {
+        let mut swept = 0usize;
+        let mut first: Option<(FenceKey, Duration)> = None;
+        let mut i = 0;
+        while i < self.pending_fences.len() {
+            let (key, p) = &self.pending_fences[i];
+            let waited = now.saturating_duration_since(p.since);
+            if waited < FENCE_DEADLINE {
+                i += 1;
+                continue;
+            }
+            first.get_or_insert((*key, waited));
+            let (_, p) = self.pending_fences.remove(i);
+            Self::publish(mem, queue, &p);
+            swept += 1;
+        }
+        if let Some((key, waited)) = first {
+            eprintln!(
+                "[gpu3d] fence WATCHDOG: {swept} guest command(s) force-completed; the oldest \
+                 (ctx={} ring={} fence_id={}) had waited {waited:?}, past the {FENCE_DEADLINE:?} \
+                 deadline. The host renderer has stopped signalling fences — the control ring is \
+                 being kept moving at the cost of torn or stale frames.",
+                key.ctx_id, key.ring_idx, key.fence_id
+            );
+        }
+        swept > 0
+    }
+
+    /// Write a held response into its chain and publish the used entry.
+    fn publish(mem: &Mem, queue: &mut Queue, p: &PendingFence) {
+        let written = write_scatter(mem, &p.writable, &p.resp);
+        let _ = queue.add_used(mem, p.head, written);
+    }
+
+    /// Everything the `gpu-fence` thread needs, in one call under one lock: complete each fence
+    /// gfxstream reported, then run the watchdog sweep. Takes the device's whole queue array so
+    /// [`CONTROLQ`] stays this module's business rather than the transport's.
+    pub fn drain_fences(
+        &mut self,
+        mem: &Mem,
+        queues: &mut [Queue],
+        fences: &[FenceReq],
+        now: Instant,
+    ) -> bool {
+        let Some(queue) = queues.get_mut(CONTROLQ as usize) else {
+            return false;
+        };
+        let mut published = false;
+        for f in fences {
+            published |= self.complete_fence(mem, queue, f);
+        }
+        published |= self.sweep_stale_fences(mem, queue, now);
+        published
+    }
+
+    /// Number of fenced commands currently withheld (test + diagnostics).
+    pub fn pending_fence_count(&self) -> usize {
+        self.pending_fences.len()
+    }
+
+    /// Parse one control command, run it, and decide whether its response may be published now.
+    ///
+    /// Structure, in order, and each step is load-bearing:
+    ///   1. parse the ctrl header **once** into a [`ReqHdr`] (item 2.1);
+    ///   2. run the command body;
+    ///   3. create the host fence for it if the guest asked for one — from **one** call site covering
+    ///      every opcode the device answers (item 2.4);
+    ///   4. defer the response iff a host fence was actually created (item 2.5).
+    ///
+    /// Step 3 is deliberately *after* step 2, not before the opcode match as originally sketched:
+    /// `stream_renderer_create_fence` enqueues the fence on the context's ring **behind** whatever is
+    /// already queued there, so a fence created before `submit_cmd` would signal before the work it
+    /// is supposed to fence. One call site is what makes "fenced command with no host fence"
+    /// structurally impossible; its position is what makes the fence mean anything.
+    fn dispatch(&mut self, mem: &Mem, cmd: &[u8]) -> Disposition {
+        let Some(req) = ReqHdr::parse(cmd) else {
+            return Disposition::Complete(
+                resp_hdr(VIRTIO_GPU_RESP_ERR_UNSPEC, &ReqHdr::default()).to_vec(),
+            );
+        };
+        let resp = self.dispatch_body(mem, cmd, &req);
+        if !self.route_header_fence(&req) {
+            return Disposition::Complete(resp);
+        }
+        // A host fence exists. Withhold the response unless an escape hatch says otherwise.
+        if self.sync_fences {
+            return Disposition::Complete(resp);
+        }
+        if self.pending_fences.len() >= self.max_pending_fences {
+            // Rate-limited: once the cap is hit every subsequent fenced command takes this branch, so
+            // an unlimited log here would flood exactly the path that is already in trouble.
+            static CAPPED: AtomicU64 = AtomicU64::new(0);
+            let n = CAPPED.fetch_add(1, Ordering::Relaxed);
+            if n == 0 {
+                eprintln!(
+                    "[gpu3d] {} fenced commands already awaiting host completion (cap {}) — \
+                     ctx={} ring={} fence_id={} and everything after it completes synchronously \
+                     until the backlog drains. Further occurrences counted, not logged.",
+                    self.pending_fences.len(),
+                    self.max_pending_fences,
+                    req.ctx_id,
+                    req.ring_idx,
+                    req.fence_id
+                );
+            }
+            return Disposition::Complete(resp);
+        }
+        Disposition::Deferred {
+            key: req.fence_key(),
+            resp,
+        }
+    }
+
+    /// Dispatch a command whose header has already been parsed, returning the response bytes.
+    fn dispatch_body(&mut self, mem: &Mem, cmd: &[u8], req: &ReqHdr) -> Vec<u8> {
+        let ok = |t: u32| resp_hdr(t, req).to_vec();
+
+        match req.cmd_type {
+            VIRTIO_GPU_CMD_GET_DISPLAY_INFO => self.resp_display_info(req),
+            VIRTIO_GPU_CMD_GET_EDID => self.resp_edid(req),
             VIRTIO_GPU_CMD_RESOURCE_CREATE_2D => {
                 // hdr(24) resource_id(24) format(28) width(32) height(36)
                 let id = read_le(cmd, 24, 4) as u32;
@@ -724,28 +1112,23 @@ impl Gpu {
             VIRTIO_GPU_CMD_UPDATE_CURSOR | VIRTIO_GPU_CMD_MOVE_CURSOR => {
                 ok(VIRTIO_GPU_RESP_OK_NODATA)
             }
-            other => {
+            _ => {
                 // Phase 3c: the 3D/virgl command block (0x02xx) + capset queries route into the
                 // gfxstream renderer when one is attached. Feature-off (or no renderer) ⇒ ERR_UNSPEC,
                 // exactly the 2D behaviour.
                 if self.renderer.is_some() {
-                    if let Some(resp) = self.dispatch_3d(mem, cmd, other, flags, fence) {
+                    if let Some(resp) = self.dispatch_3d(mem, cmd, req) {
                         return resp;
                     }
                 }
-                let _ = other;
                 ok(VIRTIO_GPU_RESP_ERR_UNSPEC)
             }
         }
     }
 
-    fn resp_display_info(&self, flags: u32, fence: u64) -> Vec<u8> {
+    fn resp_display_info(&self, req: &ReqHdr) -> Vec<u8> {
         let mut buf = vec![0u8; CTRL_HDR_LEN + VIRTIO_GPU_MAX_SCANOUTS * 24];
-        buf[..CTRL_HDR_LEN].copy_from_slice(&resp_hdr(
-            VIRTIO_GPU_RESP_OK_DISPLAY_INFO,
-            flags,
-            fence,
-        ));
+        buf[..CTRL_HDR_LEN].copy_from_slice(&resp_hdr(VIRTIO_GPU_RESP_OK_DISPLAY_INFO, req));
         // pmodes[0] = { rect{0,0,W,H}, enabled=1, flags=0 }.
         let base = CTRL_HDR_LEN;
         buf[base + 8..base + 12].copy_from_slice(&self.default_width.to_le_bytes());
@@ -758,10 +1141,10 @@ impl Gpu {
     /// `hdr(24) | size:u32 | padding:u32 | edid[..]`. The guest copies `size` bytes of `edid` into
     /// its DRM connector; a valid 128-byte base block with a physical image size gives it
     /// `width_mm`/`height_mm` > 0 → a real dpi in Android's DisplayViewport.
-    fn resp_edid(&self, flags: u32, fence: u64) -> Vec<u8> {
+    fn resp_edid(&self, req: &ReqHdr) -> Vec<u8> {
         let edid = build_edid(self.default_width, self.default_height, EDID_DPI);
         let mut buf = vec![0u8; CTRL_HDR_LEN + 8 + edid.len()];
-        buf[..CTRL_HDR_LEN].copy_from_slice(&resp_hdr(VIRTIO_GPU_RESP_OK_EDID, flags, fence));
+        buf[..CTRL_HDR_LEN].copy_from_slice(&resp_hdr(VIRTIO_GPU_RESP_OK_EDID, req));
         buf[CTRL_HDR_LEN..CTRL_HDR_LEN + 4].copy_from_slice(&(edid.len() as u32).to_le_bytes());
         // padding (CTRL_HDR_LEN+4 .. +8) stays 0.
         buf[CTRL_HDR_LEN + 8..].copy_from_slice(&edid);
@@ -884,20 +1267,13 @@ impl Gpu {
     /// Route a 3D/virgl (or capset) control command into the attached renderer. Returns the response
     /// bytes, or `None` if `cmd_type` isn't one this device handles (the caller answers ERR_UNSPEC).
     /// Precondition: `self.renderer.is_some()` (the caller checks before dispatching here).
-    fn dispatch_3d(
-        &mut self,
-        mem: &Mem,
-        cmd: &[u8],
-        cmd_type: u32,
-        flags: u32,
-        fence: u64,
-    ) -> Option<Vec<u8>> {
+    fn dispatch_3d(&mut self, mem: &Mem, cmd: &[u8], req: &ReqHdr) -> Option<Vec<u8>> {
         use super::gpu3d::*;
-        let nodata = |t: u32| resp_hdr(t, flags, fence).to_vec();
-        // ctx_id is carried in the ctrl header (offset 16) on every 3D command.
-        let ctx_id = read_le(cmd, CTRL_HDR_CTX_ID_OFF, 4) as u32;
+        let nodata = |t: u32| resp_hdr(t, req).to_vec();
+        // ctx_id came out of the ctrl header in `ReqHdr::parse`; every 3D command carries it there.
+        let ctx_id = req.ctx_id;
 
-        match cmd_type {
+        match req.cmd_type {
             VIRTIO_GPU_CMD_CTX_CREATE => {
                 let nlen = read_le(cmd, 24, 4) as usize;
                 let context_init = read_le(cmd, 28, 4) as u32;
@@ -908,12 +1284,10 @@ impl Gpu {
                     .as_mut()
                     .unwrap()
                     .context_create(ctx_id, context_init, name);
-                self.route_header_fence(cmd, flags, fence, ctx_id);
                 Some(nodata(VIRTIO_GPU_RESP_OK_NODATA))
             }
             VIRTIO_GPU_CMD_CTX_DESTROY => {
                 self.renderer.as_mut().unwrap().context_destroy(ctx_id);
-                self.route_header_fence(cmd, flags, fence, ctx_id);
                 Some(nodata(VIRTIO_GPU_RESP_OK_NODATA))
             }
             VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE => {
@@ -922,7 +1296,6 @@ impl Gpu {
                     .as_mut()
                     .unwrap()
                     .ctx_attach_resource(ctx_id, res);
-                self.route_header_fence(cmd, flags, fence, ctx_id);
                 Some(nodata(VIRTIO_GPU_RESP_OK_NODATA))
             }
             VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE => {
@@ -931,7 +1304,6 @@ impl Gpu {
                     .as_mut()
                     .unwrap()
                     .ctx_detach_resource(ctx_id, res);
-                self.route_header_fence(cmd, flags, fence, ctx_id);
                 Some(nodata(VIRTIO_GPU_RESP_OK_NODATA))
             }
             VIRTIO_GPU_CMD_RESOURCE_CREATE_3D => {
@@ -952,7 +1324,6 @@ impl Gpu {
                     .insert(args.resource_id, (args.width, args.height));
                 let rc = self.renderer.as_mut().unwrap().resource_create_3d(&args);
                 warn_rc(rc, "resource_create_3d", args.resource_id);
-                self.route_header_fence(cmd, flags, fence, ctx_id);
                 Some(nodata(VIRTIO_GPU_RESP_OK_NODATA))
             }
             VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D => {
@@ -983,7 +1354,6 @@ impl Gpu {
                     .unwrap()
                     .transfer_to_host_3d(ctx_id, &xfer, payload);
                 warn_rc(rc, "transfer_to_host_3d", xfer.resource_id);
-                self.route_header_fence(cmd, flags, fence, ctx_id);
                 Some(nodata(VIRTIO_GPU_RESP_OK_NODATA))
             }
             VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D => {
@@ -1013,7 +1383,6 @@ impl Gpu {
                 if let Some(backing) = self.res3d_backing.get(&xfer.resource_id) {
                     scatter_backing(mem, backing, &data);
                 }
-                self.route_header_fence(cmd, flags, fence, ctx_id);
                 Some(nodata(VIRTIO_GPU_RESP_OK_NODATA))
             }
             VIRTIO_GPU_CMD_SUBMIT_3D => {
@@ -1027,7 +1396,6 @@ impl Gpu {
                     .unwrap()
                     .submit_cmd(ctx_id, &mut payload);
                 warn_rc(rc, "submit_cmd", ctx_id);
-                self.route_header_fence(cmd, flags, fence, ctx_id);
                 Some(nodata(VIRTIO_GPU_RESP_OK_NODATA))
             }
             VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB => {
@@ -1080,7 +1448,6 @@ impl Gpu {
                         blob.resource_id, blob.blob_mem, blob.blob_flags, blob.size
                     );
                 }
-                self.route_header_fence(cmd, flags, fence, ctx_id);
                 Some(nodata(if rc == 0 {
                     VIRTIO_GPU_RESP_OK_NODATA
                 } else {
@@ -1113,7 +1480,6 @@ impl Gpu {
                     self.res3d.insert(resource_id, (width, height));
                 }
                 self.scanout_resource = resource_id;
-                self.route_header_fence(cmd, flags, fence, ctx_id);
                 Some(nodata(VIRTIO_GPU_RESP_OK_NODATA))
             }
             VIRTIO_GPU_CMD_RESOURCE_ASSIGN_UUID => {
@@ -1124,11 +1490,8 @@ impl Gpu {
                 // queries on the same resource, distinct across resources.
                 let resource_id = read_le(cmd, 24, 4) as u32;
                 let mut buf = vec![0u8; CTRL_HDR_LEN + 16];
-                buf[..CTRL_HDR_LEN].copy_from_slice(&resp_hdr(
-                    VIRTIO_GPU_RESP_OK_RESOURCE_UUID,
-                    flags,
-                    fence,
-                ));
+                buf[..CTRL_HDR_LEN]
+                    .copy_from_slice(&resp_hdr(VIRTIO_GPU_RESP_OK_RESOURCE_UUID, req));
                 buf[CTRL_HDR_LEN..CTRL_HDR_LEN + 4].copy_from_slice(b"AEMU");
                 buf[CTRL_HDR_LEN + 12..CTRL_HDR_LEN + 16]
                     .copy_from_slice(&resource_id.to_be_bytes());
@@ -1139,12 +1502,11 @@ impl Gpu {
                 // shared-memory window at PCI_SHM_BASE + offset via hv_vm_map (zero-copy ASG ring).
                 let resource_id = read_le(cmd, 24, 4) as u32;
                 let offset = read_le(cmd, 32, 8);
-                Some(self.map_blob(resource_id, offset, flags, fence))
+                Some(self.map_blob(resource_id, offset, req))
             }
             VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB => {
                 let resource_id = read_le(cmd, 24, 4) as u32;
                 self.unmap_blob(resource_id);
-                self.route_header_fence(cmd, flags, fence, ctx_id);
                 Some(nodata(VIRTIO_GPU_RESP_OK_NODATA))
             }
             VIRTIO_GPU_CMD_GET_CAPSET_INFO => {
@@ -1152,11 +1514,7 @@ impl Gpu {
                 let (id, max_ver, max_size) = self.renderer.as_mut().unwrap().capset_info(index);
                 self.capset_size.insert(id, max_size);
                 let mut buf = vec![0u8; CTRL_HDR_LEN + 16];
-                buf[..CTRL_HDR_LEN].copy_from_slice(&resp_hdr(
-                    VIRTIO_GPU_RESP_OK_CAPSET_INFO,
-                    flags,
-                    fence,
-                ));
+                buf[..CTRL_HDR_LEN].copy_from_slice(&resp_hdr(VIRTIO_GPU_RESP_OK_CAPSET_INFO, req));
                 buf[CTRL_HDR_LEN..CTRL_HDR_LEN + 4].copy_from_slice(&id.to_le_bytes());
                 buf[CTRL_HDR_LEN + 4..CTRL_HDR_LEN + 8].copy_from_slice(&max_ver.to_le_bytes());
                 buf[CTRL_HDR_LEN + 8..CTRL_HDR_LEN + 12].copy_from_slice(&max_size.to_le_bytes());
@@ -1172,11 +1530,7 @@ impl Gpu {
                     .unwrap()
                     .fill_caps(capset_id, version, &mut caps);
                 let mut buf = vec![0u8; CTRL_HDR_LEN + size];
-                buf[..CTRL_HDR_LEN].copy_from_slice(&resp_hdr(
-                    VIRTIO_GPU_RESP_OK_CAPSET,
-                    flags,
-                    fence,
-                ));
+                buf[..CTRL_HDR_LEN].copy_from_slice(&resp_hdr(VIRTIO_GPU_RESP_OK_CAPSET, req));
                 buf[CTRL_HDR_LEN..].copy_from_slice(&caps);
                 Some(buf)
             }
@@ -1184,23 +1538,41 @@ impl Gpu {
         }
     }
 
-    /// If the ctrl header's FENCE flag is set, route a `stream_renderer_create_fence` for it. (The
-    /// async fence-callback → guest-fence-ring → device-IRQ bridge needs the live renderer + GIC
-    /// handle and is exercised only with a real guest — deferred to Phase 4. The response already
-    /// echoes the fence id, which completes command-scoped fencing for the synchronous model here.)
-    fn route_header_fence(&mut self, cmd: &[u8], flags: u32, fence: u64, ctx_id: u32) {
-        if flags & VIRTIO_GPU_FLAG_FENCE == 0 {
-            return;
+    /// If the ctrl header asked for a fence, create the matching host fence
+    /// (`stream_renderer_create_fence`), which will later signal
+    /// [`gpu3d::on_fence_complete`](super::gpu3d::on_fence_complete).
+    ///
+    /// Returns **whether a host fence now exists that is going to complete** — the only condition
+    /// under which the guest's response may be withheld. Every other case (`no fence requested`, `no
+    /// renderer attached`, `create_fence` refused) must answer synchronously, because nothing will
+    /// ever arrive to publish it.
+    ///
+    /// This is the single call site for *all* ~24 opcodes the device answers. It used to be called
+    /// from ten of them, so `RESOURCE_MAP_BLOB`, `RESOURCE_ASSIGN_UUID`, `GET_CAPSET_INFO`,
+    /// `GET_CAPSET` and every 2D command created no host fence even with `FLAG_FENCE` set — harmless
+    /// while responses were synchronous, a guaranteed guest hang the moment they are not.
+    fn route_header_fence(&mut self, req: &ReqHdr) -> bool {
+        if !req.fenced() {
+            return false;
         }
-        let ring_idx = read_le(cmd, 20, 1) as u8;
-        if let Some(r) = self.renderer.as_mut() {
-            r.create_fence(&super::gpu3d::FenceReq {
-                flags,
-                fence_id: fence,
-                ctx_id,
-                ring_idx,
-            });
+        let Some(r) = self.renderer.as_mut() else {
+            return false;
+        };
+        let rc = r.create_fence(&FenceReq {
+            flags: req.flags,
+            fence_id: req.fence_id,
+            ctx_id: req.ctx_id,
+            ring_idx: req.ring_idx,
+        });
+        if rc != 0 {
+            eprintln!(
+                "[gpu3d] create_fence ctx={} ring={} fence_id={} -> rc={rc} — no host fence will \
+                 signal, so the command is completed synchronously",
+                req.ctx_id, req.ring_idx, req.fence_id
+            );
+            return false;
         }
+        true
     }
 
     /// Present coupling for a flushed virgl 3D scanout ColorBuffer. Two modes, selected by whether
@@ -1311,9 +1683,9 @@ impl Gpu {
     /// zero-copy ASG ring — the guest's Mesa `gfxstream_vk` then reads/writes the same bytes the host
     /// renderer does. Returns the wire response (`OK_MAP_INFO` on success, `ERR_UNSPEC` on any
     /// failure, with the exact cause logged so a boot report can name the next blocker).
-    fn map_blob(&mut self, resource_id: u32, offset: u64, flags: u32, fence: u64) -> Vec<u8> {
+    fn map_blob(&mut self, resource_id: u32, offset: u64, req: &ReqHdr) -> Vec<u8> {
         use crate::virtio::pci::{PCI_SHM_BASE, PCI_SHM_SIZE};
-        let err = |t: u32| resp_hdr(t, flags, fence).to_vec();
+        let err = |t: u32| resp_hdr(t, req).to_vec();
 
         let Some((host_ptr, size)) = self.renderer.as_mut().unwrap().resource_map(resource_id)
         else {
@@ -1366,11 +1738,8 @@ impl Gpu {
             "[gpu3d] map_blob res={resource_id} -> ipa {ipa:#x} size {size:#x} map_info {map_info:#x} (host-visible ASG ring live)"
         );
         let mut buf = vec![0u8; CTRL_HDR_LEN + 8];
-        buf[..CTRL_HDR_LEN].copy_from_slice(&resp_hdr(
-            super::gpu3d::VIRTIO_GPU_RESP_OK_MAP_INFO,
-            flags,
-            fence,
-        ));
+        buf[..CTRL_HDR_LEN]
+            .copy_from_slice(&resp_hdr(super::gpu3d::VIRTIO_GPU_RESP_OK_MAP_INFO, req));
         buf[CTRL_HDR_LEN..CTRL_HDR_LEN + 4].copy_from_slice(&map_info.to_le_bytes());
         buf
     }
@@ -1649,17 +2018,61 @@ fn write_scatter(mem: &Mem, writable: &[(u64, u32)], bytes: &[u8]) -> u32 {
     off as u32
 }
 
-/// Build a 24-byte `virtio_gpu_ctrl_hdr` response header. Echoes the request fence when the guest
-/// asked for one (`VIRTIO_GPU_FLAG_FENCE`).
-fn resp_hdr(resp_type: u32, req_flags: u32, fence: u64) -> [u8; CTRL_HDR_LEN] {
+/// Build a 24-byte `virtio_gpu_ctrl_hdr` response header, echoing back every field of `req` the
+/// guest needs to identify what this response completes.
+///
+/// The whole of item 2.1 is in the two `if`s below. This function allocated `[0u8; 24]` and then
+/// wrote only bytes `0..16`, with `flags` masked down to `req_flags & VIRTIO_GPU_FLAG_FENCE`. So on
+/// **every** response:
+///
+///   * `VIRTIO_GPU_FLAG_INFO_RING_IDX` (bit 1) was stripped, telling the guest this completion
+///     belongs to the device's global timeline even when it asked for a per-context one;
+///   * `ctx_id` (bytes 16..20) was zeroed;
+///   * `ring_idx` (byte 20) was zeroed.
+///
+/// Since the guest genuinely runs two rings, that reported every ring-1 fence as a ring-0 fence of
+/// context 0 — per-ring completion could not be routed at all.
+///
+/// The `if`s matter in the other direction too: a response must not *invent* an identity the request
+/// did not carry. An unfenced command answers with a zeroed `flags`/`fence_id`, and a fenced command
+/// that did not set `INFO_RING_IDX` answers with `ctx_id`/`ring_idx` left at zero, exactly as the
+/// guest's default-ring bookkeeping expects.
+fn resp_hdr(resp_type: u32, req: &ReqHdr) -> [u8; CTRL_HDR_LEN] {
     let mut h = [0u8; CTRL_HDR_LEN];
     h[0..4].copy_from_slice(&resp_type.to_le_bytes());
-    let flags = req_flags & VIRTIO_GPU_FLAG_FENCE;
+    let flags = req.flags & (VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX);
     h[4..8].copy_from_slice(&flags.to_le_bytes());
-    if flags != 0 {
-        h[8..16].copy_from_slice(&fence.to_le_bytes());
+    if flags & VIRTIO_GPU_FLAG_FENCE != 0 {
+        h[8..16].copy_from_slice(&req.fence_id.to_le_bytes());
+    }
+    if flags & VIRTIO_GPU_FLAG_INFO_RING_IDX != 0 {
+        h[super::gpu3d::CTRL_HDR_CTX_ID_OFF..super::gpu3d::CTRL_HDR_CTX_ID_OFF + 4]
+            .copy_from_slice(&req.ctx_id.to_le_bytes());
+        h[super::gpu3d::CTRL_HDR_RING_IDX_OFF] = req.ring_idx;
     }
     h
+}
+
+/// Environment variable that reverts item 2.5: every fenced command completes at submit time again,
+/// exactly as it did before deferred completion landed.
+const SYNC_FENCES_ENV: &str = "AEMU_GPU_SYNC_FENCES";
+
+/// Whether the operator asked for synchronous fence completion. Evaluated once, like
+/// [`present_readback_forced`].
+///
+/// Deferred completion is the largest behavioural change in the fence work — it moves *when* the
+/// guest observes every fenced command — so it ships with a runtime revert. Any value other than
+/// `0` enables it, so `AEMU_GPU_SYNC_FENCES=1` reads as it looks and `=0` does not silently enable
+/// the thing it appears to disable.
+fn sync_fences_forced() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| sync_fences_requested(std::env::var_os(SYNC_FENCES_ENV).as_deref()))
+}
+
+/// The pure decision [`sync_fences_forced`] caches, split out so it is testable without mutating the
+/// process environment (which no test can do safely while the others run in parallel).
+fn sync_fences_requested(v: Option<&std::ffi::OsStr>) -> bool {
+    v.is_some_and(|v| v != "0")
 }
 
 /// Read a little-endian value of `len` ∈ {1,2,4,8} bytes at `off`, zero-extended, bounds-safe.
@@ -1814,7 +2227,7 @@ mod tests {
         let gpu = Gpu::new(1024, 768);
         // Device advertises the EDID feature.
         assert_ne!(gpu.features() & VIRTIO_GPU_F_EDID, 0);
-        let resp = gpu.resp_edid(0, 0);
+        let resp = gpu.resp_edid(&ReqHdr::default());
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_OK_EDID as u64);
         assert_eq!(read_le(&resp, CTRL_HDR_LEN, 4), 128); // size field
                                                           // EDID payload begins at hdr(24)+size(4)+padding(4) = 32, with the header magic.
@@ -1824,17 +2237,128 @@ mod tests {
 
     #[test]
     fn resp_hdr_echoes_fence_only_when_requested() {
-        let no_fence = resp_hdr(VIRTIO_GPU_RESP_OK_NODATA, 0, 0xdead);
+        let no_fence = resp_hdr(
+            VIRTIO_GPU_RESP_OK_NODATA,
+            &ReqHdr {
+                fence_id: 0xdead,
+                ..ReqHdr::default()
+            },
+        );
         assert_eq!(read_le(&no_fence, 8, 8), 0);
-        let with_fence = resp_hdr(VIRTIO_GPU_RESP_OK_NODATA, VIRTIO_GPU_FLAG_FENCE, 0xdead);
+        let with_fence = resp_hdr(
+            VIRTIO_GPU_RESP_OK_NODATA,
+            &ReqHdr {
+                flags: VIRTIO_GPU_FLAG_FENCE,
+                fence_id: 0xdead,
+                ..ReqHdr::default()
+            },
+        );
         assert_eq!(read_le(&with_fence, 8, 8), 0xdead);
         assert_eq!(read_le(&with_fence, 0, 4), VIRTIO_GPU_RESP_OK_NODATA as u64);
+    }
+
+    // =============================================================================================
+    // 2.1 — the response header carries `ctx_id` / `ring_idx` / `FLAG_INFO_RING_IDX`.
+    // =============================================================================================
+
+    /// `resp_hdr` built `[0u8; 24]` and wrote only bytes `0..16`, masking `flags` down to
+    /// `FLAG_FENCE`. So `FLAG_INFO_RING_IDX` was stripped and bytes 16..21 were zeroed on every
+    /// response — the guest was told each completion belonged to ring 0 of context 0 no matter what
+    /// it had asked for, and per-ring fence completion could not be routed.
+    #[test]
+    fn resp_hdr_echoes_ring_idx_and_ctx_when_the_request_set_info_ring_idx() {
+        let req = ReqHdr {
+            cmd_type: 0,
+            flags: VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX,
+            fence_id: 0x4242,
+            ctx_id: 3,
+            ring_idx: 1,
+        };
+        let h = resp_hdr(VIRTIO_GPU_RESP_OK_NODATA, &req);
+
+        assert_eq!(
+            read_le(&h, 4, 4),
+            u64::from(VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX),
+            "both flag bits must survive into the response"
+        );
+        assert_eq!(read_le(&h, 8, 8), 0x4242);
+        assert_eq!(read_le(&h, 16, 4), 3, "ctx_id must be echoed");
+        assert_eq!(h[20], 1, "ring_idx must be echoed");
+        assert_eq!(&h[21..24], &[0, 0, 0], "the header padding stays zero");
+    }
+
+    /// The other direction: a response must not invent an identity the request did not carry. An
+    /// unfenced command answers with no fence and no ring, and a fenced command that stayed on the
+    /// default ring answers with `ctx_id`/`ring_idx` zero — which is what the guest's default-ring
+    /// bookkeeping expects.
+    #[test]
+    fn resp_hdr_does_not_invent_a_ring_idx_when_the_request_did_not_ask() {
+        // Fenced, but no INFO_RING_IDX: ctx_id/ring_idx present in the *request* are not echoed.
+        let fenced_default_ring = resp_hdr(
+            VIRTIO_GPU_RESP_OK_NODATA,
+            &ReqHdr {
+                flags: VIRTIO_GPU_FLAG_FENCE,
+                fence_id: 0x99,
+                ctx_id: 7,
+                ring_idx: 2,
+                ..ReqHdr::default()
+            },
+        );
+        assert_eq!(read_le(&fenced_default_ring, 4, 4), 1, "FENCE only");
+        assert_eq!(read_le(&fenced_default_ring, 8, 8), 0x99);
+        assert_eq!(
+            &fenced_default_ring[16..24],
+            &[0u8; 8],
+            "ctx_id + ring_idx must stay zero when the guest did not set INFO_RING_IDX"
+        );
+
+        // Wholly unfenced: nothing but the response type.
+        let unfenced = resp_hdr(
+            VIRTIO_GPU_RESP_OK_NODATA,
+            &ReqHdr {
+                fence_id: 0x99,
+                ctx_id: 7,
+                ring_idx: 2,
+                ..ReqHdr::default()
+            },
+        );
+        assert_eq!(&unfenced[4..24], &[0u8; 20]);
+        assert_eq!(read_le(&unfenced, 0, 4), VIRTIO_GPU_RESP_OK_NODATA as u64);
+    }
+
+    /// `ReqHdr::parse` is the one place the ctrl header is read, so its field offsets are the whole
+    /// wire contract: `le32 type | le32 flags | le64 fence_id | le32 ctx_id | u8 ring_idx | pad[3]`.
+    #[test]
+    fn req_hdr_parses_every_ctrl_header_field_at_its_wire_offset() {
+        let mut c = vec![0u8; CTRL_HDR_LEN];
+        c[0..4].copy_from_slice(&0x0207u32.to_le_bytes()); // SUBMIT_3D
+        c[4..8].copy_from_slice(&0b11u32.to_le_bytes());
+        c[8..16].copy_from_slice(&0xDEAD_BEEF_u64.to_le_bytes());
+        c[16..20].copy_from_slice(&5u32.to_le_bytes());
+        c[20] = 1;
+        c[21..24].copy_from_slice(&[0xAA, 0xBB, 0xCC]); // padding must be ignored
+
+        assert_eq!(
+            ReqHdr::parse(&c),
+            Some(ReqHdr {
+                cmd_type: 0x0207,
+                flags: 0b11,
+                fence_id: 0xDEAD_BEEF,
+                ctx_id: 5,
+                ring_idx: 1,
+            })
+        );
+        assert_eq!(
+            ReqHdr::parse(&c[..CTRL_HDR_LEN - 1]),
+            None,
+            "a command shorter than one header is not a command"
+        );
     }
 
     #[test]
     fn display_info_reports_default_mode() {
         let gpu = Gpu::new(1024, 768);
-        let resp = gpu.resp_display_info(0, 0);
+        let resp = gpu.resp_display_info(&ReqHdr::default());
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_OK_DISPLAY_INFO as u64);
         // pmodes[0].rect.width/height then enabled.
         assert_eq!(read_le(&resp, CTRL_HDR_LEN + 8, 4), 1024);
@@ -1852,14 +2376,14 @@ mod tests {
         cmd.extend_from_slice(&64u32.to_le_bytes()); // height
                                                      // dispatch needs a Mem; craft a tiny one.
         let mem = vm_memory::GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
-        let resp = gpu.dispatch(&mem, &cmd);
+        let resp = gpu.dispatch_resp(&mem, &cmd);
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_OK_NODATA as u64);
         assert!(gpu.resources.contains_key(&7));
 
         let mut unref = hdr(VIRTIO_GPU_CMD_RESOURCE_UNREF).to_vec();
         unref.extend_from_slice(&7u32.to_le_bytes());
         unref.extend_from_slice(&0u32.to_le_bytes());
-        gpu.dispatch(&mem, &unref);
+        gpu.dispatch_resp(&mem, &unref);
         assert!(!gpu.resources.contains_key(&7));
     }
 
@@ -1881,7 +2405,7 @@ mod tests {
         create.extend_from_slice(&1u32.to_le_bytes());
         create.extend_from_slice(&2u32.to_le_bytes());
         create.extend_from_slice(&2u32.to_le_bytes());
-        gpu.dispatch(&mem, &create);
+        gpu.dispatch_resp(&mem, &create);
 
         // attach_backing id=1 nr=1 (addr=0x1000,len=16)
         let mut attach = hdr(VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING).to_vec();
@@ -1890,14 +2414,14 @@ mod tests {
         attach.extend_from_slice(&0x1000u64.to_le_bytes());
         attach.extend_from_slice(&16u32.to_le_bytes());
         attach.extend_from_slice(&0u32.to_le_bytes());
-        gpu.dispatch(&mem, &attach);
+        gpu.dispatch_resp(&mem, &attach);
 
         // set_scanout scanout0 -> resource1
         let mut scan = hdr(VIRTIO_GPU_CMD_SET_SCANOUT).to_vec();
         scan.extend_from_slice(&[0u8; 16]); // rect
         scan.extend_from_slice(&0u32.to_le_bytes()); // scanout_id
         scan.extend_from_slice(&1u32.to_le_bytes()); // resource_id
-        gpu.dispatch(&mem, &scan);
+        gpu.dispatch_resp(&mem, &scan);
 
         // transfer_to_host_2d full 2x2, offset 0, id 1
         let mut xfer = hdr(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D).to_vec();
@@ -1908,7 +2432,7 @@ mod tests {
         xfer.extend_from_slice(&0u64.to_le_bytes()); // offset
         xfer.extend_from_slice(&1u32.to_le_bytes()); // resource_id
         xfer.extend_from_slice(&0u32.to_le_bytes()); // padding
-        gpu.dispatch(&mem, &xfer);
+        gpu.dispatch_resp(&mem, &xfer);
 
         // flush id=1
         let handle = gpu.handle();
@@ -1917,7 +2441,7 @@ mod tests {
         flush.extend_from_slice(&[0u8; 16]); // rect
         flush.extend_from_slice(&1u32.to_le_bytes()); // resource_id
         flush.extend_from_slice(&0u32.to_le_bytes());
-        gpu.dispatch(&mem, &flush);
+        gpu.dispatch_resp(&mem, &flush);
 
         assert_eq!(handle.generation(), before + 1);
         let fb = handle.fb.lock().unwrap();
@@ -2028,7 +2552,7 @@ mod tests {
         let mem = vm_memory::GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
         let mut gpu = Gpu::new(64, 64);
 
-        let resp = gpu.dispatch(&mem, &create_2d_cmd(1, 0x10000, 0x10000));
+        let resp = gpu.dispatch_resp(&mem, &create_2d_cmd(1, 0x10000, 0x10000));
 
         assert_eq!(
             read_le(&resp, 0, 4),
@@ -2054,13 +2578,13 @@ mod tests {
             MAX_RESOURCE_BYTES,
             "this test is the boundary case — keep it on the boundary"
         );
-        let resp = gpu.dispatch(&mem, &create_2d_cmd(1, 8192, 8192));
+        let resp = gpu.dispatch_resp(&mem, &create_2d_cmd(1, 8192, 8192));
 
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_ERR_UNSPEC as u64);
         assert!(gpu.resources.is_empty());
 
         // One pixel under the cap is still accepted, so the limit rejects the oversized case only.
-        let ok = gpu.dispatch(&mem, &create_2d_cmd(2, 8192, 8191));
+        let ok = gpu.dispatch_resp(&mem, &create_2d_cmd(2, 8192, 8191));
         assert_eq!(read_le(&ok, 0, 4), VIRTIO_GPU_RESP_OK_NODATA as u64);
         assert!(gpu.resources.contains_key(&2));
     }
@@ -2075,8 +2599,8 @@ mod tests {
         mem.write_slice(&[0xABu8; 16], GuestAddress(0x1000))
             .unwrap();
         let mut gpu = Gpu::new(2, 2);
-        gpu.dispatch(&mem, &create_2d_cmd(1, 2, 2));
-        gpu.dispatch(&mem, &attach_cmd(1, &[(0x1000, 16)]));
+        gpu.dispatch_resp(&mem, &create_2d_cmd(1, 2, 2));
+        gpu.dispatch_resp(&mem, &attach_cmd(1, &[(0x1000, 16)]));
 
         // 4x4 at (1,1) on a 2x2 resource — every row is at least partly out of bounds.
         let mut xfer = hdr(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D).to_vec();
@@ -2086,7 +2610,7 @@ mod tests {
         xfer.extend_from_slice(&0u64.to_le_bytes()); // offset
         xfer.extend_from_slice(&1u32.to_le_bytes()); // resource_id
         xfer.extend_from_slice(&0u32.to_le_bytes()); // padding
-        let resp = gpu.dispatch(&mem, &xfer);
+        let resp = gpu.dispatch_resp(&mem, &xfer);
 
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_OK_NODATA as u64);
         assert!(
@@ -2103,7 +2627,7 @@ mod tests {
         good.extend_from_slice(&0u64.to_le_bytes());
         good.extend_from_slice(&1u32.to_le_bytes());
         good.extend_from_slice(&0u32.to_le_bytes());
-        gpu.dispatch(&mem, &good);
+        gpu.dispatch_resp(&mem, &good);
         assert_eq!(gpu.resources[&1].pixels, vec![0xABu8; 16]);
     }
 
@@ -2140,6 +2664,7 @@ mod tests {
 /// so it needs no live guest, no host Vulkan driver, no GPU — it proves the parse + routing, per the task.
 #[cfg(test)]
 mod tests_3d {
+    use super::super::gpu3d;
     use super::super::gpu3d::{Call, MockRenderer, VIRTIO_GPU_F_VIRGL};
     use super::*;
 
@@ -2206,7 +2731,7 @@ mod tests_3d {
         ctx.extend_from_slice(&4u32.to_le_bytes()); // nlen
         ctx.extend_from_slice(&2u32.to_le_bytes()); // context_init
         ctx.extend_from_slice(b"aemu"); // debug name (nlen bytes)
-        let resp = gpu.dispatch(&mem, &ctx);
+        let resp = gpu.dispatch_resp(&mem, &ctx);
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_OK_NODATA as u64);
 
         // SUBMIT_3D ctx_id=1, size=8, payload = 8 sentinel bytes (the gfxstream command stream).
@@ -2215,7 +2740,7 @@ mod tests_3d {
         sub.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // size
         sub.extend_from_slice(&0u32.to_le_bytes()); // padding
         sub.extend_from_slice(&payload);
-        let resp = gpu.dispatch(&mem, &sub);
+        let resp = gpu.dispatch_resp(&mem, &sub);
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_OK_NODATA as u64);
 
         // Assert the mock observed both routed calls, with the forwarded ctx id + verbatim cmd bytes.
@@ -2246,14 +2771,14 @@ mod tests_3d {
         for v in [10u32, 2, 67, 1, 32, 32, 1, 1, 0, 0, 0, 0] {
             cr.extend_from_slice(&v.to_le_bytes()); // id,target,format,bind,w,h,depth,array,last,nr,flags,pad
         }
-        gpu.dispatch(&mem, &cr);
+        gpu.dispatch_resp(&mem, &cr);
 
         // SET_SCANOUT scanout0 -> resource 10 (a 3D resource — sizes the scanout to 32x32).
         let mut scan = hdr3d(VIRTIO_GPU_CMD_SET_SCANOUT, 0);
         scan.extend_from_slice(&[0u8; 16]); // rect
         scan.extend_from_slice(&0u32.to_le_bytes()); // scanout_id
         scan.extend_from_slice(&10u32.to_le_bytes()); // resource_id
-        gpu.dispatch(&mem, &scan);
+        gpu.dispatch_resp(&mem, &scan);
 
         // RESOURCE_FLUSH resource 10 → read_pixels back into the scanout + bump generation.
         let handle = gpu.handle();
@@ -2262,7 +2787,7 @@ mod tests_3d {
         flush.extend_from_slice(&[0u8; 16]); // rect
         flush.extend_from_slice(&10u32.to_le_bytes()); // resource_id
         flush.extend_from_slice(&0u32.to_le_bytes());
-        gpu.dispatch(&mem, &flush);
+        gpu.dispatch_resp(&mem, &flush);
 
         assert_eq!(
             handle.generation(),
@@ -2311,13 +2836,13 @@ mod tests_3d {
         scan.extend_from_slice(&[0u8; 16]); // rect
         scan.extend_from_slice(&0u32.to_le_bytes()); // scanout_id
         scan.extend_from_slice(&rid.to_le_bytes());
-        gpu.dispatch(mem, &scan);
+        gpu.dispatch_resp(mem, &scan);
 
         let mut flush = hdr3d(VIRTIO_GPU_CMD_RESOURCE_FLUSH, 0);
         flush.extend_from_slice(&[0u8; 16]); // rect
         flush.extend_from_slice(&rid.to_le_bytes());
         flush.extend_from_slice(&0u32.to_le_bytes());
-        gpu.dispatch(mem, &flush);
+        gpu.dispatch_resp(mem, &flush);
 
         gpu.handle()
     }
@@ -2437,7 +2962,7 @@ mod tests_3d {
         for v in [id, 2, 67, 1, w, h, 1, 1, 0, 0, 0, 0] {
             cr.extend_from_slice(&v.to_le_bytes());
         }
-        gpu.dispatch(mem, &cr);
+        gpu.dispatch_resp(mem, &cr);
     }
 
     /// `RESOURCE_ATTACH_BACKING` for a 3D resource must hand gfxstream **guest-memory host pointers**,
@@ -2459,7 +2984,7 @@ mod tests_3d {
             att.extend_from_slice(&len.to_le_bytes());
             att.extend_from_slice(&0u32.to_le_bytes()); // padding
         }
-        let resp = gpu.dispatch(&mem, &att);
+        let resp = gpu.dispatch_resp(&mem, &att);
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_OK_NODATA as u64);
 
         let calls = log.lock().unwrap();
@@ -2486,12 +3011,12 @@ mod tests_3d {
         att.extend_from_slice(&0x100u64.to_le_bytes());
         att.extend_from_slice(&0x40u32.to_le_bytes());
         att.extend_from_slice(&0u32.to_le_bytes());
-        gpu.dispatch(&mem, &att);
+        gpu.dispatch_resp(&mem, &att);
 
         let mut unref = hdr3d(VIRTIO_GPU_CMD_RESOURCE_UNREF, 0);
         unref.extend_from_slice(&10u32.to_le_bytes());
         unref.extend_from_slice(&0u32.to_le_bytes());
-        let resp = gpu.dispatch(&mem, &unref);
+        let resp = gpu.dispatch_resp(&mem, &unref);
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_OK_NODATA as u64);
 
         let calls = log.lock().unwrap();
@@ -2524,12 +3049,12 @@ mod tests_3d {
         att.extend_from_slice(&0x100u64.to_le_bytes());
         att.extend_from_slice(&0x40u32.to_le_bytes());
         att.extend_from_slice(&0u32.to_le_bytes());
-        gpu.dispatch(&mem, &att);
+        gpu.dispatch_resp(&mem, &att);
 
         let mut det = hdr3d(VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING, 0);
         det.extend_from_slice(&11u32.to_le_bytes());
         det.extend_from_slice(&0u32.to_le_bytes());
-        gpu.dispatch(&mem, &det);
+        gpu.dispatch_resp(&mem, &det);
 
         let calls = log.lock().unwrap();
         assert!(
@@ -2560,7 +3085,7 @@ mod tests_3d {
         scan.extend_from_slice(&0u32.to_le_bytes()); // padding
         scan.extend_from_slice(&[0u8; 32]); // strides[4] + offsets[4]
 
-        let resp = gpu.dispatch(&mem, &scan);
+        let resp = gpu.dispatch_resp(&mem, &scan);
         assert_eq!(
             read_le(&resp, 0, 4),
             VIRTIO_GPU_RESP_OK_NODATA as u64,
@@ -2591,7 +3116,7 @@ mod tests_3d {
             let mut c = hdr3d(VIRTIO_GPU_CMD_RESOURCE_ASSIGN_UUID, 0);
             c.extend_from_slice(&id.to_le_bytes());
             c.extend_from_slice(&0u32.to_le_bytes());
-            let resp = gpu.dispatch(&mem, &c);
+            let resp = gpu.dispatch_resp(&mem, &c);
             assert_eq!(
                 read_le(&resp, 0, 4),
                 VIRTIO_GPU_RESP_OK_RESOURCE_UUID as u64
@@ -2667,7 +3192,7 @@ mod tests_3d {
         let (mut gpu, log) = blob_gpu(Box::new(mapper));
         let mem = mem();
 
-        let resp = gpu.dispatch(&mem, &map_blob_cmd(BLOB_RES, BLOB_OFFSET));
+        let resp = gpu.dispatch_resp(&mem, &map_blob_cmd(BLOB_RES, BLOB_OFFSET));
 
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_OK_MAP_INFO as u64);
         assert_eq!(
@@ -2712,7 +3237,7 @@ mod tests_3d {
         let (mut gpu, log) = blob_gpu(Box::new(mapper));
         let mem = mem();
 
-        let resp = gpu.dispatch(&mem, &map_blob_cmd(BLOB_RES, BLOB_OFFSET));
+        let resp = gpu.dispatch_resp(&mem, &map_blob_cmd(BLOB_RES, BLOB_OFFSET));
 
         assert_eq!(
             read_le(&resp, 0, 4),
@@ -2750,7 +3275,7 @@ mod tests_3d {
 
         // Aligned, inside the window itself, but offset + BLOB_SIZE runs past its end.
         let offset = PCI_SHM_SIZE - 0x4000;
-        let resp = gpu.dispatch(&mem, &map_blob_cmd(BLOB_RES, offset));
+        let resp = gpu.dispatch_resp(&mem, &map_blob_cmd(BLOB_RES, offset));
 
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_ERR_UNSPEC as u64);
         assert!(
@@ -2781,7 +3306,7 @@ mod tests_3d {
         let (mut gpu, _log) = blob_gpu(Box::new(mapper));
         let mem = mem();
 
-        let resp = gpu.dispatch(&mem, &map_blob_cmd(BLOB_RES, u64::MAX));
+        let resp = gpu.dispatch_resp(&mem, &map_blob_cmd(BLOB_RES, u64::MAX));
 
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_ERR_UNSPEC as u64);
         assert!(
@@ -2810,17 +3335,17 @@ mod tests_3d {
             size: BLOB_SIZE,
         };
 
-        let first = gpu.dispatch(&mem, &map_blob_cmd(BLOB_RES, BLOB_OFFSET));
+        let first = gpu.dispatch_resp(&mem, &map_blob_cmd(BLOB_RES, BLOB_OFFSET));
         assert_eq!(read_le(&first, 0, 4), VIRTIO_GPU_RESP_OK_MAP_INFO as u64);
 
-        let unmap = gpu.dispatch(&mem, &unmap_blob_cmd(BLOB_RES));
+        let unmap = gpu.dispatch_resp(&mem, &unmap_blob_cmd(BLOB_RES));
         assert_eq!(read_le(&unmap, 0, 4), VIRTIO_GPU_RESP_OK_NODATA as u64);
         assert!(
             gpu.blob_maps.is_empty(),
             "unmap must drop the live-map bookkeeping"
         );
 
-        let second = gpu.dispatch(&mem, &map_blob_cmd(BLOB_RES, BLOB_OFFSET));
+        let second = gpu.dispatch_resp(&mem, &map_blob_cmd(BLOB_RES, BLOB_OFFSET));
         assert_eq!(
             read_le(&second, 0, 4),
             VIRTIO_GPU_RESP_OK_MAP_INFO as u64,
@@ -2934,7 +3459,7 @@ mod tests_3d {
         let mem = mem(); // 0x1000 bytes of guest RAM at 0
         create_3d(&mut gpu, &mem, 10, 32, 32);
 
-        let resp = gpu.dispatch(&mem, &attach_3d_cmd(10, &[(0xF00, 0xFFFF_FFFF)]));
+        let resp = gpu.dispatch_resp(&mem, &attach_3d_cmd(10, &[(0xF00, 0xFFFF_FFFF)]));
 
         assert_eq!(
             read_le(&resp, 0, 4),
@@ -2965,7 +3490,7 @@ mod tests_3d {
         create_3d(&mut gpu, &mem, 10, 32, 32);
 
         let entries = [(0x100u64, 0x40u32), (0x900, 0x1000), (0x200, 0x80)];
-        let resp = gpu.dispatch(&mem, &attach_3d_cmd(10, &entries));
+        let resp = gpu.dispatch_resp(&mem, &attach_3d_cmd(10, &entries));
 
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_ERR_UNSPEC as u64);
         assert!(gpu.res3d_backing.is_empty());
@@ -2986,7 +3511,7 @@ mod tests_3d {
         let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
         let mem = mem();
 
-        let resp = gpu.dispatch(&mem, &create_blob_cmd(9, 0x1000, &[(0xF00, 0xFFFF_FFFF)]));
+        let resp = gpu.dispatch_resp(&mem, &create_blob_cmd(9, 0x1000, &[(0xF00, 0xFFFF_FFFF)]));
 
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_ERR_UNSPEC as u64);
         assert!(
@@ -3005,7 +3530,7 @@ mod tests_3d {
 
         // The in-range form of the same command is still accepted, so the check rejects the range and
         // not the code path.
-        let ok = gpu.dispatch(&mem, &create_blob_cmd(9, 0x100, &[(0x100, 0x100)]));
+        let ok = gpu.dispatch_resp(&mem, &create_blob_cmd(9, 0x100, &[(0x100, 0x100)]));
         assert_eq!(read_le(&ok, 0, 4), VIRTIO_GPU_RESP_OK_NODATA as u64);
         assert_eq!(gpu.blobs.get(&9), Some(&0x100));
     }
@@ -3018,7 +3543,7 @@ mod tests_3d {
         let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
         let mem = mem();
 
-        let resp = gpu.dispatch(&mem, &set_scanout_blob_cmd(7, 0x10000, 0x10000));
+        let resp = gpu.dispatch_resp(&mem, &set_scanout_blob_cmd(7, 0x10000, 0x10000));
 
         assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_ERR_UNSPEC as u64);
         assert!(
@@ -3051,10 +3576,10 @@ mod tests_3d {
         create_3d(&mut gpu, &mem, 10, 4, 4);
         create_3d(&mut gpu, &mem, 11, 4, 4);
         // Resource 11 gets a real backing; resource 10 deliberately gets none.
-        gpu.dispatch(&mem, &attach_3d_cmd(11, &[(0x100, 0x40)]));
+        gpu.dispatch_resp(&mem, &attach_3d_cmd(11, &[(0x100, 0x40)]));
 
-        gpu.dispatch(&mem, &transfer_to_host_3d_cmd(10, 4, 4));
-        gpu.dispatch(&mem, &transfer_to_host_3d_cmd(11, 4, 4));
+        gpu.dispatch_resp(&mem, &transfer_to_host_3d_cmd(10, 4, 4));
+        gpu.dispatch_resp(&mem, &transfer_to_host_3d_cmd(11, 4, 4));
 
         let calls = log.lock().unwrap();
         assert!(
@@ -3078,6 +3603,12 @@ mod tests_3d {
     /// GPU→CPU readback — so a batch of N flushes must cost ONE present. Not an iteration cap: the
     /// ring is 256 deep and stopping early risks stalling a guest that does not re-kick. Each flush
     /// still advances the generation, which is what `wait_stable` and the redraw trigger read.
+    ///
+    /// The three chains are **fenced**, so since item 2.5 they are published by `complete_fence`
+    /// rather than by `process_controlq` — the presents, the generation bumps and the per-chain
+    /// responses are all unchanged, only the moment of publication moved. That is exercised directly
+    /// by `a_fenced_command_is_not_completed_until_the_host_fence_fires`; here it just means the
+    /// fences have to be fired before the used ring is inspected.
     #[test]
     fn at_most_one_present_runs_per_controlq_batch() {
         use super::super::testkit::TestQueue;
@@ -3095,14 +3626,20 @@ mod tests_3d {
         scan.extend_from_slice(&[0u8; 16]); // rect
         scan.extend_from_slice(&0u32.to_le_bytes()); // scanout_id
         scan.extend_from_slice(&10u32.to_le_bytes()); // resource_id
-        gpu.dispatch(&tq.mem, &scan);
+        gpu.dispatch_resp(&tq.mem, &scan);
 
         let before = gpu.handle().generation();
         let heads: Vec<u16> = (0..3)
             .map(|i| tq.push_chain(&fenced_flush_cmd(10, 0x100 + i), &[CTRL_HDR_LEN as u32]))
             .collect();
 
-        assert!(gpu.process_controlq(&tq.mem, &mut tq.queue));
+        gpu.process_controlq(&tq.mem, &mut tq.queue);
+        for i in 0..3u64 {
+            assert!(
+                gpu.complete_fence(&tq.mem, &mut tq.queue, &fence_of(0, 0, 0x100 + i)),
+                "each host fence must publish its own chain"
+            );
+        }
 
         assert_eq!(tq.used().len(), 3, "all three chains must be completed");
         for (i, &head) in heads.iter().enumerate() {
@@ -3126,5 +3663,578 @@ mod tests_3d {
             1,
             "only one present may run per control-queue batch"
         );
+    }
+
+    // =============================================================================================
+    // 2.4 + 2.5 — one host fence per fenced command, and deferred completion.
+    //
+    // Before this, `process_controlq` wrote the response and `add_used`'d it the instant `dispatch`
+    // returned, and that same response echoed the guest's `fence_id` — so **every** guest fence
+    // signalled at submit time. Mesa's `ResourceTracker` fences real Vulkan queue submissions with
+    // `kFenceOut | kRingIdx` and `VirtioGpuAddressSpaceStream` does `execBuffer(...)` then
+    // `blob->wait()`; all of it returned instantly, making `vkWaitForFences` a no-op and every frame
+    // a candidate for tearing.
+    //
+    // And `route_header_fence` was called from only the ten 3D arms, so `RESOURCE_MAP_BLOB`,
+    // `RESOURCE_ASSIGN_UUID`, `GET_CAPSET_INFO`, `GET_CAPSET` and every 2D command created no host
+    // fence at all — invisible while responses were synchronous, a guaranteed hang once they are not.
+    // =============================================================================================
+
+    /// The `(ctx_id, ring_idx, fence_id)` a host fence completion carries.
+    fn fence_of(ctx_id: u32, ring_idx: u8, fence_id: u64) -> super::super::gpu3d::FenceReq {
+        super::super::gpu3d::FenceReq {
+            flags: VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX,
+            fence_id,
+            ctx_id,
+            ring_idx,
+        }
+    }
+
+    /// A command of `cmd_type` whose ctrl header asks for a per-ring fence, with 128 zero bytes of
+    /// payload — enough for the longest command the device parses (`SET_SCANOUT_BLOB`, 96 B).
+    fn fenced_cmd(cmd_type: u32, ctx_id: u32, ring_idx: u8, fence_id: u64) -> Vec<u8> {
+        let mut c = vec![0u8; CTRL_HDR_LEN + 128];
+        c[0..4].copy_from_slice(&cmd_type.to_le_bytes());
+        c[4..8].copy_from_slice(
+            &(VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX).to_le_bytes(),
+        );
+        c[8..16].copy_from_slice(&fence_id.to_le_bytes());
+        c[16..20].copy_from_slice(&ctx_id.to_le_bytes());
+        c[20] = ring_idx;
+        c
+    }
+
+    /// The `Call::CreateFence`s a mock recorded, in order.
+    fn fences_created(log: &super::super::gpu3d::CallLog) -> Vec<super::super::gpu3d::FenceReq> {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                Call::CreateFence(f) => Some(*f),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every opcode this device answers, by name. Kept exhaustive on purpose: the point of moving
+    /// `route_header_fence` to a single site in `dispatch` is that adding an opcode cannot introduce a
+    /// fenced command with no host fence, and this table is what proves the current set is covered.
+    const HANDLED_OPCODES: &[(u32, &str)] = &[
+        // 2D control block — NONE of these created a host fence before item 2.4.
+        (VIRTIO_GPU_CMD_GET_DISPLAY_INFO, "GET_DISPLAY_INFO"),
+        (VIRTIO_GPU_CMD_GET_EDID, "GET_EDID"),
+        (VIRTIO_GPU_CMD_RESOURCE_CREATE_2D, "RESOURCE_CREATE_2D"),
+        (VIRTIO_GPU_CMD_RESOURCE_UNREF, "RESOURCE_UNREF"),
+        (VIRTIO_GPU_CMD_SET_SCANOUT, "SET_SCANOUT"),
+        (VIRTIO_GPU_CMD_RESOURCE_FLUSH, "RESOURCE_FLUSH"),
+        (VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D, "TRANSFER_TO_HOST_2D"),
+        (
+            VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING,
+            "RESOURCE_ATTACH_BACKING",
+        ),
+        (
+            VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING,
+            "RESOURCE_DETACH_BACKING",
+        ),
+        (VIRTIO_GPU_CMD_UPDATE_CURSOR, "UPDATE_CURSOR"),
+        (VIRTIO_GPU_CMD_MOVE_CURSOR, "MOVE_CURSOR"),
+        // 3D block — these ten already did.
+        (gpu3d::VIRTIO_GPU_CMD_CTX_CREATE, "CTX_CREATE"),
+        (gpu3d::VIRTIO_GPU_CMD_CTX_DESTROY, "CTX_DESTROY"),
+        (
+            gpu3d::VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE,
+            "CTX_ATTACH_RESOURCE",
+        ),
+        (
+            gpu3d::VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE,
+            "CTX_DETACH_RESOURCE",
+        ),
+        (
+            gpu3d::VIRTIO_GPU_CMD_RESOURCE_CREATE_3D,
+            "RESOURCE_CREATE_3D",
+        ),
+        (
+            gpu3d::VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D,
+            "TRANSFER_TO_HOST_3D",
+        ),
+        (
+            gpu3d::VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D,
+            "TRANSFER_FROM_HOST_3D",
+        ),
+        (gpu3d::VIRTIO_GPU_CMD_SUBMIT_3D, "SUBMIT_3D"),
+        (
+            gpu3d::VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB,
+            "RESOURCE_CREATE_BLOB",
+        ),
+        (gpu3d::VIRTIO_GPU_CMD_SET_SCANOUT_BLOB, "SET_SCANOUT_BLOB"),
+        // …and these four did NOT, despite being 3D-block commands.
+        (gpu3d::VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB, "RESOURCE_MAP_BLOB"),
+        (
+            gpu3d::VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB,
+            "RESOURCE_UNMAP_BLOB",
+        ),
+        (
+            gpu3d::VIRTIO_GPU_CMD_RESOURCE_ASSIGN_UUID,
+            "RESOURCE_ASSIGN_UUID",
+        ),
+        (gpu3d::VIRTIO_GPU_CMD_GET_CAPSET_INFO, "GET_CAPSET_INFO"),
+        (gpu3d::VIRTIO_GPU_CMD_GET_CAPSET, "GET_CAPSET"),
+    ];
+
+    /// Table-drive **every** opcode the device answers with `FLAG_FENCE | FLAG_INFO_RING_IDX` and
+    /// assert each one creates exactly one host fence carrying the request's `(ctx_id, ring_idx,
+    /// fence_id)`, and answers with those same ids echoed back.
+    ///
+    /// `RESOURCE_MAP_BLOB`, `RESOURCE_ASSIGN_UUID`, `GET_CAPSET_INFO`, `GET_CAPSET` and all eleven 2D
+    /// commands fail this test as the code stood before item 2.4.
+    #[test]
+    fn every_command_the_device_answers_creates_a_host_fence_when_asked() {
+        assert!(
+            HANDLED_OPCODES.len() >= 26,
+            "the opcode table has shrunk — a missing entry is a silently untested command"
+        );
+        for &(op, name) in HANDLED_OPCODES {
+            let (mock, log) = MockRenderer::new();
+            let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+            let mem = mem();
+
+            let resp = gpu.dispatch_resp(&mem, &fenced_cmd(op, 1, 1, 0xF00D));
+
+            assert_eq!(
+                fences_created(&log),
+                vec![fence_of(1, 1, 0xF00D)],
+                "{name} ({op:#06x}) must create exactly one host fence, carrying the request's ids"
+            );
+            assert_eq!(
+                read_le(&resp, 4, 4),
+                u64::from(VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX),
+                "{name}: the response must keep both fence flags"
+            );
+            assert_eq!(read_le(&resp, 8, 8), 0xF00D, "{name}: response fence_id");
+            assert_eq!(
+                &resp[16..21],
+                &[1, 0, 0, 0, 1],
+                "{name}: response ctx_id + ring_idx"
+            );
+        }
+    }
+
+    /// The concrete case the guest actually runs: Mesa fences a real Vulkan queue submission with
+    /// `kFenceOut | kRingIdx` on **ring 1** of its context. Bytes 16..21 of the response are the ring
+    /// identity, and all three of them (`ctx_id` 16..20, `ring_idx` 20) plus the `INFO_RING_IDX` flag
+    /// bit were zeroed on every response before item 2.1.
+    ///
+    /// Also pins that carrying the ring identity does not disturb the payload parse — the guest's
+    /// command stream must reach `submit_cmd` byte for byte.
+    #[test]
+    fn a_fenced_submit_3d_answers_with_the_ring_it_was_submitted_on() {
+        let (mock, log) = MockRenderer::new();
+        let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+        let mem = mem();
+
+        let payload: [u8; 8] = [0xDE, 0xAD, 0xBE, 0xEF, 1, 2, 3, 4];
+        let mut cmd = fenced_cmd(gpu3d::VIRTIO_GPU_CMD_SUBMIT_3D, 1, 1, 0x1234);
+        cmd.truncate(CTRL_HDR_LEN + 8); // hdr(24) size(4) padding(4)
+        cmd[CTRL_HDR_LEN..CTRL_HDR_LEN + 4].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        cmd.extend_from_slice(&payload);
+
+        let resp = gpu.dispatch_resp(&mem, &cmd);
+
+        assert_eq!(
+            &resp[16..21],
+            &[1, 0, 0, 0, 1],
+            "ctx_id=1 (le32) then ring_idx=1 — the whole of the ring identity"
+        );
+        assert_eq!(
+            read_le(&resp, 4, 4),
+            0b11,
+            "FLAG_FENCE | FLAG_INFO_RING_IDX; the second bit used to be masked off"
+        );
+        assert_eq!(read_le(&resp, 8, 8), 0x1234);
+
+        let calls = log.lock().unwrap();
+        assert!(
+            calls.iter().any(|c| matches!(
+                c,
+                Call::SubmitCmd { ctx_id: 1, bytes } if bytes.as_slice() == payload
+            )),
+            "the guest command stream must still be forwarded verbatim: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, Call::CreateFence(f) if *f == fence_of(1, 1, 0x1234))),
+            "and the host fence must carry the same identity: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .position(|c| matches!(c, Call::SubmitCmd { .. }))
+                < calls.iter().position(|c| matches!(c, Call::CreateFence(_))),
+            "the fence must be created AFTER the work it fences — gfxstream enqueues it behind \
+             whatever is already on the ring, so the reverse order signals early: {calls:?}"
+        );
+    }
+
+    /// An opcode the device does *not* implement still gets a host fence: the guest is waiting on that
+    /// fence regardless of the `ERR_UNSPEC` answer, so refusing to create it would hang the guest on
+    /// an unknown command. Covered separately because it is the arm the table above cannot name.
+    #[test]
+    fn even_an_unhandled_opcode_gets_the_host_fence_the_guest_is_waiting_on() {
+        let (mock, log) = MockRenderer::new();
+        let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+        let mem = mem();
+
+        let resp = gpu.dispatch_resp(&mem, &fenced_cmd(0x0fff, 2, 1, 0x5));
+
+        assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_ERR_UNSPEC as u64);
+        assert_eq!(fences_created(&log), vec![fence_of(2, 1, 0x5)]);
+    }
+
+    /// The core of item 2.5. A fenced command must be **withheld** from the used ring until the host
+    /// fence fires, because the response is what signals the guest's fence: publishing it at submit
+    /// time is what made `vkWaitForFences` return before the host had done the work.
+    ///
+    /// Also pins the key: `ring_idx` and `ctx_id` are part of the identity, so a completion on
+    /// another ring (or in another context) must not publish this chain. That is only meaningful
+    /// because `resp_hdr` now carries the real ring index (item 2.1).
+    #[test]
+    fn a_fenced_command_is_not_completed_until_the_host_fence_fires() {
+        use super::super::testkit::TestQueue;
+
+        let (mock, log) = MockRenderer::new();
+        let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+        let mut tq = TestQueue::new(0x8000);
+
+        let cmd = fenced_cmd(gpu3d::VIRTIO_GPU_CMD_SUBMIT_3D, 1, 1, 0x77);
+        let head = tq.push_chain(&cmd, &[CTRL_HDR_LEN as u32]);
+
+        assert!(
+            !gpu.process_controlq(&tq.mem, &mut tq.queue),
+            "a batch in which every command deferred completes nothing, so no IRQ is owed yet"
+        );
+        assert!(
+            tq.used().is_empty(),
+            "THE finding: the guest must not see the response — and so must not see its fence \
+             signalled — before the host fence has fired"
+        );
+        assert_eq!(gpu.pending_fence_count(), 1);
+        assert_eq!(
+            tq.resp_bytes(head),
+            vec![0u8; CTRL_HDR_LEN],
+            "the response descriptor must still be untouched while the command is pending"
+        );
+        assert_eq!(
+            fences_created(&log),
+            vec![fence_of(1, 1, 0x77)],
+            "the host fence must have been created, or nothing would ever publish this chain"
+        );
+
+        // Same fence id, wrong ring / wrong context: not this command.
+        assert!(!gpu.complete_fence(&tq.mem, &mut tq.queue, &fence_of(1, 0, 0x77)));
+        assert!(!gpu.complete_fence(&tq.mem, &mut tq.queue, &fence_of(9, 1, 0x77)));
+        assert!(
+            tq.used().is_empty(),
+            "a fence on another ring is not this one"
+        );
+        assert_eq!(gpu.pending_fence_count(), 1);
+
+        assert!(gpu.complete_fence(&tq.mem, &mut tq.queue, &fence_of(1, 1, 0x77)));
+
+        let used = tq.used();
+        assert_eq!(used.len(), 1, "exactly one used entry: {used:?}");
+        assert_eq!(
+            used[0],
+            (u32::from(head), CTRL_HDR_LEN as u32),
+            "the head and the full response length must be published"
+        );
+        let resp = tq.resp_bytes(head);
+        assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_OK_NODATA as u64);
+        assert_eq!(
+            read_le(&resp, 4, 4),
+            u64::from(VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX)
+        );
+        assert_eq!(read_le(&resp, 8, 8), 0x77);
+        assert_eq!(&resp[16..21], &[1, 0, 0, 0, 1]);
+        assert_eq!(gpu.pending_fence_count(), 0);
+
+        assert!(
+            !gpu.complete_fence(&tq.mem, &mut tq.queue, &fence_of(1, 1, 0x77)),
+            "a repeated completion must not publish the chain twice"
+        );
+        assert_eq!(tq.used().len(), 1);
+    }
+
+    /// Deferral applies only to fenced commands. An unfenced one — which is most of the boot path —
+    /// must still be answered inside `process_controlq`, or the guest's very first
+    /// `GET_DISPLAY_INFO` would wait for a fence that nobody ever asked for.
+    #[test]
+    fn an_unfenced_command_still_completes_synchronously() {
+        use super::super::testkit::TestQueue;
+
+        let (mock, log) = MockRenderer::new();
+        let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+        let mut tq = TestQueue::new(0x8000);
+
+        let resp_len = (CTRL_HDR_LEN + VIRTIO_GPU_MAX_SCANOUTS * 24) as u32;
+        let head = tq.push_chain(&hdr3d(VIRTIO_GPU_CMD_GET_DISPLAY_INFO, 0), &[resp_len]);
+
+        assert!(gpu.process_controlq(&tq.mem, &mut tq.queue));
+
+        assert_eq!(tq.used(), vec![(u32::from(head), resp_len)]);
+        assert_eq!(gpu.pending_fence_count(), 0, "nothing may be withheld");
+        assert!(
+            fences_created(&log).is_empty(),
+            "an unfenced command must not create a host fence either"
+        );
+        assert_eq!(
+            read_le(&tq.resp_bytes(head), 0, 4),
+            VIRTIO_GPU_RESP_OK_DISPLAY_INFO as u64
+        );
+    }
+
+    /// Safety net (a) — the watchdog. Without it, a renderer that stops signalling turns deferral into
+    /// a **permanent** guest hang, which is strictly worse than the submit-time completion it
+    /// replaces. `sweep_stale_fences` takes `now` so the 2 s deadline is testable without sleeping.
+    #[test]
+    fn a_fence_that_never_fires_is_force_completed_after_the_deadline() {
+        use super::super::testkit::TestQueue;
+
+        let (mock, _log) = MockRenderer::new();
+        let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+        let mut tq = TestQueue::new(0x8000);
+
+        let head = tq.push_chain(
+            &fenced_cmd(gpu3d::VIRTIO_GPU_CMD_SUBMIT_3D, 1, 1, 0x31),
+            &[CTRL_HDR_LEN as u32],
+        );
+        gpu.process_controlq(&tq.mem, &mut tq.queue);
+        assert_eq!(gpu.pending_fence_count(), 1);
+
+        assert!(
+            !gpu.sweep_stale_fences(&tq.mem, &mut tq.queue, Instant::now()),
+            "a command inside the deadline must be left alone — the watchdog is not a shortcut"
+        );
+        assert!(tq.used().is_empty());
+
+        let past_deadline = Instant::now() + FENCE_DEADLINE + Duration::from_millis(1);
+        assert!(gpu.sweep_stale_fences(&tq.mem, &mut tq.queue, past_deadline));
+
+        assert_eq!(
+            tq.used(),
+            vec![(u32::from(head), CTRL_HDR_LEN as u32)],
+            "the wedged command must be force-completed so the control ring keeps moving"
+        );
+        assert_eq!(read_le(&tq.resp_bytes(head), 8, 8), 0x31);
+        assert_eq!(gpu.pending_fence_count(), 0);
+
+        assert!(
+            !gpu.complete_fence(&tq.mem, &mut tq.queue, &fence_of(1, 1, 0x31)),
+            "a fence that arrives after the sweep must not re-publish the chain"
+        );
+        assert_eq!(tq.used().len(), 1);
+    }
+
+    /// Safety net (b) — the cap. The watchdog bounds how *long* one wedged fence stalls a command;
+    /// this bounds how *much* state a renderer that has stopped signalling can accumulate. Past the
+    /// cap, `dispatch` reverts to the pre-2.5 behaviour rather than growing the pending map.
+    #[test]
+    fn pending_fences_are_capped_and_fall_back_to_synchronous_completion() {
+        use super::super::testkit::TestQueue;
+
+        assert_eq!(
+            Gpu::new(64, 64).max_pending_fences,
+            MAX_PENDING_FENCES,
+            "production must use the constant; only tests lower it"
+        );
+        assert!(
+            MAX_PENDING_FENCES > super::super::QUEUE_SIZE as usize,
+            "a cap at or below the ring depth would be reachable by a well-behaved guest"
+        );
+
+        let (mock, _log) = MockRenderer::new();
+        let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+        gpu.set_max_pending_fences(2);
+        let mut tq = TestQueue::new(0x8000);
+
+        let heads: Vec<u16> = (0..4)
+            .map(|i| {
+                tq.push_chain(
+                    &fenced_cmd(gpu3d::VIRTIO_GPU_CMD_SUBMIT_3D, 1, 1, 0x40 + i),
+                    &[CTRL_HDR_LEN as u32],
+                )
+            })
+            .collect();
+
+        assert!(
+            gpu.process_controlq(&tq.mem, &mut tq.queue),
+            "the commands past the cap were completed, so an IRQ is owed"
+        );
+
+        assert_eq!(gpu.pending_fence_count(), 2, "the cap must hold");
+        assert_eq!(
+            tq.used(),
+            vec![
+                (u32::from(heads[2]), CTRL_HDR_LEN as u32),
+                (u32::from(heads[3]), CTRL_HDR_LEN as u32),
+            ],
+            "the two commands past the cap must be answered at submit time, not dropped"
+        );
+        assert_eq!(read_le(&tq.resp_bytes(heads[2]), 8, 8), 0x42);
+    }
+
+    /// The runtime revert. Deferral moves *when* the guest observes every fenced command, so it ships
+    /// with an escape hatch: `AEMU_GPU_SYNC_FENCES=1` restores submit-time completion exactly.
+    ///
+    /// The env decision is a pure function so this test needs no process-environment mutation (which
+    /// would leak into every other test in this binary, all of which run in parallel); the behavioural
+    /// half is driven through the same flag the env sets.
+    #[test]
+    #[allow(non_snake_case)] // named for the environment variable it pins
+    fn AEMU_GPU_SYNC_FENCES_restores_synchronous_completion() {
+        use super::super::testkit::TestQueue;
+        use std::ffi::OsStr;
+
+        assert_eq!(SYNC_FENCES_ENV, "AEMU_GPU_SYNC_FENCES");
+        assert!(sync_fences_requested(Some(OsStr::new("1"))));
+        assert!(
+            !sync_fences_requested(None),
+            "unset ⇒ deferral is the default"
+        );
+        assert!(
+            !sync_fences_requested(Some(OsStr::new("0"))),
+            "=0 must not enable the thing it looks like it disables"
+        );
+
+        let (mock, log) = MockRenderer::new();
+        let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+        gpu.set_sync_fences(true);
+        let mut tq = TestQueue::new(0x8000);
+
+        let head = tq.push_chain(
+            &fenced_cmd(gpu3d::VIRTIO_GPU_CMD_SUBMIT_3D, 1, 1, 0x88),
+            &[CTRL_HDR_LEN as u32],
+        );
+
+        assert!(gpu.process_controlq(&tq.mem, &mut tq.queue));
+
+        assert_eq!(
+            tq.used(),
+            vec![(u32::from(head), CTRL_HDR_LEN as u32)],
+            "with the hatch open the fenced command completes at submit time again"
+        );
+        assert_eq!(gpu.pending_fence_count(), 0);
+        assert_eq!(read_le(&tq.resp_bytes(head), 8, 8), 0x88);
+        assert_eq!(
+            fences_created(&log),
+            vec![fence_of(1, 1, 0x88)],
+            "the host fence is still created — only the completion timing reverts, so the renderer \
+             sees an identical command stream either way"
+        );
+    }
+
+    /// Fences on one `(ctx_id, ring_idx)` timeline complete in order, and guest fence ids come from a
+    /// single monotonic counter — so a completion at id N implies every earlier id on that ring is
+    /// done. Keying strictly on equality would leave an earlier command wedged forever if gfxstream
+    /// ever coalesced or dropped a callback, recoverable only by the 2 s watchdog.
+    #[test]
+    fn completing_a_later_fence_publishes_the_earlier_ones_on_the_same_ring() {
+        use super::super::testkit::TestQueue;
+
+        let (mock, _log) = MockRenderer::new();
+        let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+        let mut tq = TestQueue::new(0x8000);
+
+        // Three on ring 1, one on ring 0 — the ring-0 chain must be untouched.
+        let mut heads = Vec::new();
+        for id in [0x10u64, 0x11, 0x12] {
+            heads.push(tq.push_chain(
+                &fenced_cmd(gpu3d::VIRTIO_GPU_CMD_SUBMIT_3D, 1, 1, id),
+                &[CTRL_HDR_LEN as u32],
+            ));
+        }
+        let ring0 = tq.push_chain(
+            &fenced_cmd(gpu3d::VIRTIO_GPU_CMD_SUBMIT_3D, 1, 0, 0x13),
+            &[CTRL_HDR_LEN as u32],
+        );
+        gpu.process_controlq(&tq.mem, &mut tq.queue);
+        assert_eq!(gpu.pending_fence_count(), 4);
+
+        assert!(gpu.complete_fence(&tq.mem, &mut tq.queue, &fence_of(1, 1, 0x12)));
+
+        let used = tq.used();
+        assert_eq!(
+            used.len(),
+            3,
+            "all three ring-1 chains must be published, oldest first: {used:?}"
+        );
+        assert_eq!(
+            used.iter().map(|u| u.0).collect::<Vec<_>>(),
+            heads.iter().map(|h| u32::from(*h)).collect::<Vec<_>>(),
+            "publication order must follow submission order"
+        );
+        assert_eq!(
+            gpu.pending_fence_count(),
+            1,
+            "ring 0 is an independent timeline and must still be pending"
+        );
+
+        assert!(gpu.complete_fence(&tq.mem, &mut tq.queue, &fence_of(1, 0, 0x13)));
+        assert_eq!(tq.used().len(), 4);
+        assert_eq!(read_le(&tq.resp_bytes(ring0), 8, 8), 0x13);
+        assert_eq!(&tq.resp_bytes(ring0)[16..21], &[1, 0, 0, 0, 0]);
+    }
+
+    /// `drain_fences` is what the `gpu-fence` thread actually calls: it must pick the **control**
+    /// queue out of the device's queue array (not the cursor queue) and run the watchdog in the same
+    /// pass, so one lock acquisition covers both.
+    #[test]
+    fn drain_fences_completes_and_sweeps_on_the_control_queue() {
+        use super::super::testkit::TestQueue;
+
+        let (mock, _log) = MockRenderer::new();
+        let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+        let mut ctrl = TestQueue::new(0x8000);
+        let mut cursor = TestQueue::new(0x8000);
+
+        let fired = ctrl.push_chain(
+            &fenced_cmd(gpu3d::VIRTIO_GPU_CMD_SUBMIT_3D, 1, 1, 0x1),
+            &[CTRL_HDR_LEN as u32],
+        );
+        let wedged = ctrl.push_chain(
+            &fenced_cmd(gpu3d::VIRTIO_GPU_CMD_SUBMIT_3D, 2, 1, 0x2),
+            &[CTRL_HDR_LEN as u32],
+        );
+        gpu.process_controlq(&ctrl.mem, &mut ctrl.queue);
+
+        // Queue array in transport order: CONTROLQ = 0, CURSORQ = 1.
+        let mut queues = vec![
+            std::mem::replace(&mut ctrl.queue, virtio_queue::Queue::new(4).unwrap()),
+            std::mem::replace(&mut cursor.queue, virtio_queue::Queue::new(4).unwrap()),
+        ];
+
+        assert!(gpu.drain_fences(
+            &ctrl.mem,
+            &mut queues,
+            &[fence_of(1, 1, 0x1)],
+            Instant::now()
+        ));
+        assert_eq!(ctrl.used(), vec![(u32::from(fired), CTRL_HDR_LEN as u32)]);
+        assert!(
+            cursor.used().is_empty(),
+            "nothing may be published on the cursor queue"
+        );
+        assert_eq!(gpu.pending_fence_count(), 1);
+
+        // No fences this pass, but the sweep still runs.
+        assert!(gpu.drain_fences(
+            &ctrl.mem,
+            &mut queues,
+            &[],
+            Instant::now() + FENCE_DEADLINE + Duration::from_millis(1)
+        ));
+        assert_eq!(ctrl.used().len(), 2);
+        assert_eq!(read_le(&ctrl.resp_bytes(wedged), 8, 8), 0x2);
+        assert_eq!(gpu.pending_fence_count(), 0);
     }
 }

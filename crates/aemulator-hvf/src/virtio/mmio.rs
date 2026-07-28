@@ -344,6 +344,31 @@ impl MmioTransport {
         matches!(self.backend, Backend::Input(_))
     }
 
+    /// Set the device interrupt-status bit from a thread that is not servicing an MMIO exit.
+    ///
+    /// The virtio-mmio twin of `PciBus::raise_device_isr`, and needed for the same reason: the guest's
+    /// handler reads `InterruptStatus` and does nothing when it is zero, so an IRQ raised without it is
+    /// discarded. Every in-transport producer above already sets it; the gfxstream fence thread is the
+    /// one caller that lives outside this file.
+    ///
+    /// The Linux `--gpu3d` path puts the GPU on this transport, so without this the deferred-fence
+    /// completion would be invisible there even while it worked on the Android/PCI path.
+    pub fn raise_device_isr(&mut self) {
+        self.interrupt_status |= VIRTIO_MMIO_INT_VRING;
+    }
+
+    /// Run `f` against this transport's virtio-gpu device and its virtqueues, if it backs one.
+    /// See `PciBus::with_gpu` — the queues come along because publishing a deferred fence means
+    /// `add_used` on the control queue.
+    pub fn with_gpu<R>(&mut self, f: impl FnOnce(&mut Gpu, &mut [Queue]) -> R) -> Option<R> {
+        // Disjoint field borrows, as in `notify`.
+        if let Backend::Gpu(gpu) = &mut self.backend {
+            Some(f(gpu, &mut self.queues))
+        } else {
+            None
+        }
+    }
+
     /// Clone the NAT backend handle if this transport backs a virtio-net device (for the poll thread).
     pub fn net_slirp(&self) -> Option<std::sync::Arc<crate::net::SlirpNet>> {
         match &self.backend {

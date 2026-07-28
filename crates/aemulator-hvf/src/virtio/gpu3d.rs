@@ -96,6 +96,13 @@ pub const VIRTIO_GPU_RESP_OK_MAP_INFO: u32 = 0x1106;
 /// Offset of the `ctx_id` field inside `virtio_gpu_ctrl_hdr` (type,flags,fence_id, **ctx_id**).
 pub const CTRL_HDR_CTX_ID_OFF: usize = 16;
 
+/// Offset of the 1-byte `ring_idx` field inside `virtio_gpu_ctrl_hdr` (it follows `ctx_id`, and is
+/// itself followed by 3 bytes of padding). Only meaningful when the header carries
+/// `VIRTIO_GPU_FLAG_INFO_RING_IDX`; Mesa sets `VIRTGPU_CONTEXT_PARAM_NUM_RINGS = 2` and submits its
+/// real Vulkan queue work on ring 1, so a device that ignores this byte routes every per-ring fence
+/// completion into ring 0.
+pub const CTRL_HDR_RING_IDX_OFF: usize = 20;
+
 /// Parsed `virtio_gpu_resource_create_3d` payload (everything after the 24-byte ctrl header).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ResourceCreate3d {
@@ -135,8 +142,17 @@ pub struct CreateBlob {
     pub size: u64,
 }
 
-/// A guest fence request (from the ctrl header's fence fields, or `CTX`-scoped ring fencing).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// The identity of one virtio-gpu fence, in both directions:
+///
+///   * **outbound** — a guest fence request parsed out of a control command's ctrl header, handed to
+///     [`Renderer3d::create_fence`];
+///   * **inbound** — the completion gfxstream reports through
+///     [`on_fence_complete`], forwarded to the VMM's fence thread, which uses
+///     `(ctx_id, ring_idx, fence_id)` to find the guest command that was waiting on it.
+///
+/// `ring_idx` is the per-context timeline (`VIRTIO_GPU_FLAG_INFO_RING_IDX`); Mesa asks for two rings
+/// and submits real queue work on ring 1, so it is part of the key, not decoration.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FenceReq {
     pub flags: u32,
     pub fence_id: u64,
@@ -584,34 +600,76 @@ fn to_ffi_box(xfer: &Transfer3d) -> ffi::stream_renderer_box {
 // `STREAM_RENDERER_PARAM_FENCE_CALLBACK`. Mesa's `gfxstream_vk` waits on these fences to know the
 // host has drained the ASG ring, so a stalled fence signal deadlocks the guest driver. But the
 // callback fires on gfxstream's thread, which must NOT touch HVF/GIC state. So the callback only
-// records the completion + wakes a VMM-owned thread (installed by `machine.rs`) that raises the
-// virtio-gpu device's SPI + kicks the vCPU, so the guest's virtio-gpu IRQ handler re-scans fence
-// progress. The device also completes fenced commands synchronously (echoing the fence id in the
-// used-ring response), so this async poke is the belt-and-suspenders wakeup for a fence that
-// completes after the command response was already written.
+// forwards the completed fence's **identity** over an mpsc channel to a VMM-owned thread (installed
+// by `machine.rs`), which completes the guest command that was waiting on it, sets the device ISR
+// bit and raises the virtio-gpu SPI.
+//
+// Two properties of this callback are load-bearing and easy to lose:
+//
+//   * **It must read its argument.** It previously ignored `*fence` entirely and sent `()`, so
+//     nothing downstream could tell *which* fence had completed — there was no per-fence bookkeeping
+//     anywhere in the VMM, and per-ring completion (Mesa uses two rings) was unroutable.
+//   * **It must never block and never take a VMM lock.** gfxstream can invoke it *synchronously*
+//     from inside `stream_renderer_submit_cmd`, i.e. on the vCPU thread while `ctx.pci` is already
+//     held. A channel send on an unbounded `mpsc` never blocks, and the only lock taken here is the
+//     one guarding the sender itself (contended only by `install_fence_wake`, which runs once before
+//     the vCPU starts). Anything heavier re-enters the VMM and deadlocks.
 
 use std::sync::mpsc::Sender;
-use std::sync::OnceLock;
 
 /// Count of fence completions observed from gfxstream (evidence; read at teardown).
 static FENCE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// Wakeup channel to the VMM's fence-signal thread. Installed by `machine.rs` before the vCPU runs.
-static FENCE_WAKE: OnceLock<Sender<()>> = OnceLock::new();
 
-/// Install the wakeup sender the fence callback pokes on each completion. Idempotent (first wins).
-pub fn install_fence_wake(tx: Sender<()>) {
-    let _ = FENCE_WAKE.set(tx);
+/// Channel to the VMM's fence-signal thread, carrying the identity of each completed host fence.
+/// Installed by `machine.rs` before the vCPU runs.
+///
+/// A `Mutex<Option<..>>` rather than a `OnceLock`: the `OnceLock` made [`install_fence_wake`]
+/// un-resettable, so the *first* test to install a channel owned it for the whole process and no
+/// second test could observe a callback at all.
+static FENCE_WAKE: Mutex<Option<Sender<FenceReq>>> = Mutex::new(None);
+
+/// Install (or replace) the sender the fence callback forwards each completion to.
+pub fn install_fence_wake(tx: Sender<FenceReq>) {
+    *lock_wake() = Some(tx);
 }
 
-/// The C `stream_renderer_fence_callback`: record the completion + wake the VMM fence thread. Called
-/// from a gfxstream renderer thread — does no HVF/GIC work here.
-pub extern "C" fn on_fence_complete(
+/// Lock [`FENCE_WAKE`], recovering from poisoning rather than panicking: this is reached from an
+/// `extern "C"` callback, where an unwind is undefined behaviour.
+fn lock_wake() -> std::sync::MutexGuard<'static, Option<Sender<FenceReq>>> {
+    match FENCE_WAKE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// The C `stream_renderer_fence_callback`: forward the completed fence's identity to the VMM fence
+/// thread. Called from a gfxstream renderer thread — or synchronously from inside `submit_cmd` on
+/// the vCPU thread — so it does no HVF/GIC work and takes no VMM lock (see the note above).
+///
+/// # Safety
+/// `fence` must be either null or a valid `stream_renderer_fence` readable for the duration of the
+/// call. Declared `unsafe extern "C"` to match `ffi::stream_renderer_fence_callback` exactly, since
+/// it now dereferences that pointer instead of ignoring it.
+pub unsafe extern "C" fn on_fence_complete(
     _user_data: *mut c_void,
-    _fence: *mut ffi::stream_renderer_fence,
+    fence: *mut ffi::stream_renderer_fence,
 ) {
     FENCE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if let Some(tx) = FENCE_WAKE.get() {
-        let _ = tx.send(());
+    // gfxstream hands us a pointer to its own `stream_renderer_fence` for the duration of the call.
+    // Copy the four fields out before returning; nothing here dereferences it later. A null pointer
+    // is not part of the contract but must not fault the VMM, so it is checked.
+    let Some(f) = fence.as_ref() else {
+        eprintln!("[gpu3d] fence callback with a NULL stream_renderer_fence — ignored");
+        return;
+    };
+    let req = FenceReq {
+        flags: f.flags,
+        fence_id: f.fence_id,
+        ctx_id: f.ctx_id,
+        ring_idx: f.ring_idx,
+    };
+    if let Some(tx) = lock_wake().as_ref() {
+        let _ = tx.send(req);
     }
 }
 
@@ -1154,5 +1212,91 @@ mod tests {
     #[should_panic(expected = "not a status-returning Renderer3d method")]
     fn failing_an_unknown_method_is_a_hard_error() {
         let _ = MockRenderer::builder().fail("attach_backng", -22);
+    }
+
+    // =============================================================================================
+    // The async fence bridge (`on_fence_complete`).
+    //
+    // These are the FIRST tests of this function. It previously took `_fence: *mut
+    // stream_renderer_fence` and never looked at it, sending a bare `()` — so no consumer could know
+    // which fence had completed, on which ring, in which context. Deferred completion is impossible
+    // without that identity, and per-ring routing (Mesa uses two rings) doubly so.
+    //
+    // `FENCE_WAKE` is process-global, so both tests below serialize on `WAKE_TEST` — and the fact
+    // that they can each install their own channel at all is exactly what replacing the `OnceLock`
+    // bought.
+    // =============================================================================================
+
+    /// Serializes the tests that install into the global `FENCE_WAKE`.
+    static WAKE_TEST: Mutex<()> = Mutex::new(());
+
+    /// Build a `stream_renderer_fence` the way gfxstream fills one in before invoking the callback.
+    fn host_fence(
+        flags: u32,
+        fence_id: u64,
+        ctx_id: u32,
+        ring_idx: u8,
+    ) -> ffi::stream_renderer_fence {
+        ffi::stream_renderer_fence {
+            flags,
+            fence_id,
+            ctx_id,
+            ring_idx,
+        }
+    }
+
+    /// All four fields of the completed host fence must reach the VMM fence thread. Losing `ring_idx`
+    /// or `ctx_id` here is what made per-ring fence completion unroutable.
+    #[test]
+    fn on_fence_complete_forwards_the_fence_identity() {
+        let _serialize = WAKE_TEST.lock().unwrap_or_else(|p| p.into_inner());
+        let (tx, rx) = std::sync::mpsc::channel::<FenceReq>();
+        install_fence_wake(tx);
+
+        let mut f = host_fence(0b11, 0xDEAD_BEEF, 7, 1);
+        unsafe { on_fence_complete(std::ptr::null_mut(), &mut f) };
+
+        assert_eq!(
+            rx.try_recv().expect("the completion must be forwarded"),
+            FenceReq {
+                flags: 0b11,
+                fence_id: 0xDEAD_BEEF,
+                ctx_id: 7,
+                ring_idx: 1,
+            },
+            "the callback must read its argument — all four fields, ring_idx included"
+        );
+
+        // A second install must take effect: with the old `OnceLock` the first sender won forever.
+        let (tx2, rx2) = std::sync::mpsc::channel::<FenceReq>();
+        install_fence_wake(tx2);
+        let mut g = host_fence(1, 2, 3, 0);
+        unsafe { on_fence_complete(std::ptr::null_mut(), &mut g) };
+        assert!(
+            rx.try_recv().is_err(),
+            "the replaced sender must stop receiving"
+        );
+        assert_eq!(rx2.try_recv().map(|r| r.fence_id), Ok(2));
+    }
+
+    /// A null `stream_renderer_fence` is not part of gfxstream's contract, but this is an
+    /// `extern "C"` callback: an unwind across the FFI boundary is undefined behaviour, so the
+    /// pointer is checked rather than dereferenced on faith.
+    #[test]
+    fn on_fence_complete_survives_a_null_fence_pointer() {
+        let _serialize = WAKE_TEST.lock().unwrap_or_else(|p| p.into_inner());
+        let (tx, rx) = std::sync::mpsc::channel::<FenceReq>();
+        install_fence_wake(tx);
+
+        unsafe { on_fence_complete(std::ptr::null_mut(), std::ptr::null_mut()) };
+
+        assert!(
+            rx.try_recv().is_err(),
+            "a fence with no identity must not be forwarded as a fabricated one"
+        );
+        // …and the channel still works afterwards, i.e. the guard is a skip, not a teardown.
+        let mut f = host_fence(1, 9, 0, 0);
+        unsafe { on_fence_complete(std::ptr::null_mut(), &mut f) };
+        assert_eq!(rx.try_recv().map(|r| r.fence_id), Ok(9));
     }
 }

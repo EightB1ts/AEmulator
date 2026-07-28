@@ -18,7 +18,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Default guest DRAM: 512 MiB (a multiple of the 16 KiB granule; big enough for a distro kernel).
 pub const DEFAULT_RAM_BYTES: usize = 512 * 1024 * 1024;
@@ -670,8 +670,15 @@ fn build_gpu(gpu3d: bool) -> Gpu {
         println!("[ok] virtio-gpu 2D scanout {GPU_WIDTH}x{GPU_HEIGHT} → /dev/fb0 (fbcon)");
         return Gpu::new(GPU_WIDTH, GPU_HEIGHT);
     }
-    // Safety: stream_renderer_init returned 0 above and we run the device on the vCPU thread that
-    // owns the renderer (single-threaded control-queue dispatch).
+    // Safety: `stream_renderer_init` returned 0 above, and every touch of the renderer is serialized
+    // by the transport mutex (`Mutex<PciBus>` / `Mutex<Vec<MmioTransport>>`) that guards the device
+    // holding it.
+    //
+    // NOT by being single-threaded, which is what this comment used to claim: `DEFAULT_NUM_CPUS` is 2
+    // and *either* vCPU can take the MMIO exit for the GPU's BAR notify, so two threads genuinely do
+    // reach `process_controlq`. The `gpu-fence` thread is a third (see `spawn_gpu_fence_thread`).
+    // What makes that sound is the mutex, so the invariant to preserve is "the renderer is only
+    // touched under the transport lock" — not "only one thread exists".
     let renderer = unsafe { crate::virtio::gpu3d::GfxstreamRenderer::new() };
     println!(
         "[ok] virtio-gpu 3D (VIRGL+CONTEXT_INIT) {GPU_WIDTH}x{GPU_HEIGHT} → gfxstream host renderer, /dev/dri/renderD128"
@@ -679,28 +686,100 @@ fn build_gpu(gpu3d: bool) -> Gpu {
     Gpu::with_renderer(GPU_WIDTH, GPU_HEIGHT, Box::new(renderer))
 }
 
-/// Spawn the gfxstream fence-signal thread: install the wake channel the async FENCE_CALLBACK pokes
-/// (`gpu3d::on_fence_complete`), then on each poke raise the virtio-gpu device's SPI + kick the vCPU
-/// so the guest observes fence progress. Finds the GPU's INTID on whichever transport carries it
-/// (PCI on the Android path, MMIO on the Linux `--gpu3d` path). No-op if there is no GPU device.
+/// How long the fence thread waits for a completion before running the watchdog sweep anyway.
+///
+/// It must be a *bounded* wait, not `recv()`: the sweep's whole job is to rescue commands whose host
+/// fence never fires, and a renderer that has stopped signalling produces no wakeup to piggyback on.
+const FENCE_SWEEP_TICK: Duration = Duration::from_millis(250);
+
+/// Spawn the gfxstream fence-signal thread — the VMM half of the async fence bridge.
+///
+/// Installs the channel `gpu3d::on_fence_complete` forwards each completed host fence's identity
+/// over, then for each batch it drains:
+///
+///   1. completes every guest command that was waiting on those fences (writes the held response into
+///      its descriptor chain and `add_used`s it — see `Gpu::complete_fence`);
+///   2. runs the watchdog sweep so a fence that never fires cannot wedge the control ring forever;
+///   3. **sets the device ISR bit**, then raises the device's SPI and kicks the target vCPU.
+///
+/// Step 3's ordering is the item-2.2 fix. This thread previously raised the SPI *without* setting the
+/// ISR, and Linux's `vp_interrupt` returns `IRQ_NONE` when the ISR reads zero — so every fence
+/// interrupt was delivered to the guest and immediately discarded, making the whole bridge a no-op on
+/// the PCI/Android path.
+///
+/// **Lock order — pci/virtio, then gic, never nested.** The two locks are taken *sequentially*: the
+/// transport lock is dropped before `ctx.gic` is acquired. This matches `spawn_input_inject_thread`,
+/// `spawn_slirp_poll_thread` and `spawn_console_inject_thread` exactly, which is the property that
+/// keeps the four off-vCPU producers deadlock-free against a vCPU thread that holds `ctx.pci` for the
+/// duration of an MMIO exit. The other half of the argument lives in `gpu3d::on_fence_complete`,
+/// which takes **no** VMM lock at all: gfxstream may invoke it synchronously from inside
+/// `stream_renderer_submit_cmd`, i.e. on the vCPU thread with `ctx.pci` already held, so it must never
+/// do more than an unbounded-channel send.
+///
+/// Finds the GPU on whichever transport carries it (PCI on the Android path, MMIO on the Linux
+/// `--gpu3d` path). No-op if there is no GPU device.
 fn spawn_gpu_fence_thread(ctx: &Arc<VmContext>) {
-    let intid = {
+    let mmio_idx = {
         let mmio = ctx.virtio.lock().unwrap();
         mmio.iter()
-            .find(|t| matches!(t.backend, Backend::Gpu(_)))
-            .map(|t| t.intid)
-    }
-    .or_else(|| ctx.pci.lock().unwrap().gpu_intid());
+            .position(|t| matches!(t.backend, Backend::Gpu(_)))
+    };
+    let intid = match mmio_idx {
+        Some(i) => Some(ctx.virtio.lock().unwrap()[i].intid),
+        None => ctx.pci.lock().unwrap().gpu_intid(),
+    };
     let Some(intid) = intid else {
         return;
     };
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let (tx, rx) = std::sync::mpsc::channel::<crate::virtio::gpu3d::FenceReq>();
     crate::virtio::gpu3d::install_fence_wake(tx);
     let ctx = Arc::clone(ctx);
     std::thread::Builder::new()
         .name("gpu-fence".into())
-        .spawn(move || {
-            while rx.recv().is_ok() {
+        .spawn(move || loop {
+            // Bounded wait, then coalesce everything else already queued: a burst of completions
+            // costs one transport lock and one interrupt rather than N of each.
+            let mut batch = Vec::new();
+            match rx.recv_timeout(FENCE_SWEEP_TICK) {
+                Ok(f) => batch.push(f),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                // Sender dropped ⇒ the renderer is gone; nothing will complete again.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+            batch.extend(rx.try_iter());
+
+            // Complete + sweep + set the ISR under the transport lock, then release it before the GIC.
+            // The locked section runs on every tick, including idle ones: the sweep is a watchdog, so
+            // it must not be conditional on state read under the very lock it needs. Four uncontended
+            // acquisitions a second is noise next to a 60 fps guest's MMIO exits.
+            let now = Instant::now();
+            let published = if let Some(i) = mmio_idx {
+                let mut vt = ctx.virtio.lock().unwrap();
+                let t = &mut vt[i];
+                let p = t
+                    .with_gpu(|gpu, queues| gpu.drain_fences(&ctx.mem, queues, &batch, now))
+                    .unwrap_or(false);
+                if p {
+                    t.raise_device_isr();
+                }
+                p
+            } else {
+                let mut pci = ctx.pci.lock().unwrap();
+                let p = pci
+                    .with_gpu(|gpu, queues| gpu.drain_fences(&ctx.mem, queues, &batch, now))
+                    .unwrap_or(false);
+                if p {
+                    pci.raise_device_isr(intid);
+                }
+                p
+            };
+
+            // Poke the guest when we published a used entry, and also on a bare completion that
+            // matched nothing pending — the guest's virtio-gpu handler re-scans fence progress on any
+            // interrupt, and that belt-and-suspenders wakeup is the behaviour this thread has always
+            // had. The ISR is only set when something was actually published, so a spurious poke
+            // costs the guest one `IRQ_NONE` and nothing else.
+            if published || !batch.is_empty() {
                 let target = ctx.gic.lock().unwrap().set_spi(intid);
                 ctx.kick(target);
             }

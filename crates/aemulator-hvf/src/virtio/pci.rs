@@ -20,6 +20,7 @@
 //!     the same one-shot injection the MMIO transport used.
 //!   * BARs are pre-assigned; the FDT sets `linux,pci-probe-only = 1` so the guest keeps them.
 
+use super::gpu::Gpu;
 use super::mmio::Backend;
 use super::{Mem, QUEUE_SIZE};
 use virtio_queue::{Queue, QueueT};
@@ -703,6 +704,45 @@ impl PciBus {
             .map(|d| d.intid)
     }
 
+    /// Set the **device** interrupt-status bit (`VIRTIO_ISR_QUEUE`) for the device on `intid`, from a
+    /// thread that is not servicing an MMIO exit. `false` if no device on this bus owns `intid`.
+    ///
+    /// This is the missing half of every off-vCPU interrupt on the PCI transport. Linux's
+    /// `vp_interrupt` (`virtio_pci_common.c`) *reads the ISR first* and returns `IRQ_NONE` when it is
+    /// zero — the SPI is then acknowledged and discarded, and the guest never scans the used ring. The
+    /// gfxstream fence thread raised the SPI without ever setting this bit, which is why the entire
+    /// async fence bridge was a no-op on the Android/PCI path: the interrupt was delivered and thrown
+    /// away every time. Every other cross-thread producer here already does it — see
+    /// [`PciBus::inject_input_events`], [`PciBus::flush_net_rx`], [`PciBus::feed_console_input`], and
+    /// `PciDevice::notify` on the vCPU path.
+    ///
+    /// Read-to-clear: the guest clears it by reading the ISR register through
+    /// [`PciBus::mmio_read`], so setting it twice before a guest read is harmless and losing a wakeup
+    /// is not possible from here.
+    pub fn raise_device_isr(&mut self, intid: u32) -> bool {
+        for d in &mut self.devices {
+            if d.intid == intid {
+                d.isr |= VIRTIO_ISR_QUEUE;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Run `f` against the bus's virtio-gpu device and its virtqueues, if it has one.
+    ///
+    /// The GPU's queues have to come along: completing a deferred fence means writing a response into
+    /// a descriptor chain and `add_used`ing it on the control queue, and the queues live on the
+    /// transport rather than in the device. `None` when this bus carries no GPU (the Linux MMIO path).
+    pub fn with_gpu<R>(&mut self, f: impl FnOnce(&mut Gpu, &mut [Queue]) -> R) -> Option<R> {
+        for d in &mut self.devices {
+            if let Backend::Gpu(gpu) = &mut d.backend {
+                return Some(f(gpu, &mut d.queues));
+            }
+        }
+        None
+    }
+
     /// True if the bus carries a virtio-input device (so the input-inject thread knows to route here
     /// rather than to the — empty on the Android path — virtio-mmio fleet).
     pub fn has_input(&self) -> bool {
@@ -874,5 +914,85 @@ mod tests_shm {
         let len_lo = d.config_read((at + 12) as u16, 4) as u64;
         let len_hi = d.config_read((at + 20) as u16, 4) as u64;
         assert_eq!((len_hi << 32) | len_lo, PCI_SHM_SIZE);
+    }
+}
+
+/// Off-vCPU interrupt delivery: the device ISR bit + the GPU accessor the fence thread needs.
+#[cfg(test)]
+mod tests_isr {
+    use super::*;
+    use crate::virtio::gpu::Gpu;
+
+    /// A one-device bus carrying a GPU at BAR0, as `machine.rs` builds it.
+    fn gpu_bus() -> (PciBus, u64, u32) {
+        let intid = 48;
+        let d = PciDevice::new(Backend::Gpu(Gpu::new(64, 64)), intid, 4, device_bar0(4));
+        let bar0 = d.bar0 as u64;
+        (PciBus::new(vec![d]), bar0, intid)
+    }
+
+    /// **The `IRQ_NONE` failure, encoded directly.** Linux's `vp_interrupt` reads the ISR register
+    /// first and returns `IRQ_NONE` when it is zero, acknowledging and discarding the interrupt
+    /// without ever scanning the used ring. The gfxstream fence thread raised the virtio-gpu SPI and
+    /// never set this bit, so the entire async fence bridge was a no-op on the PCI/Android path —
+    /// every fence interrupt was delivered and thrown away.
+    ///
+    /// The assertion is deliberately made through `mmio_read`, i.e. through the exact access the guest
+    /// performs, and it checks the read-to-clear too: a bit that stayed set would make the *next*
+    /// interrupt from any source look like a queue interrupt.
+    #[test]
+    fn raise_device_isr_sets_the_bit_a_guest_read_would_see() {
+        let (mut bus, bar0, intid) = gpu_bus();
+
+        assert_eq!(
+            bus.mmio_read(bar0 + ISR_OFF, 1),
+            0,
+            "a fresh device owes no interrupt"
+        );
+
+        assert!(
+            bus.raise_device_isr(intid),
+            "the GPU's intid must be found on the bus"
+        );
+
+        assert_eq!(
+            bus.mmio_read(bar0 + ISR_OFF, 1),
+            u64::from(VIRTIO_ISR_QUEUE),
+            "vp_interrupt must read a non-zero ISR, or it returns IRQ_NONE and drops the interrupt"
+        );
+        assert_eq!(
+            bus.mmio_read(bar0 + ISR_OFF, 1),
+            0,
+            "the ISR is read-to-clear — a sticky bit would forge the next interrupt"
+        );
+
+        assert!(
+            !bus.raise_device_isr(intid + 1),
+            "an intid no device owns must report failure rather than poking an unrelated device"
+        );
+        assert_eq!(bus.mmio_read(bar0 + ISR_OFF, 1), 0);
+    }
+
+    /// `with_gpu` must reach the GPU *and* its virtqueues — completing a deferred fence means
+    /// `add_used` on the control queue, which lives on the transport, not in the device.
+    #[test]
+    fn with_gpu_reaches_the_gpu_and_its_queues() {
+        let (mut bus, _bar0, _intid) = gpu_bus();
+
+        let queues = bus.with_gpu(|gpu, queues| (gpu.pending_fence_count(), queues.len()));
+        assert_eq!(
+            queues,
+            Some((0, 2)),
+            "the GPU's controlq + cursorq must both be handed over"
+        );
+
+        // A bus with no GPU reports nothing rather than silently picking another device.
+        let mut no_gpu = PciBus::new(vec![PciDevice::new(
+            Backend::Rng(crate::virtio::rng::Rng::new()),
+            50,
+            1,
+            device_bar0(0),
+        )]);
+        assert!(no_gpu.with_gpu(|_, _| ()).is_none());
     }
 }
