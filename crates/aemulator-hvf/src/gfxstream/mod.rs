@@ -31,6 +31,12 @@
 
 pub mod ffi;
 
+/// Pure text analysis of gfxstream's *generated* cereal switches: which Vulkan extensions the host
+/// can size but not decode, and therefore must never advertise to the guest. Backs the
+/// `aemu-cereal-gap` binary, `host/vulkan/VkDecoderCerealGap.inc`, and the `ci/hvf-doctor.sh` drift
+/// guard. Dependency-free and hermetically tested — it never links or calls the renderer.
+pub mod cereal_gap;
+
 /// Hermetic guards pinning the host Vulkan driver to KosmicKrisp (see the module docs). Test-only:
 /// it reads the repo's launch surfaces as text and adds nothing to the built crate.
 #[cfg(test)]

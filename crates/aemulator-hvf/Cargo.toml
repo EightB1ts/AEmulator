@@ -33,6 +33,13 @@ path = "src/bin/aemulator-hvf.rs"
 name = "aemu-display-selftest"
 path = "src/bin/aemu-display-selftest.rs"
 
+# Phase 1.1: generates host/vulkan/VkDecoderCerealGap.inc (the derived guest-visible extension strip
+# list) and drift-checks the committed copy against the pinned gfxstream tree's codegen. Run by
+# ci/hvf-doctor.sh in `verify` mode.
+[[bin]]
+name = "aemu-cereal-gap"
+path = "src/bin/aemu-cereal-gap.rs"
+
 [dependencies]
 # Phase 5 (stealth / de-brand): reuse the workspace identity + DTB crates so the Android boot path
 # emits the real-SoC DeviceProfile (Xiaomi/fuxi/SM8550) root compatible/model + a coherent

@@ -32,6 +32,17 @@
 #                                                 and hv_vm_create then returns HV_DENIED.
 #   7. libslirp is installed + linked in        — a binary without the NAT backend enumerates a NIC
 #                                                 that silently drops every packet (see spawn.rs).
+#   8. VkDecoderCerealGap.inc still matches     — the guest-visible device extension strip list is
+#      what this gfxstream pin's codegen          GENERATED from gfxstream's own cereal switches: 166
+#      implies                                    extensions whose pNext structs the host can size
+#                                                 but not decode, and that unmarshal switch's
+#                                                 default arm is abort() of the whole VMM. A pin bump
+#                                                 that moves the codegen leaves the committed .inc
+#                                                 stale, and a stale strip list fails no build, no
+#                                                 link and no test — it fails as an abort() minutes
+#                                                 into a boot, the first time a guest chains a
+#                                                 newly-unhandled struct. Nothing else sees it
+#                                                 coming, so it is checked here beside (1).
 #
 # Usage:  bash ci/hvf-doctor.sh          # check only, exit non-zero on the first hard failure
 #         bash ci/hvf-doctor.sh --fix    # additionally re-sign the binary if the entitlement is missing
@@ -71,6 +82,33 @@ if VERIFY_OUT="$(bash "$BOOTSTRAP" --verify 2>&1)"; then
 else
     printf '%s\n' "$VERIFY_OUT" >&2
     fail "third_party is not at its pinned, patched state (see above) — run:  third_party/bootstrap.sh"
+fi
+
+step "cereal-gap drift (the guest-visible extension strip list is derived, not hand-written)"
+# Delegated to the same tool that GENERATES the list, for the same reason step (1) delegates to
+# bootstrap.sh: a checker that reimplements the thing it checks agrees with itself, not with reality.
+# Prefer an already-built binary; fall back to `cargo run` so a fresh clone gets the check rather
+# than a skip (this bin is not part of `pnpm hvf:build`, which builds only aemulator-hvf).
+CEREAL_INC="$TP_GFXSTREAM_SRC/host/vulkan/VkDecoderCerealGap.inc"
+GAP_BIN=""
+for _p in release debug; do
+    [ -x "$HVF/target/$_p/aemu-cereal-gap" ] && { GAP_BIN="$HVF/target/$_p/aemu-cereal-gap"; break; }
+done
+if [ -n "$GAP_BIN" ]; then
+    GAP_CMD=("$GAP_BIN")
+elif command -v cargo >/dev/null; then
+    GAP_CMD=(cargo run -q --manifest-path "$HVF/Cargo.toml" --bin aemu-cereal-gap --)
+else
+    fail "no aemu-cereal-gap binary and no cargo to build one — build it:  cargo build --release
+    --manifest-path crates/aemulator-hvf/Cargo.toml --bin aemu-cereal-gap"
+fi
+if GAP_OUT="$("${GAP_CMD[@]}" verify "$TP_GFXSTREAM_SRC" "$CEREAL_INC" 2>&1)"; then
+    ok "${GAP_OUT#aemu-cereal-gap: }"
+else
+    printf '%s\n' "$GAP_OUT" >&2
+    fail "the committed VkDecoderCerealGap.inc no longer matches what the pinned gfxstream tree's
+    codegen implies (see above). This is the drift guard for a latent full-VMM abort(): regenerate
+    the .inc, re-export third_party/patches/gfxstream/, and re-record the tree digest."
 fi
 
 step "gfxstream host renderer"
