@@ -79,3 +79,19 @@ cc = "1"
 #   * `brew install libslirp`
 #   * libgfxstream_backend.dylib in third_party/gfxstream/build-host — run `third_party/bootstrap.sh`
 #     (it also builds the KosmicKrisp Vulkan driver a --gpu3d run needs at launch)
+
+# Integer-overflow checks in BOTH profiles. This crate is workspace-EXCLUDED, so it is its own
+# workspace root and the root Cargo.toml's `[profile.*]` never reaches it — without these sections a
+# release build wraps silently on any arithmetic the explicit checks miss (an undersized buffer
+# described as a large one), while a debug build panics, i.e. the same guest input aborts the VMM in
+# one profile and corrupts memory in the other.
+#
+# This is a BACKSTOP for residual bugs, deliberately landed *after* the explicit `checked_*` /
+# `u64` validation in `virtio/gpu.rs` (guest-supplied resource dimensions, rect math, mem-entry
+# counts and command lengths). Landing it first would only have converted the silent wrap into a
+# guest-triggerable panic, which is a different bug, not a fix.
+[profile.dev]
+overflow-checks = true
+
+[profile.release]
+overflow-checks = true

@@ -176,7 +176,24 @@ pub trait Renderer3d: Send {
     /// Drop the iovecs previously attached to `resource_id` (`RESOURCE_DETACH_BACKING`). The guest is
     /// revoking that memory, so gfxstream must stop holding pointers into it.
     fn detach_backing(&mut self, resource_id: u32);
-    fn transfer_to_host_3d(&mut self, ctx_id: u32, xfer: &Transfer3d, data: &mut [u8]) -> i32;
+    /// Write a guest-side transfer into the host resource. `data` is the gathered guest backing —
+    /// `None` when the resource has no `RESOURCE_ATTACH_BACKING` of its own, in which case gfxstream
+    /// must use the iovecs it is already holding for the resource (`mIovs`).
+    ///
+    /// **`None` is not the same as an empty slice, and the distinction is not cosmetic.** gfxstream's
+    /// `stream_renderer_transfer_write_iov` wraps `(iov, iovec_cnt)` in `AsVecOption(iov, cnt)`,
+    /// which returns `Some(..)` for *any* `iovec_cnt > 0` — including a single iovec with
+    /// `iov_len = 0`. A present-but-empty vector **overrides** the resource's own `mIovs`, and
+    /// `TransferWithIov` then rejects the write with "write request overflowed iovs": a 3D resource
+    /// with no explicit guest backing could never be written to. Modelling the empty case as `None`
+    /// in the type is what keeps it from reaching the FFI at all (the forwarder passes
+    /// `(null_mut(), 0)`, so `AsVecOption` yields `nullopt` and gfxstream falls back to `mIovs`).
+    fn transfer_to_host_3d(
+        &mut self,
+        ctx_id: u32,
+        xfer: &Transfer3d,
+        data: Option<&mut [u8]>,
+    ) -> i32;
     fn transfer_from_host_3d(&mut self, ctx_id: u32, xfer: &Transfer3d, data: &mut [u8]) -> i32;
     /// Create a blob resource. `iovs` are `(host_addr, len)` pairs resolved from the guest mem
     /// entries (empty for a HOST3D blob — the gfxstream ASG ring — which the host allocates itself).
@@ -330,11 +347,30 @@ impl Renderer3d for GfxstreamRenderer {
         }
     }
 
-    fn transfer_to_host_3d(&mut self, ctx_id: u32, xfer: &Transfer3d, data: &mut [u8]) -> i32 {
+    fn transfer_to_host_3d(
+        &mut self,
+        ctx_id: u32,
+        xfer: &Transfer3d,
+        data: Option<&mut [u8]>,
+    ) -> i32 {
         let mut b = to_ffi_box(xfer);
-        let mut iov = ffi::iovec {
-            iov_base: data.as_mut_ptr() as *mut c_void,
-            iov_len: data.len(),
+        // No gathered backing ⇒ pass NO iovec at all, so gfxstream's `AsVecOption(iov, cnt)` returns
+        // `nullopt` and the resource's own `mIovs` are used. Handing it one zero-length iovec instead
+        // overrides `mIovs` and fails the transfer — see the trait doc.
+        let mut iov = match data {
+            Some(d) if !d.is_empty() => ffi::iovec {
+                iov_base: d.as_mut_ptr() as *mut c_void,
+                iov_len: d.len(),
+            },
+            _ => ffi::iovec {
+                iov_base: std::ptr::null_mut(),
+                iov_len: 0,
+            },
+        };
+        let (iov_ptr, iov_cnt): (*mut ffi::iovec, c_uint) = if iov.iov_len == 0 {
+            (std::ptr::null_mut(), 0)
+        } else {
+            (&mut iov, 1)
         };
         unsafe {
             ffi::stream_renderer_transfer_write_iov(
@@ -345,8 +381,8 @@ impl Renderer3d for GfxstreamRenderer {
                 xfer.layer_stride,
                 &mut b,
                 xfer.offset,
-                &mut iov,
-                1 as c_uint,
+                iov_ptr,
+                iov_cnt,
             )
         }
     }
@@ -633,10 +669,14 @@ pub enum Call {
     DetachBacking {
         resource_id: u32,
     },
+    /// `data` mirrors the `Option<&mut [u8]>` the device passed: `None` means "no gathered guest
+    /// backing, use the resource's own `mIovs`" and is the *only* correct shape for a resource with
+    /// no `RESOURCE_ATTACH_BACKING` — a `Some(0)` would be a zero-length iovec, which gfxstream
+    /// treats as an override and fails. `Some(n)` carries the gathered length.
     TransferToHost {
         ctx_id: u32,
         xfer: Transfer3d,
-        len: usize,
+        data: Option<usize>,
     },
     TransferFromHost {
         ctx_id: u32,
@@ -884,11 +924,16 @@ impl Renderer3d for MockRenderer {
     fn detach_backing(&mut self, resource_id: u32) {
         self.push(Call::DetachBacking { resource_id });
     }
-    fn transfer_to_host_3d(&mut self, ctx_id: u32, xfer: &Transfer3d, data: &mut [u8]) -> i32 {
+    fn transfer_to_host_3d(
+        &mut self,
+        ctx_id: u32,
+        xfer: &Transfer3d,
+        data: Option<&mut [u8]>,
+    ) -> i32 {
         self.push(Call::TransferToHost {
             ctx_id,
             xfer: *xfer,
-            len: data.len(),
+            data: data.map(|d| d.len()),
         });
         self.rc("transfer_to_host_3d")
     }
@@ -1065,7 +1110,12 @@ mod tests {
         };
 
         let mut data = [0u8; 16];
-        assert_eq!(mock.transfer_to_host_3d(2, &xfer, &mut data), 0);
+        assert_eq!(mock.transfer_to_host_3d(2, &xfer, Some(&mut data)), 0);
+        assert_eq!(
+            mock.transfer_to_host_3d(2, &xfer, None),
+            0,
+            "a transfer with no gathered backing must still be routed"
+        );
         assert_eq!(mock.transfer_from_host_3d(2, &xfer, &mut data), 0);
         assert_eq!(
             data, [0xABu8; 16],
@@ -1080,7 +1130,12 @@ mod tests {
                 Call::TransferToHost {
                     ctx_id: 2,
                     xfer,
-                    len: 16
+                    data: Some(16)
+                },
+                Call::TransferToHost {
+                    ctx_id: 2,
+                    xfer,
+                    data: None
                 },
                 Call::TransferFromHost {
                     ctx_id: 2,

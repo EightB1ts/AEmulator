@@ -59,6 +59,68 @@ const VIRTIO_GPU_MAX_SCANOUTS: usize = 16;
 const CTRL_HDR_LEN: usize = 24;
 const BPP: u32 = 4;
 
+// =====================================================================================
+// Guest-controlled allocation limits.
+//
+// Every number below arrives from the guest inside a control command, and each one used to size a
+// host allocation directly: `vec![0u8; len as usize]` per readable descriptor, one host pixel buffer
+// per `RESOURCE_CREATE_2D`, one gathered copy per `TRANSFER_TO_HOST_*`. A malicious or simply broken
+// guest could ask for ~4 GiB per command, on the vCPU thread, holding `ctx.pci`. Worse, the size
+// arithmetic was `u32` (`(width * height * BPP) as usize`), which **panics** in a debug build — a
+// guest-triggerable VMM abort — and silently **wraps** in a release build, yielding a buffer smaller
+// than the code that fills it believes.
+//
+// So: bound every guest-sized allocation, do all size arithmetic in `u64`, and reject the command
+// (with the rejected value logged) rather than clamping — a clamped resource is a resource whose
+// dimensions the device and the guest disagree about, which is a silent-corruption bug instead of a
+// loud one.
+// =====================================================================================
+
+/// Largest scanout/resource dimension accepted on either axis, in pixels. Two orders of magnitude
+/// above any panel this device presents (1080×2400) and above the `maxImageDimension2D` of the host
+/// Vulkan driver, so nothing legitimate is near it.
+const MAX_DIM: u32 = 16384;
+
+/// Cap on the bytes one resource's host pixel buffer (or one gathered guest backing) may occupy.
+///
+/// **Exclusive**: a resource must be strictly smaller than this, which puts the round 8192×8192 BGRA
+/// image (exactly 256 MiB) just outside it. 256 MiB is ~25× a 1080×2400 BGRA frame and ~4× a 4096²
+/// RGBA texture, so it bounds the DoS without being reachable by a real guest.
+const MAX_RESOURCE_BYTES: u64 = 256 << 20;
+
+/// Largest `nr_entries` accepted on `RESOURCE_ATTACH_BACKING` / `RESOURCE_CREATE_BLOB`. A 256 MiB
+/// resource scattered into 4 KiB guest pages needs 65536 entries, but a real guest hands us far
+/// larger physically-contiguous runs; 4096 covers every backing observed on the boot path.
+const MAX_MEM_ENTRIES: usize = 4096;
+
+/// `sizeof(struct virtio_gpu_mem_entry)`: addr(u64) length(u32) padding(u32).
+const MEM_ENTRY_BYTES: usize = 16;
+
+/// Cap on the assembled bytes of one control command (the device-readable half of a chain).
+///
+/// The largest legitimate control command is `RESOURCE_ATTACH_BACKING` with
+/// [`MAX_MEM_ENTRIES`]×[`MEM_ENTRY_BYTES`] = 64 KiB of trailing mem entries, so this is that with 2×
+/// headroom. The rejected size is logged, so a cap set too tight presents as a log line naming the
+/// number to raise rather than as a black screen.
+const MAX_CMD_BYTES: usize = 128 << 10;
+
+/// Byte size of a `width`×`height` BGRA image, or `None` if the dimensions are unusable: zero, past
+/// [`MAX_DIM`], or a total at/above [`MAX_RESOURCE_BYTES`].
+///
+/// All arithmetic in `u64`. The `u32` version of this expression is the overflow: 65536² × 4 is 2^36,
+/// which does not fit, so a guest asking for a 65536×65536 resource either aborted the VMM (debug) or
+/// got a 0-byte buffer described as a 65536×65536 image (release).
+fn resource_bytes(width: u32, height: u32) -> Option<usize> {
+    if width == 0 || height == 0 || width > MAX_DIM || height > MAX_DIM {
+        return None;
+    }
+    let bytes = u64::from(width) * u64::from(height) * u64::from(BPP);
+    if bytes >= MAX_RESOURCE_BYTES {
+        return None;
+    }
+    usize::try_from(bytes).ok()
+}
+
 pub const CONTROLQ: u16 = 0;
 pub const CURSORQ: u16 = 1;
 
@@ -71,12 +133,19 @@ pub struct Framebuffer {
 }
 
 impl Framebuffer {
-    fn new(width: u32, height: u32) -> Self {
-        Self {
+    /// Allocate a `width`×`height` BGRA framebuffer, or `None` when the dimensions are outside the
+    /// device limits (see [`resource_bytes`]).
+    ///
+    /// Fallible on purpose. This is reached from `RESOURCE_CREATE_2D` and from `SET_SCANOUT_BLOB`,
+    /// i.e. from guest-supplied `width`/`height` — the previous infallible `new` computed its size in
+    /// `u32` and allocated whatever came out, so a 65536² request was a VMM abort in a debug build.
+    /// Every call site rejects the command instead of resizing to something the guest did not ask for.
+    fn try_new(width: u32, height: u32) -> Option<Self> {
+        Some(Self {
             width,
             height,
-            bytes: vec![0u8; (width * height * BPP) as usize],
-        }
+            bytes: vec![0u8; resource_bytes(width, height)?],
+        })
     }
 
     /// Count of non-zero bytes — a cheap "did the guest draw anything?" probe for headless runs.
@@ -289,6 +358,15 @@ pub struct Gpu {
     /// How host blob memory reaches the guest address space. [`HvfMapper`] in production; a
     /// [`RecordingMapper`] under test (see [`Gpu::with_mapper`]).
     mapper: Box<dyn GuestMapper>,
+    /// Whether a 3D present has already run during the current [`Gpu::process_controlq`] batch.
+    ///
+    /// `process_controlq` drains the ring until it is empty, inside the MMIO exit, holding
+    /// `ctx.pci` — and the expensive part of a control command is the present in [`Gpu::flush_3d`]
+    /// (a swapchain acquire bounded at 100 ms, or a full GPU→CPU readback of the scanout). A raw
+    /// iteration cap is the wrong bound: the ring is only 256 deep and stopping early risks stalling
+    /// a guest that does not re-kick. Bounding the *present* costs nothing, because only the last
+    /// frame of a batch can reach the drawable anyway.
+    presented_this_batch: bool,
 }
 
 impl Gpu {
@@ -299,7 +377,11 @@ impl Gpu {
             resources: HashMap::new(),
             scanout_resource: 0,
             scanout: ScanoutHandle {
-                fb: Arc::new(Mutex::new(Framebuffer::new(width, height))),
+                // Not guest input: this is the VMM's own configured scanout size, so a value outside
+                // the device limits is a host misconfiguration and must be loud at construction.
+                fb: Arc::new(Mutex::new(Framebuffer::try_new(width, height).expect(
+                    "the VMM's default scanout size must be within the device limits",
+                ))),
                 generation: Arc::new(AtomicU64::new(0)),
                 metal_layer: Arc::new(AtomicUsize::new(0)),
                 presented: Arc::new(AtomicBool::new(false)),
@@ -311,6 +393,7 @@ impl Gpu {
             blobs: HashMap::new(),
             blob_maps: HashMap::new(),
             mapper: Box::new(HvfMapper),
+            presented_this_batch: false,
         }
     }
 
@@ -420,11 +503,20 @@ impl Gpu {
     }
 
     fn process_controlq(&mut self, mem: &Mem, queue: &mut Queue) -> bool {
+        // One present per drain (see `presented_this_batch`). Reset here, not in `flush_3d`, so the
+        // bound is per guest kick.
+        self.presented_this_batch = false;
         let mut used = false;
         while let Some(chain) = queue.pop_descriptor_chain(mem) {
             let head = chain.head_index();
             let (cmd, writable) = split_chain(mem, chain);
-            let resp = self.dispatch(mem, &cmd);
+            // `None` ⇒ the chain's device-readable half was rejected before it was assembled (over
+            // MAX_CMD_BYTES). The chain is still answered and completed, so the guest ring cannot
+            // stall on it.
+            let resp = match cmd {
+                Some(cmd) => self.dispatch(mem, &cmd),
+                None => resp_hdr(VIRTIO_GPU_RESP_ERR_UNSPEC, 0, 0).to_vec(),
+            };
             let written = write_scatter(mem, &writable, &resp);
             let _ = queue.add_used(mem, head, written);
             used = true;
@@ -454,6 +546,16 @@ impl Gpu {
                 if id == 0 || width == 0 || height == 0 {
                     return ok(VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID);
                 }
+                // Dimensions were previously only checked for zero, so `width * height * BPP` was a
+                // guest-chosen `u32` product: 65536² overflowed it outright and 8192² asked for
+                // 256 MiB per resource with no limit on how many.
+                let Some(bytes) = resource_bytes(width, height) else {
+                    eprintln!(
+                        "[gpu] resource_create_2d res={id} {width}x{height} rejected: over \
+                         MAX_DIM {MAX_DIM} or MAX_RESOURCE_BYTES {MAX_RESOURCE_BYTES:#x}"
+                    );
+                    return ok(VIRTIO_GPU_RESP_ERR_UNSPEC);
+                };
                 self.resources.insert(
                     id,
                     Resource {
@@ -461,7 +563,7 @@ impl Gpu {
                         height,
                         format,
                         backing: Vec::new(),
-                        pixels: vec![0u8; (width * height * BPP) as usize],
+                        pixels: vec![0u8; bytes],
                     },
                 );
                 ok(VIRTIO_GPU_RESP_OK_NODATA)
@@ -494,9 +596,11 @@ impl Gpu {
                     dims = self.res3d.get(&resource_id).copied();
                 }
                 if let Some((w, h)) = dims {
-                    let mut fb = self.scanout.fb.lock().unwrap();
-                    if fb.width != w || fb.height != h {
-                        *fb = Framebuffer::new(w, h);
+                    // A 3D resource's dimensions are NOT validated at create time (a `PIPE_BUFFER`
+                    // resource legitimately reports its byte size as `width`), so this is where a
+                    // resource bound to the scanout is first required to be a presentable image.
+                    if !self.resize_scanout(w, h) {
+                        return ok(VIRTIO_GPU_RESP_ERR_UNSPEC);
                     }
                 }
                 ok(VIRTIO_GPU_RESP_OK_NODATA)
@@ -505,17 +609,39 @@ impl Gpu {
                 // hdr(24) resource_id(24) nr_entries(28) then nr_entries * mem_entry(16: addr,len,pad)
                 let id = read_le(cmd, 24, 4) as u32;
                 let nr = read_le(cmd, 28, 4) as u32 as usize;
-                let mut backing = Vec::with_capacity(nr);
-                let mut off = 32;
-                for _ in 0..nr {
-                    if off + 16 > cmd.len() {
-                        break;
-                    }
-                    let addr = read_le(cmd, off, 8);
-                    let len = read_le(cmd, off + 8, 4) as u32;
-                    backing.push((addr, len));
-                    off += 16;
+                // `nr` is guest-chosen and used to be a `Vec::with_capacity(nr)` (up to 4 G entries),
+                // and a truncated tail was silently dropped — which shifts the offset of every entry
+                // after it, so the resource is assembled out of the wrong bytes.
+                let Some(backing) = parse_mem_entries(cmd, 32, nr) else {
+                    eprintln!(
+                        "[gpu] attach_backing res={id} nr_entries={nr} cmd_len={} rejected: over \
+                         MAX_MEM_ENTRIES {MAX_MEM_ENTRIES} or the command is truncated",
+                        cmd.len()
+                    );
+                    return ok(VIRTIO_GPU_RESP_ERR_UNSPEC);
+                };
+                if backing_bytes(&backing).is_none() {
+                    eprintln!(
+                        "[gpu] attach_backing res={id} entries={} rejected: total backing exceeds \
+                         MAX_RESOURCE_BYTES {MAX_RESOURCE_BYTES:#x}",
+                        backing.len()
+                    );
+                    return ok(VIRTIO_GPU_RESP_ERR_UNSPEC);
                 }
+                // Range-validate every entry BEFORE any of it is recorded or forwarded, and fail the
+                // whole command on the first bad one. `filter_map`ping the bad entries away (what this
+                // used to do for the 3D path) silently renumbers the rest of the backing.
+                let iovs = match resolve_iovs(mem, &backing) {
+                    Ok(iovs) => iovs,
+                    Err(i) => {
+                        let (addr, len) = backing[i];
+                        eprintln!(
+                            "[gpu] attach_backing res={id} entry={i} addr={addr:#x} len={len:#x} \
+                             is not wholly inside guest RAM — rejecting the whole command"
+                        );
+                        return ok(VIRTIO_GPU_RESP_ERR_UNSPEC);
+                    }
+                };
                 if let Some(res) = self.resources.get_mut(&id) {
                     res.backing = backing;
                     return ok(VIRTIO_GPU_RESP_OK_NODATA);
@@ -528,10 +654,6 @@ impl Gpu {
                 // later transfers, so handing it a gathered host copy leaves it holding a pointer
                 // into freed memory the moment this command returns.
                 if self.res3d.contains_key(&id) {
-                    let iovs: Vec<(u64, usize)> = backing
-                        .iter()
-                        .filter_map(|&(addr, len)| host_addr(mem, addr).map(|h| (h, len as usize)))
-                        .collect();
                     self.res3d_backing.insert(id, backing);
                     if let Some(r) = self.renderer.as_mut() {
                         let rc = r.attach_backing(id, &iovs);
@@ -647,6 +769,12 @@ impl Gpu {
     }
 
     /// Copy the rect of guest backing into the host resource image (qemu 2D transfer semantics).
+    ///
+    /// The rect is guest-controlled and the row arithmetic used to be `u32`: `rect.x * BPP` and
+    /// `(rect.y + row) * stride` both overflow for large coordinates — a panic in a debug build, a
+    /// wrapped (i.e. *in-bounds-looking*) destination offset in a release build. Everything here is
+    /// `u64`, and the whole transfer is gated on an explicit in-bounds precondition rather than the
+    /// per-row `<=` guard, which silently copied the rows that happened to fit.
     fn transfer_to_host(&mut self, mem: &Mem, id: u32, rect: Rect, offset: u64) -> bool {
         let Some(res) = self.resources.get_mut(&id) else {
             return false;
@@ -654,12 +782,32 @@ impl Gpu {
         if res.backing.is_empty() {
             return true; // nothing attached yet, but not an error
         }
-        let backing = gather_backing(mem, &res.backing);
-        let stride = (res.width * BPP) as usize;
-        let rowlen = (rect.width * BPP) as usize;
-        for row in 0..rect.height {
-            let src = offset as usize + (row as usize) * stride;
-            let dst = ((rect.y + row) as usize) * stride + (rect.x * BPP) as usize;
+        let (rx, ry) = (u64::from(rect.x), u64::from(rect.y));
+        let (rw, rh) = (u64::from(rect.width), u64::from(rect.height));
+        if rx + rw > u64::from(res.width) || ry + rh > u64::from(res.height) {
+            eprintln!(
+                "[gpu] transfer_to_host_2d res={id} rect {rw}x{rh}+{rx}+{ry} lies outside the \
+                 {}x{} resource — no pixels transferred",
+                res.width, res.height
+            );
+            return true;
+        }
+        let Some(backing) = gather_backing(mem, &res.backing) else {
+            eprintln!("[gpu] transfer_to_host_2d res={id}: backing too large to gather");
+            return false;
+        };
+        let stride = u64::from(res.width) * u64::from(BPP);
+        let rowlen = (rw * u64::from(BPP)) as usize;
+        for row in 0..rh {
+            // `offset` is a raw u64 from the guest, so the source can be anywhere; the destination is
+            // in-bounds by the precondition above.
+            let Some(src) = offset
+                .checked_add(row * stride)
+                .and_then(|v| usize::try_from(v).ok())
+            else {
+                break;
+            };
+            let dst = ((ry + row) * stride + rx * u64::from(BPP)) as usize;
             if src + rowlen <= backing.len() && dst + rowlen <= res.pixels.len() {
                 res.pixels[dst..dst + rowlen].copy_from_slice(&backing[src..src + rowlen]);
             }
@@ -675,17 +823,46 @@ impl Gpu {
         } else {
             self.scanout_resource
         };
+        let Some((w, h)) = self.resources.get(&rid).map(|r| (r.width, r.height)) else {
+            return;
+        };
+        if !self.resize_scanout(w, h) {
+            return;
+        }
         let Some(res) = self.resources.get(&rid) else {
             return;
         };
         let mut fb = self.scanout.fb.lock().unwrap();
-        if fb.width != res.width || fb.height != res.height {
-            *fb = Framebuffer::new(res.width, res.height);
-        }
         let n = fb.bytes.len().min(res.pixels.len());
         fb.bytes[..n].copy_from_slice(&res.pixels[..n]);
         drop(fb);
         self.scanout.generation.fetch_add(1, Ordering::Release);
+    }
+
+    /// Make the scanout framebuffer `w`×`h`, reallocating only if it is not already that size.
+    ///
+    /// `false` — nothing changed, the caller must reject the command — when `w`/`h` are outside the
+    /// device limits. This is the single place a guest-supplied resolution turns into a host
+    /// allocation, so it is the single place that has to be bounded: `SET_SCANOUT`,
+    /// `SET_SCANOUT_BLOB`, the 2D flush and the 3D flush all route through here.
+    fn resize_scanout(&mut self, w: u32, h: u32) -> bool {
+        let mut fb = self.scanout.fb.lock().unwrap();
+        if fb.width == w && fb.height == h {
+            return true;
+        }
+        match Framebuffer::try_new(w, h) {
+            Some(next) => {
+                *fb = next;
+                true
+            }
+            None => {
+                eprintln!(
+                    "[gpu] scanout {w}x{h} rejected: over MAX_DIM {MAX_DIM} or \
+                     MAX_RESOURCE_BYTES {MAX_RESOURCE_BYTES:#x}"
+                );
+                false
+            }
+        }
     }
 }
 
@@ -780,17 +957,31 @@ impl Gpu {
             }
             VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D => {
                 let xfer = parse_transfer3d(cmd);
-                // Copy the guest backing this transfer feeds gfxstream from.
-                let mut data = self
-                    .res3d_backing
-                    .get(&xfer.resource_id)
-                    .map(|b| gather_backing(mem, b))
-                    .unwrap_or_default();
+                // Copy the guest backing this transfer feeds gfxstream from. A resource with no
+                // `RESOURCE_ATTACH_BACKING` of its own has NO gathered data, which is not the same as
+                // zero bytes of data: the empty case must reach the renderer as `None` so gfxstream
+                // uses the resource's own iovecs instead of being handed a zero-length one that
+                // overrides them (see `Renderer3d::transfer_to_host_3d`).
+                let mut data = match self.res3d_backing.get(&xfer.resource_id) {
+                    Some(backing) => match gather_backing(mem, backing) {
+                        Some(data) => Some(data),
+                        None => {
+                            eprintln!(
+                                "[gpu3d] transfer_to_host_3d res={} rejected: backing too large \
+                                 to gather",
+                                xfer.resource_id
+                            );
+                            return Some(nodata(VIRTIO_GPU_RESP_ERR_UNSPEC));
+                        }
+                    },
+                    None => None,
+                };
+                let payload = data.as_deref_mut().filter(|d| !d.is_empty());
                 let rc = self
                     .renderer
                     .as_mut()
                     .unwrap()
-                    .transfer_to_host_3d(ctx_id, &xfer, &mut data);
+                    .transfer_to_host_3d(ctx_id, &xfer, payload);
                 warn_rc(rc, "transfer_to_host_3d", xfer.resource_id);
                 self.route_header_fence(cmd, flags, fence, ctx_id);
                 Some(nodata(VIRTIO_GPU_RESP_OK_NODATA))
@@ -800,7 +991,19 @@ impl Gpu {
                 // Read host resource → a scratch buffer sized to the box, then scatter into the
                 // guest backing so the guest sees the pixels.
                 let (bw, bh) = (xfer.box_[3].max(1), xfer.box_[4].max(1));
-                let mut data = vec![0u8; (bw * bh * BPP) as usize];
+                // `(bw * bh * BPP) as usize` was `u32` arithmetic over a guest-supplied box: a
+                // 65536×65536 box overflowed it. The dimensions are deliberately NOT clamped to
+                // MAX_DIM here — only the total is bounded — because a 3D *buffer* resource reports
+                // its byte size as the box width with height 1, and that is a legitimate transfer.
+                let Some(scratch) = transfer_scratch_bytes(bw, bh) else {
+                    eprintln!(
+                        "[gpu3d] transfer_from_host_3d res={} box {bw}x{bh} rejected: over \
+                         MAX_RESOURCE_BYTES {MAX_RESOURCE_BYTES:#x}",
+                        xfer.resource_id
+                    );
+                    return Some(nodata(VIRTIO_GPU_RESP_ERR_UNSPEC));
+                };
+                let mut data = vec![0u8; scratch];
                 let rc = self
                     .renderer
                     .as_mut()
@@ -838,19 +1041,32 @@ impl Gpu {
                 };
                 // Resolve the trailing `nr_entries` guest mem-entries (addr,len,pad @ offset 56) into
                 // host iovecs. A HOST3D blob (the ASG ring) carries none — the host allocates it.
-                let mut iovs: Vec<(u64, usize)> = Vec::with_capacity(blob.nr_entries as usize);
-                let mut off = 56usize;
-                for _ in 0..blob.nr_entries {
-                    if off + 16 > cmd.len() {
-                        break;
+                //
+                // gfxstream stores these `(ptr, len)` pairs and memcpys within `iov_len` later, so an
+                // entry that is not wholly inside guest RAM is an out-of-bounds host access, and an
+                // entry silently skipped renumbers every entry after it. Both fail the command.
+                let Some(entries) = parse_mem_entries(cmd, 56, blob.nr_entries as usize) else {
+                    eprintln!(
+                        "[gpu3d] create_blob res={} nr_entries={} cmd_len={} rejected: over \
+                         MAX_MEM_ENTRIES {MAX_MEM_ENTRIES} or the command is truncated",
+                        blob.resource_id,
+                        blob.nr_entries,
+                        cmd.len()
+                    );
+                    return Some(nodata(VIRTIO_GPU_RESP_ERR_UNSPEC));
+                };
+                let iovs = match resolve_iovs(mem, &entries) {
+                    Ok(iovs) => iovs,
+                    Err(i) => {
+                        let (addr, len) = entries[i];
+                        eprintln!(
+                            "[gpu3d] create_blob res={} entry={i} addr={addr:#x} len={len:#x} is \
+                             not wholly inside guest RAM — rejecting the whole command",
+                            blob.resource_id
+                        );
+                        return Some(nodata(VIRTIO_GPU_RESP_ERR_UNSPEC));
                     }
-                    let addr = read_le(cmd, off, 8);
-                    let len = read_le(cmd, off + 8, 4) as usize;
-                    if let Some(hva) = host_addr(mem, addr) {
-                        iovs.push((hva, len));
-                    }
-                    off += 16;
-                }
+                };
                 let rc = self
                     .renderer
                     .as_mut()
@@ -881,17 +1097,22 @@ impl Gpu {
                 if scanout_id >= 1 {
                     return Some(nodata(VIRTIO_GPU_RESP_ERR_UNSPEC));
                 }
-                self.scanout_resource = resource_id;
                 // resource_id 0 disables the scanout; otherwise adopt the blob's own dimensions,
                 // which — unlike SET_SCANOUT — arrive in the command rather than from a prior
                 // RESOURCE_CREATE_2D/_3D, so record them for the flush + present path.
                 if resource_id != 0 && width != 0 && height != 0 {
-                    self.res3d.insert(resource_id, (width, height));
-                    let mut fb = self.scanout.fb.lock().unwrap();
-                    if fb.width != width || fb.height != height {
-                        *fb = Framebuffer::new(width, height);
+                    // `width`/`height` arrive raw in the command — nothing else has vetted them — and
+                    // they used to size a `Framebuffer` directly, while holding the scanout mutex.
+                    // Reject before recording the resource, so a rejected scanout leaves no state.
+                    if !self.resize_scanout(width, height) {
+                        eprintln!(
+                            "[gpu3d] set_scanout_blob res={resource_id} {width}x{height} rejected"
+                        );
+                        return Some(nodata(VIRTIO_GPU_RESP_ERR_UNSPEC));
                     }
+                    self.res3d.insert(resource_id, (width, height));
                 }
+                self.scanout_resource = resource_id;
                 self.route_header_fence(cmd, flags, fence, ctx_id);
                 Some(nodata(VIRTIO_GPU_RESP_OK_NODATA))
             }
@@ -999,12 +1220,26 @@ impl Gpu {
         let Some((w, h)) = self.res3d.get(&rid).copied() else {
             return;
         };
-        {
-            let mut fb = self.scanout.fb.lock().unwrap();
-            if fb.width != w || fb.height != h {
-                *fb = Framebuffer::new(w, h);
-            }
+        // A 3D resource's dimensions are guest-supplied and unvalidated at create time, so a flush of
+        // one that is not a presentable image is refused here rather than allocating for it.
+        let Some(readback_bytes) = resource_bytes(w, h) else {
+            eprintln!("[gpu3d] flush res={rid} {w}x{h} is not a presentable scanout — ignored");
+            return;
+        };
+        if !self.resize_scanout(w, h) {
+            return;
         }
+
+        // At most one present per control-queue batch. Everything above this point is cheap
+        // bookkeeping; everything below is either a swapchain acquire (bounded at 100 ms host-side)
+        // or a full-frame GPU→CPU readback, and a guest that queues N flushes in one kick can only
+        // ever show the last of them. The generation still advances per flush so `wait_stable` and
+        // the display thread's redraw trigger see every frame boundary.
+        if self.presented_this_batch {
+            self.scanout.generation.fetch_add(1, Ordering::Release);
+            return;
+        }
+        self.presented_this_batch = true;
 
         // In-Vulkan present. When the display thread published a CAMetalLayer, hand it to the host
         // renderer, which owns the VkSurfaceKHR + VK_KHR_swapchain on that layer and blits the
@@ -1057,7 +1292,7 @@ impl Gpu {
         // half-drawn image — visible as parts of the screen going black in a shifting, random
         // pattern while the rest of the frame is correct.
         self.renderer.as_mut().unwrap().wait_sync(rid);
-        let mut tmp = vec![0u8; (w * h * BPP) as usize];
+        let mut tmp = vec![0u8; readback_bytes];
         let rc = self
             .renderer
             .as_mut()
@@ -1085,7 +1320,10 @@ impl Gpu {
             eprintln!("[gpu3d] map_blob res={resource_id}: stream_renderer_resource_map failed");
             return err(VIRTIO_GPU_RESP_ERR_UNSPEC);
         };
-        let ipa = PCI_SHM_BASE + offset;
+        // The window check MUST precede `PCI_SHM_BASE + offset`: `offset` is a raw guest u64, so that
+        // sum overflows for a large one — a panic under `overflow-checks` and a wrapped (small,
+        // plausible-looking) IPA without it. Ordering the check first makes the sum unreachable for
+        // any offset that could overflow it.
         if offset
             .checked_add(size)
             .is_none_or(|end| end > PCI_SHM_SIZE)
@@ -1096,6 +1334,7 @@ impl Gpu {
             let _ = self.renderer.as_mut().unwrap().resource_unmap(resource_id);
             return err(VIRTIO_GPU_RESP_ERR_UNSPEC);
         }
+        let ipa = PCI_SHM_BASE + offset;
         // hv_vm_map requires IPA / host / size all aligned to the host granule (16 KiB on Apple
         // Silicon). A guest that allocated the blob at a 4 KiB-aligned offset will trip this — log it
         // precisely (it is the most likely next blocker), then still attempt so HVF's rc is reported.
@@ -1221,13 +1460,91 @@ fn parse_transfer3d(cmd: &[u8]) -> super::gpu3d::Transfer3d {
     }
 }
 
-/// Resolve a guest physical address to its backing host pointer (for building blob iovecs handed to
-/// gfxstream). `None` if the address is outside mapped guest RAM.
-fn host_addr(mem: &Mem, guest_addr: u64) -> Option<u64> {
+/// Resolve `[guest_addr, guest_addr + len)` to a host pointer, `None` unless the **whole range** lies
+/// inside mapped guest RAM.
+///
+/// This must not be `get_host_address`, which validates a **single byte**: the resulting
+/// `(host_ptr, len)` pair is handed to gfxstream by `RESOURCE_ATTACH_BACKING` /
+/// `RESOURCE_CREATE_BLOB`, which stores it in the resource and later `memcpy`s within `iov_len`. A
+/// guest mem entry with a valid address near the top of RAM and `len = 0xFFFF_FFFF` therefore bought
+/// a ~4 GiB out-of-bounds host read *and* write past the end of the guest RAM mapping.
+///
+/// `get_slice` is the right primitive: guest RAM here is a single `from_ranges` region (see
+/// `crate::memory::GuestRam`), so it cannot false-negative on a legitimate iovec that straddles two
+/// regions — there are none to straddle.
+fn host_range(mem: &Mem, guest_addr: u64, len: u64) -> Option<u64> {
     use vm_memory::GuestMemoryBackend;
-    mem.get_host_address(GuestAddress(guest_addr))
-        .ok()
-        .map(|p| p as u64)
+    let len = usize::try_from(len).ok()?;
+    let slice = mem.get_slice(GuestAddress(guest_addr), len).ok()?;
+    // For the plain mmap backend the guard is a no-op wrapper around the host address, which is what
+    // gfxstream needs to hold: a stable pointer into the guest RAM mapping, live for the whole VM.
+    Some(slice.ptr_guard_mut().as_ptr() as u64)
+}
+
+/// Range-validate every guest mem entry and resolve it to a host `(ptr, len)` iovec.
+///
+/// `Err(i)` names the index of the **first** entry that is not wholly inside guest RAM. The caller
+/// must fail the whole command on that: dropping the bad entry and keeping the rest (what
+/// `filter_map` did here) shifts the offset of every later entry, so gfxstream reads the wrong bytes
+/// for the remainder of the resource — silent image corruption instead of a rejected command.
+fn resolve_iovs(mem: &Mem, entries: &[(u64, u32)]) -> Result<Vec<(u64, usize)>, usize> {
+    let mut iovs = Vec::with_capacity(entries.len());
+    for (i, &(addr, len)) in entries.iter().enumerate() {
+        match host_range(mem, addr, u64::from(len)) {
+            Some(hva) => iovs.push((hva, len as usize)),
+            None => return Err(i),
+        }
+    }
+    Ok(iovs)
+}
+
+/// Parse the `nr` trailing `virtio_gpu_mem_entry` records (addr:u64, length:u32, padding:u32) that
+/// start at `off`.
+///
+/// `None` — the caller rejects the whole command — when the guest claims more than
+/// [`MAX_MEM_ENTRIES`] (the count used to size a `Vec::with_capacity` directly) or when the command
+/// is too short to carry the entries it claims. The old loop `break`ed out of a truncated tail, which
+/// is the same silent-renumbering bug as dropping an invalid entry.
+fn parse_mem_entries(cmd: &[u8], off: usize, nr: usize) -> Option<Vec<(u64, u32)>> {
+    if nr > MAX_MEM_ENTRIES {
+        return None;
+    }
+    if off.checked_add(nr.checked_mul(MEM_ENTRY_BYTES)?)? > cmd.len() {
+        return None;
+    }
+    Some(
+        (0..nr)
+            .map(|i| {
+                let o = off + i * MEM_ENTRY_BYTES;
+                (read_le(cmd, o, 8), read_le(cmd, o + 8, 4) as u32)
+            })
+            .collect(),
+    )
+}
+
+/// Total byte length of a resource's guest backing, or `None` if it reaches
+/// [`MAX_RESOURCE_BYTES`] — that total is what [`gather_backing`] allocates, on every
+/// `TRANSFER_TO_HOST_2D`/`_3D`.
+fn backing_bytes(entries: &[(u64, u32)]) -> Option<usize> {
+    let total: u64 = entries.iter().map(|&(_, len)| u64::from(len)).sum();
+    if total >= MAX_RESOURCE_BYTES {
+        return None;
+    }
+    usize::try_from(total).ok()
+}
+
+/// Byte size of the scratch buffer a `TRANSFER_FROM_HOST_3D` of a `w`×`h` box reads into, in `u64`
+/// arithmetic. `None` if it reaches [`MAX_RESOURCE_BYTES`].
+///
+/// Unlike [`resource_bytes`] this does **not** cap either dimension: a 3D `PIPE_BUFFER` resource
+/// reports its byte size as the box width with height 1, so a per-axis cap would reject a legitimate
+/// buffer transfer. Only the product is bounded.
+fn transfer_scratch_bytes(w: u32, h: u32) -> Option<usize> {
+    let bytes = u64::from(w) * u64::from(h) * u64::from(BPP);
+    if bytes >= MAX_RESOURCE_BYTES {
+        return None;
+    }
+    usize::try_from(bytes).ok()
 }
 
 /// Scatter a contiguous host buffer back across a resource's guest backing iovecs (best-effort).
@@ -1251,41 +1568,65 @@ fn scatter_backing(mem: &Mem, entries: &[(u64, u32)], src: &[u8]) {
 /// Split a descriptor chain into (device-readable bytes, device-writable (addr,len) list). The
 /// device-readable descriptors carry the command struct (+ any trailing mem entries); the
 /// device-writable ones receive the response.
+///
+/// The readable half is `None` when the chain claims more than [`MAX_CMD_BYTES`] of command: each
+/// descriptor's `len` is a guest-written `u32`, so one descriptor could ask this to allocate ~4 GiB
+/// per control command. The writable list is still returned in full so the caller can answer
+/// `ERR_UNSPEC` and complete the chain — a rejected command must not stall the guest's ring.
 fn split_chain(
     mem: &Mem,
     chain: virtio_queue::DescriptorChain<&Mem>,
-) -> (Vec<u8>, Vec<(u64, u32)>) {
+) -> (Option<Vec<u8>>, Vec<(u64, u32)>) {
     let descs: Vec<(u64, u32, bool)> = chain
         .map(|d| (d.addr().0, d.len(), d.is_write_only()))
         .collect();
     let mut readable = Vec::new();
     let mut writable = Vec::new();
+    let mut too_big = false;
     for (addr, len, write_only) in descs {
         if write_only {
             writable.push((addr, len));
-        } else {
-            let mut buf = vec![0u8; len as usize];
-            if mem.read_slice(&mut buf, GuestAddress(addr)).is_ok() {
-                readable.extend_from_slice(&buf);
-            }
+            continue;
+        }
+        if too_big {
+            continue;
+        }
+        if readable.len() as u64 + u64::from(len) > MAX_CMD_BYTES as u64 {
+            eprintln!(
+                "[gpu] control command rejected: {:#x} + {len:#x} bytes exceeds MAX_CMD_BYTES \
+                 {MAX_CMD_BYTES:#x}",
+                readable.len()
+            );
+            too_big = true;
+            readable = Vec::new();
+            continue;
+        }
+        let mut buf = vec![0u8; len as usize];
+        if mem.read_slice(&mut buf, GuestAddress(addr)).is_ok() {
+            readable.extend_from_slice(&buf);
         }
     }
-    (readable, writable)
+    (if too_big { None } else { Some(readable) }, writable)
 }
 
 /// Assemble a resource's scattered guest backing into one contiguous host buffer.
-fn gather_backing(mem: &Mem, entries: &[(u64, u32)]) -> Vec<u8> {
-    let total: usize = entries.iter().map(|(_, l)| *l as usize).sum();
-    let mut buf = Vec::with_capacity(total);
+///
+/// `None` if the entries total [`MAX_RESOURCE_BYTES`] or more. Every attach site already enforces
+/// that cap, so this is a backstop — but it is the allocation that used to be a bare
+/// `Vec::with_capacity(sum(len))` plus a temporary per entry, on *every* `TRANSFER_TO_HOST_2D`/`_3D`.
+fn gather_backing(mem: &Mem, entries: &[(u64, u32)]) -> Option<Vec<u8>> {
+    let mut buf = Vec::with_capacity(backing_bytes(entries)?);
     for &(addr, len) in entries {
         let mut t = vec![0u8; len as usize];
         if mem.read_slice(&mut t, GuestAddress(addr)).is_ok() {
             buf.extend_from_slice(&t);
         } else {
+            // Zero-fill rather than skip: the entry's bytes still occupy their place in the gathered
+            // image, so dropping them would shift everything after it.
             buf.extend(std::iter::repeat_n(0u8, len as usize));
         }
     }
-    buf
+    Some(buf)
 }
 
 /// Scatter `bytes` across the device-writable descriptors; returns bytes written (for `add_used`).
@@ -1424,6 +1765,29 @@ mod tests {
         let mut h = [0u8; CTRL_HDR_LEN];
         h[0..4].copy_from_slice(&cmd.to_le_bytes());
         h
+    }
+
+    /// `RESOURCE_CREATE_2D`: hdr(24) resource_id(24) format(28) width(32) height(36).
+    fn create_2d_cmd(id: u32, width: u32, height: u32) -> Vec<u8> {
+        let mut c = hdr(VIRTIO_GPU_CMD_RESOURCE_CREATE_2D).to_vec();
+        for v in [id, 1, width, height] {
+            c.extend_from_slice(&v.to_le_bytes());
+        }
+        c
+    }
+
+    /// `RESOURCE_ATTACH_BACKING`: hdr(24) resource_id(24) nr_entries(28) then
+    /// `nr_entries` × `virtio_gpu_mem_entry` (addr:u64, length:u32, padding:u32).
+    fn attach_cmd(id: u32, entries: &[(u64, u32)]) -> Vec<u8> {
+        let mut c = hdr(VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING).to_vec();
+        c.extend_from_slice(&id.to_le_bytes());
+        c.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        for &(addr, len) in entries {
+            c.extend_from_slice(&addr.to_le_bytes());
+            c.extend_from_slice(&len.to_le_bytes());
+            c.extend_from_slice(&0u32.to_le_bytes()); // padding
+        }
+        c
     }
 
     #[test]
@@ -1608,6 +1972,165 @@ mod tests {
         assert!(
             !gpu.process_controlq(&tq.mem, &mut tq.queue),
             "the chain must not be popped twice — add_used has to have advanced next_avail"
+        );
+    }
+
+    // =============================================================================================
+    // Bounded allocation + checked arithmetic on the 2D path.
+    //
+    // Every size below is guest-controlled and used to be multiplied out in `u32` and handed to
+    // `vec![0u8; …]` unchecked. Each test names the arithmetic it guards.
+    // =============================================================================================
+
+    /// The range check must be a **tightening** of the old one-byte `get_host_address`, not a
+    /// different mapping: gfxstream keeps whatever pointer it is handed for the life of the resource.
+    /// So an accepted range has to resolve to the exact same host address, and the boundary has to sit
+    /// where the region ends.
+    ///
+    /// (`host_range` goes through `get_slice` + `ptr_guard_mut`, which for the plain mmap backend is a
+    /// no-op wrapper around the region's host address. With vm-memory's `xen` feature it would instead
+    /// be an `mmap` unmapped on drop — this test is what would fail if that feature ever arrived.)
+    #[test]
+    fn host_range_agrees_with_the_single_byte_resolution_and_refuses_the_overrun() {
+        use vm_memory::GuestMemoryBackend;
+        let mem = vm_memory::GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
+        let expected = mem.get_host_address(GuestAddress(0x100)).unwrap() as u64;
+
+        assert_eq!(host_range(&mem, 0x100, 0x40), Some(expected));
+        assert_eq!(
+            host_range(&mem, 0x100, 0xF00),
+            Some(expected),
+            "a range ending exactly at the end of the region is inside it"
+        );
+        assert_eq!(
+            host_range(&mem, 0x100, 0xF01),
+            None,
+            "one byte past the end must be refused — this is the whole finding"
+        );
+        assert_eq!(
+            host_range(&mem, 0x100, 0xFFFF_FFFF),
+            None,
+            "the 4 GiB case: a valid address with a guest-chosen length"
+        );
+        assert_eq!(
+            host_range(&mem, 0x2000, 4),
+            None,
+            "an address outside guest RAM altogether"
+        );
+    }
+
+    /// `(width * height * BPP) as usize` was `u32` arithmetic: 65536² × 4 is 2^36, so this request
+    /// **panicked** in a debug build (a guest-triggerable VMM abort — there is no `[profile]`
+    /// `overflow-checks` opt-out in this crate) and in a release build wrapped to 0, producing an
+    /// empty buffer that the rest of the device believed was a 65536×65536 image.
+    #[test]
+    fn resource_create_2d_rejects_dimensions_that_overflow_u32() {
+        let mem = vm_memory::GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
+        let mut gpu = Gpu::new(64, 64);
+
+        let resp = gpu.dispatch(&mem, &create_2d_cmd(1, 0x10000, 0x10000));
+
+        assert_eq!(
+            read_le(&resp, 0, 4),
+            VIRTIO_GPU_RESP_ERR_UNSPEC as u64,
+            "a resource whose byte size does not fit in u32 must be refused"
+        );
+        assert!(
+            gpu.resources.is_empty(),
+            "a rejected create must record no resource"
+        );
+    }
+
+    /// The DoS half, with no overflow involved: 8192×8192 BGRA is exactly 256 MiB, i.e. the
+    /// [`MAX_RESOURCE_BYTES`] boundary, and nothing limited how many such resources a guest could
+    /// create. The cap is exclusive, so the round boundary value is itself rejected.
+    #[test]
+    fn resource_create_2d_rejects_an_oversized_but_non_overflowing_image() {
+        let mem = vm_memory::GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
+        let mut gpu = Gpu::new(64, 64);
+
+        assert_eq!(
+            u64::from(8192u32) * u64::from(8192u32) * u64::from(BPP),
+            MAX_RESOURCE_BYTES,
+            "this test is the boundary case — keep it on the boundary"
+        );
+        let resp = gpu.dispatch(&mem, &create_2d_cmd(1, 8192, 8192));
+
+        assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_ERR_UNSPEC as u64);
+        assert!(gpu.resources.is_empty());
+
+        // One pixel under the cap is still accepted, so the limit rejects the oversized case only.
+        let ok = gpu.dispatch(&mem, &create_2d_cmd(2, 8192, 8191));
+        assert_eq!(read_le(&ok, 0, 4), VIRTIO_GPU_RESP_OK_NODATA as u64);
+        assert!(gpu.resources.contains_key(&2));
+    }
+
+    /// `rect.x * BPP` and `(rect.y + row) * stride` were `u32` products over a guest-supplied rect,
+    /// and the only bounds check was a per-row `<=` guard that copied whichever rows happened to fit.
+    /// A rect outside the resource must move no pixels at all.
+    #[test]
+    fn transfer_to_host_2d_with_a_rect_outside_the_resource_is_a_no_op() {
+        let mem =
+            vm_memory::GuestMemoryMmap::from_ranges(&[(GuestAddress(0x1000), 0x1000)]).unwrap();
+        mem.write_slice(&[0xABu8; 16], GuestAddress(0x1000))
+            .unwrap();
+        let mut gpu = Gpu::new(2, 2);
+        gpu.dispatch(&mem, &create_2d_cmd(1, 2, 2));
+        gpu.dispatch(&mem, &attach_cmd(1, &[(0x1000, 16)]));
+
+        // 4x4 at (1,1) on a 2x2 resource — every row is at least partly out of bounds.
+        let mut xfer = hdr(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D).to_vec();
+        for v in [1u32, 1, 4, 4] {
+            xfer.extend_from_slice(&v.to_le_bytes()); // x, y, w, h
+        }
+        xfer.extend_from_slice(&0u64.to_le_bytes()); // offset
+        xfer.extend_from_slice(&1u32.to_le_bytes()); // resource_id
+        xfer.extend_from_slice(&0u32.to_le_bytes()); // padding
+        let resp = gpu.dispatch(&mem, &xfer);
+
+        assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_OK_NODATA as u64);
+        assert!(
+            gpu.resources[&1].pixels.iter().all(|b| *b == 0),
+            "an out-of-bounds rect must transfer nothing, not the rows that happen to fit"
+        );
+
+        // The in-bounds transfer of the same resource still works — the precondition rejects the
+        // out-of-range rect, not the command.
+        let mut good = hdr(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D).to_vec();
+        for v in [0u32, 0, 2, 2] {
+            good.extend_from_slice(&v.to_le_bytes());
+        }
+        good.extend_from_slice(&0u64.to_le_bytes());
+        good.extend_from_slice(&1u32.to_le_bytes());
+        good.extend_from_slice(&0u32.to_le_bytes());
+        gpu.dispatch(&mem, &good);
+        assert_eq!(gpu.resources[&1].pixels, vec![0xABu8; 16]);
+    }
+
+    /// `split_chain` allocated `vec![0u8; len as usize]` per device-readable descriptor with `len`
+    /// straight off the ring — up to ~4 GiB per control command, on the vCPU thread inside the MMIO
+    /// exit. The oversized chain must be *answered* (`ERR_UNSPEC`) and completed, not dropped: a
+    /// chain left un-`add_used`'d stalls the guest's ring forever.
+    #[test]
+    fn split_chain_rejects_an_oversized_control_command() {
+        use super::super::testkit::TestQueue;
+
+        let mut tq = TestQueue::new(0x40000);
+        let mut gpu = Gpu::new(64, 64);
+
+        let mut cmd = hdr(VIRTIO_GPU_CMD_GET_DISPLAY_INFO).to_vec();
+        cmd.resize(MAX_CMD_BYTES + 1, 0);
+        let head = tq.push_chain(&cmd, &[CTRL_HDR_LEN as u32]);
+
+        assert!(gpu.process_controlq(&tq.mem, &mut tq.queue));
+
+        let used = tq.used();
+        assert_eq!(used.len(), 1, "the rejected chain must still be completed");
+        assert_eq!(used[0].1 as usize, CTRL_HDR_LEN);
+        assert_eq!(
+            read_le(&tq.resp_bytes(head), 0, 4),
+            VIRTIO_GPU_RESP_ERR_UNSPEC as u64,
+            "a command over MAX_CMD_BYTES must be reported to the guest as an error"
         );
     }
 }
@@ -2247,6 +2770,27 @@ mod tests_3d {
         );
     }
 
+    /// The window check has to come *before* `PCI_SHM_BASE + offset`, because `offset` is a raw guest
+    /// `u64`: computing the IPA first overflows that sum, which panics under the `overflow-checks`
+    /// backstop this crate now sets in both profiles (and silently wrapped to a small, plausible IPA
+    /// before it). Found by enabling `overflow-checks`, not by the bounds check itself — the bounds
+    /// check was already there, just one line too late.
+    #[test]
+    fn map_blob_rejects_an_offset_that_would_overflow_the_window_base() {
+        let (mapper, ops) = RecordingMapper::new();
+        let (mut gpu, _log) = blob_gpu(Box::new(mapper));
+        let mem = mem();
+
+        let resp = gpu.dispatch(&mem, &map_blob_cmd(BLOB_RES, u64::MAX));
+
+        assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_ERR_UNSPEC as u64);
+        assert!(
+            ops.lock().unwrap().is_empty(),
+            "no mapping may be attempted for an offset that cannot be added to the window base"
+        );
+        assert!(gpu.blob_maps.is_empty());
+    }
+
     /// `RESOURCE_UNMAP_BLOB` then a fresh `RESOURCE_MAP_BLOB` for the same resource. The unmap must
     /// target the *same* `(ipa, size)` the map installed — an unmap of a different range leaves the
     /// original mapping live, which is how a stale host pointer stays reachable by the guest after the
@@ -2294,6 +2838,293 @@ mod tests_3d {
                 mapped,
             ],
             "unmap must release exactly the (ipa, size) that was mapped"
+        );
+    }
+
+    // =============================================================================================
+    // Range-validated host pointers + hard-fail on an invalid mem entry.
+    //
+    // `host_addr` resolved a guest address with `get_host_address`, which validates ONE BYTE. The
+    // resulting `(host_ptr, guest_len)` pair went straight to gfxstream, which stores it in the
+    // resource and `memcpy`s within `iov_len` on every later transfer — so a valid address plus
+    // `len = 0xFFFF_FFFF` was a 4 GiB out-of-bounds host read *and* write.
+    //
+    // The second half of the finding is worse: both call sites dropped an entry they could not
+    // resolve (`filter_map` / `if let Some(hva)`), which shifts the offset of every entry after it.
+    // gfxstream then reads the wrong bytes for the rest of the resource, silently. Hence every test
+    // here asserts the mock log records **no** forwarded call — the whole command must be refused.
+    // =============================================================================================
+
+    /// `RESOURCE_ATTACH_BACKING`: hdr(24) resource_id(24) nr_entries(28) then
+    /// `nr_entries` × `virtio_gpu_mem_entry` (addr:u64, length:u32, padding:u32).
+    fn attach_3d_cmd(resource_id: u32, entries: &[(u64, u32)]) -> Vec<u8> {
+        let mut c = hdr3d(VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING, 1);
+        c.extend_from_slice(&resource_id.to_le_bytes());
+        c.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        for &(addr, len) in entries {
+            c.extend_from_slice(&addr.to_le_bytes());
+            c.extend_from_slice(&len.to_le_bytes());
+            c.extend_from_slice(&0u32.to_le_bytes()); // padding
+        }
+        c
+    }
+
+    /// `RESOURCE_CREATE_BLOB`: hdr(24) resource_id(24) blob_mem(28) blob_flags(32) nr_entries(36)
+    /// blob_id(40) size(48) then the mem entries at 56.
+    fn create_blob_cmd(resource_id: u32, size: u64, entries: &[(u64, u32)]) -> Vec<u8> {
+        let mut c = hdr3d(super::super::gpu3d::VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB, 1);
+        for v in [resource_id, 3 /* GUEST */, 1, entries.len() as u32] {
+            c.extend_from_slice(&v.to_le_bytes());
+        }
+        c.extend_from_slice(&1u64.to_le_bytes()); // blob_id
+        c.extend_from_slice(&size.to_le_bytes());
+        for &(addr, len) in entries {
+            c.extend_from_slice(&addr.to_le_bytes());
+            c.extend_from_slice(&len.to_le_bytes());
+            c.extend_from_slice(&0u32.to_le_bytes()); // padding
+        }
+        c
+    }
+
+    /// `SET_SCANOUT_BLOB`: hdr(24) rect(24..40) scanout_id(40) resource_id(44) width(48) height(52)
+    /// format(56) padding(60) strides[4](64..80) offsets[4](80..96).
+    fn set_scanout_blob_cmd(resource_id: u32, width: u32, height: u32) -> Vec<u8> {
+        let mut c = hdr3d(super::super::gpu3d::VIRTIO_GPU_CMD_SET_SCANOUT_BLOB, 0);
+        c.extend_from_slice(&[0u8; 16]); // rect
+        for v in [0u32 /* scanout_id */, resource_id, width, height, 2, 0] {
+            c.extend_from_slice(&v.to_le_bytes());
+        }
+        c.extend_from_slice(&[0u8; 32]); // strides[4] + offsets[4]
+        c
+    }
+
+    /// `TRANSFER_TO_HOST_3D`: hdr(24) box[6](24..48) offset(48) resource_id(56) level(60) stride(64)
+    /// layer_stride(68).
+    fn transfer_to_host_3d_cmd(resource_id: u32, w: u32, h: u32) -> Vec<u8> {
+        let mut c = hdr3d(super::super::gpu3d::VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, 1);
+        for v in [0u32, 0, 0, w, h, 1] {
+            c.extend_from_slice(&v.to_le_bytes()); // box: x,y,z,w,h,d
+        }
+        c.extend_from_slice(&0u64.to_le_bytes()); // offset
+        for v in [resource_id, 0, w * BPP, 0] {
+            c.extend_from_slice(&v.to_le_bytes()); // resource_id, level, stride, layer_stride
+        }
+        c
+    }
+
+    /// A fenced `RESOURCE_FLUSH`: hdr(24) rect(24..40) resource_id(40) padding(44), with the ctrl
+    /// header carrying `VIRTIO_GPU_FLAG_FENCE` + `fence_id` so the response identifies its chain.
+    fn fenced_flush_cmd(resource_id: u32, fence_id: u64) -> Vec<u8> {
+        let mut c = hdr3d(VIRTIO_GPU_CMD_RESOURCE_FLUSH, 0);
+        c[4..8].copy_from_slice(&VIRTIO_GPU_FLAG_FENCE.to_le_bytes());
+        c[8..16].copy_from_slice(&fence_id.to_le_bytes());
+        c.extend_from_slice(&[0u8; 16]); // rect
+        c.extend_from_slice(&resource_id.to_le_bytes());
+        c.extend_from_slice(&0u32.to_le_bytes()); // padding
+        c
+    }
+
+    /// The 4 GiB out-of-bounds read/write: a mem entry whose address resolves (so the one-byte
+    /// `get_host_address` check passed) but whose length runs far past the end of the guest RAM
+    /// mapping. gfxstream would hold that `(ptr, len)` for the life of the resource.
+    #[test]
+    fn attach_backing_rejects_an_entry_whose_length_runs_past_guest_ram() {
+        let (mock, log) = MockRenderer::new();
+        let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+        let mem = mem(); // 0x1000 bytes of guest RAM at 0
+        create_3d(&mut gpu, &mem, 10, 32, 32);
+
+        let resp = gpu.dispatch(&mem, &attach_3d_cmd(10, &[(0xF00, 0xFFFF_FFFF)]));
+
+        assert_eq!(
+            read_le(&resp, 0, 4),
+            VIRTIO_GPU_RESP_ERR_UNSPEC as u64,
+            "an entry that is not wholly inside guest RAM must be refused"
+        );
+        assert!(
+            gpu.res3d_backing.is_empty(),
+            "a rejected attach must record no backing"
+        );
+        let calls = log.lock().unwrap();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, Call::AttachBacking { .. })),
+            "no (ptr, len) pair may reach stream_renderer_resource_attach_iov: {calls:?}"
+        );
+    }
+
+    /// `[valid, invalid, valid]`. The whole command must fail. Forwarding the two valid entries would
+    /// hand gfxstream a backing in which entry 2's bytes sit where entry 1's belong — every later
+    /// transfer reads the wrong offsets, with no error anywhere.
+    #[test]
+    fn attach_backing_rejects_the_whole_command_when_one_entry_is_invalid() {
+        let (mock, log) = MockRenderer::new();
+        let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+        let mem = mem();
+        create_3d(&mut gpu, &mem, 10, 32, 32);
+
+        let entries = [(0x100u64, 0x40u32), (0x900, 0x1000), (0x200, 0x80)];
+        let resp = gpu.dispatch(&mem, &attach_3d_cmd(10, &entries));
+
+        assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_ERR_UNSPEC as u64);
+        assert!(gpu.res3d_backing.is_empty());
+        let calls = log.lock().unwrap();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, Call::AttachBacking { .. })),
+            "one bad entry must reject the command, not renumber the rest: {calls:?}"
+        );
+    }
+
+    /// The same `(ptr, len)` resolution feeds `RESOURCE_CREATE_BLOB`, whose iovecs gfxstream keeps for
+    /// the life of the blob.
+    #[test]
+    fn create_blob_rejects_an_out_of_range_mem_entry() {
+        let (mock, log) = MockRenderer::new();
+        let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+        let mem = mem();
+
+        let resp = gpu.dispatch(&mem, &create_blob_cmd(9, 0x1000, &[(0xF00, 0xFFFF_FFFF)]));
+
+        assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_ERR_UNSPEC as u64);
+        assert!(
+            gpu.blobs.is_empty(),
+            "a rejected blob must leave no bookkeeping behind"
+        );
+        {
+            // Scoped: the mock records into this same mutex, so a live guard would deadlock the next
+            // dispatch.
+            let calls = log.lock().unwrap();
+            assert!(
+                !calls.iter().any(|c| matches!(c, Call::CreateBlob { .. })),
+                "no out-of-range iovec may reach stream_renderer_create_blob: {calls:?}"
+            );
+        }
+
+        // The in-range form of the same command is still accepted, so the check rejects the range and
+        // not the code path.
+        let ok = gpu.dispatch(&mem, &create_blob_cmd(9, 0x100, &[(0x100, 0x100)]));
+        assert_eq!(read_le(&ok, 0, 4), VIRTIO_GPU_RESP_OK_NODATA as u64);
+        assert_eq!(gpu.blobs.get(&9), Some(&0x100));
+    }
+
+    /// `SET_SCANOUT_BLOB` carries its own `width`/`height`, which nothing else has vetted, and used to
+    /// size a `Framebuffer` from them directly — in `u32` arithmetic, while holding the scanout mutex.
+    #[test]
+    fn set_scanout_blob_rejects_absurd_dimensions() {
+        let (mock, _log) = MockRenderer::new();
+        let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+        let mem = mem();
+
+        let resp = gpu.dispatch(&mem, &set_scanout_blob_cmd(7, 0x10000, 0x10000));
+
+        assert_eq!(read_le(&resp, 0, 4), VIRTIO_GPU_RESP_ERR_UNSPEC as u64);
+        assert!(
+            !gpu.res3d.contains_key(&7),
+            "a rejected scanout must record no resource"
+        );
+        assert_eq!(
+            gpu.scanout_resource, 0,
+            "a rejected scanout must not become the bound scanout"
+        );
+        let handle = gpu.handle();
+        let fb = handle.fb.lock().unwrap();
+        assert_eq!(
+            (fb.width, fb.height),
+            (64, 64),
+            "the framebuffer must be untouched by a rejected scanout"
+        );
+    }
+
+    /// A 3D resource with no `RESOURCE_ATTACH_BACKING` gathered `Vec::new()`, and the forwarder built
+    /// ONE iovec with `iov_len = 0` from it. gfxstream's `AsVecOption(iov, 1)` returns `Some(..)` for
+    /// any `iovec_cnt > 0`, which **overrides** the resource's own `mIovs`, and `TransferWithIov` then
+    /// fails with "write request overflowed iovs" — so such a resource could never be written to.
+    /// `Option<&mut [u8]>` in the trait is what makes the empty case unrepresentable at the FFI.
+    #[test]
+    fn transfer_to_host_3d_with_no_gathered_backing_passes_no_iovec() {
+        let (mock, log) = MockRenderer::new();
+        let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+        let mem = mem();
+        create_3d(&mut gpu, &mem, 10, 4, 4);
+        create_3d(&mut gpu, &mem, 11, 4, 4);
+        // Resource 11 gets a real backing; resource 10 deliberately gets none.
+        gpu.dispatch(&mem, &attach_3d_cmd(11, &[(0x100, 0x40)]));
+
+        gpu.dispatch(&mem, &transfer_to_host_3d_cmd(10, 4, 4));
+        gpu.dispatch(&mem, &transfer_to_host_3d_cmd(11, 4, 4));
+
+        let calls = log.lock().unwrap();
+        assert!(
+            calls.iter().any(|c| matches!(
+                c,
+                Call::TransferToHost { xfer, data: None, .. } if xfer.resource_id == 10
+            )),
+            "a resource with no gathered backing must forward NO iovec, not an empty one: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| matches!(
+                c,
+                Call::TransferToHost { xfer, data: Some(0x40), .. } if xfer.resource_id == 11
+            )),
+            "a resource with a backing must still forward the gathered bytes: {calls:?}"
+        );
+    }
+
+    /// `process_queue` drains the control ring until it is empty, inside the MMIO exit, holding
+    /// `ctx.pci`. The expensive part is the present in `flush_3d` — a swapchain acquire or a full
+    /// GPU→CPU readback — so a batch of N flushes must cost ONE present. Not an iteration cap: the
+    /// ring is 256 deep and stopping early risks stalling a guest that does not re-kick. Each flush
+    /// still advances the generation, which is what `wait_stable` and the redraw trigger read.
+    #[test]
+    fn at_most_one_present_runs_per_controlq_batch() {
+        use super::super::testkit::TestQueue;
+
+        let (mock, log) = MockRenderer::new();
+        let mut gpu = Gpu::with_renderer(64, 64, Box::new(mock));
+        let mut tq = TestQueue::new(0x8000);
+        gpu.handle()
+            .metal_layer
+            .store(0xCAFE_0000, Ordering::Release);
+
+        // Create + bind the scanout resource outside the batch under test.
+        create_3d(&mut gpu, &tq.mem, 10, 32, 32);
+        let mut scan = hdr3d(VIRTIO_GPU_CMD_SET_SCANOUT, 0);
+        scan.extend_from_slice(&[0u8; 16]); // rect
+        scan.extend_from_slice(&0u32.to_le_bytes()); // scanout_id
+        scan.extend_from_slice(&10u32.to_le_bytes()); // resource_id
+        gpu.dispatch(&tq.mem, &scan);
+
+        let before = gpu.handle().generation();
+        let heads: Vec<u16> = (0..3)
+            .map(|i| tq.push_chain(&fenced_flush_cmd(10, 0x100 + i), &[CTRL_HDR_LEN as u32]))
+            .collect();
+
+        assert!(gpu.process_controlq(&tq.mem, &mut tq.queue));
+
+        assert_eq!(tq.used().len(), 3, "all three chains must be completed");
+        for (i, &head) in heads.iter().enumerate() {
+            assert_eq!(
+                read_le(&tq.resp_bytes(head), 8, 8),
+                0x100 + i as u64,
+                "each chain must be answered with its own fence id — proof all three dispatched"
+            );
+        }
+        assert_eq!(
+            gpu.handle().generation(),
+            before + 3,
+            "every flush still advances the generation"
+        );
+        assert_eq!(
+            log.lock()
+                .unwrap()
+                .iter()
+                .filter(|c| matches!(c, Call::PresentToLayer { .. }))
+                .count(),
+            1,
+            "only one present may run per control-queue batch"
         );
     }
 }
