@@ -209,6 +209,22 @@ impl CompositeBlock {
             .collect()
     }
 
+    /// Guest-controlled `sector` → byte offset, or `None` if the request is out of range.
+    ///
+    /// `sector` arrives straight off the wire (`header[8..16]`), so `sector * SECTOR_SIZE` is a
+    /// guest-controlled multiply and any `sector >= 2^55` overflows `u64`. Before
+    /// `overflow-checks = true` that wrapped to a small, plausible-looking file offset and the
+    /// request read or wrote the WRONG DATA silently; with it, the same crafted request aborts the
+    /// VMM. Neither is acceptable, so the request is rejected instead.
+    ///
+    /// Bounding against the real capacity rather than merely checking the multiply is both stricter
+    /// and what virtio-blk requires: a request past the end of the device is `S_IOERR`, not a seek.
+    /// It also makes the multiply provably safe, since `sector < capacity_sectors` implies
+    /// `sector * SECTOR_SIZE < capacity_sectors * SECTOR_SIZE <= file length`.
+    fn byte_offset(&self, sector: u64) -> Option<u64> {
+        (sector < self.capacity_sectors).then(|| sector * SECTOR_SIZE)
+    }
+
     pub fn total_size(&self) -> u64 {
         self.disk_size
     }
@@ -349,7 +365,9 @@ impl CompositeBlock {
     }
 
     fn do_read(&mut self, mem: &Mem, sector: u64, data: &[(u64, u32, bool)]) -> (u8, u32) {
-        let mut pos = sector * SECTOR_SIZE;
+        let Some(mut pos) = self.byte_offset(sector) else {
+            return (VIRTIO_BLK_S_IOERR, 0);
+        };
         let mut total = 0u32;
         for &(addr, len, write_only) in data {
             if !write_only {
@@ -362,14 +380,16 @@ impl CompositeBlock {
             if mem.write_slice(&buf, GuestAddress(addr)).is_err() {
                 return (VIRTIO_BLK_S_IOERR, total);
             }
-            pos += len as u64;
-            total += len;
+            pos = pos.saturating_add(u64::from(len));
+            total = total.saturating_add(len);
         }
         (VIRTIO_BLK_S_OK, total)
     }
 
     fn do_write(&mut self, mem: &Mem, sector: u64, data: &[(u64, u32, bool)]) -> u8 {
-        let mut pos = sector * SECTOR_SIZE;
+        let Some(mut pos) = self.byte_offset(sector) else {
+            return VIRTIO_BLK_S_IOERR;
+        };
         for &(addr, len, write_only) in data {
             if write_only {
                 continue;
@@ -381,7 +401,7 @@ impl CompositeBlock {
             if self.write_at(pos, &buf).is_err() {
                 return VIRTIO_BLK_S_IOERR;
             }
-            pos += len as u64;
+            pos = pos.saturating_add(u64::from(len));
         }
         VIRTIO_BLK_S_OK
     }
@@ -397,7 +417,7 @@ impl CompositeBlock {
             if mem.write_slice(&id[..n], GuestAddress(addr)).is_err() {
                 return (VIRTIO_BLK_S_IOERR, total);
             }
-            total += n as u32;
+            total = total.saturating_add(n as u32);
             break;
         }
         (VIRTIO_BLK_S_OK, total)
@@ -687,6 +707,28 @@ mod tests {
         // Read-only components are skipped; syncing them would fail on an O_RDONLY fd.
         cd.flush_all()
             .expect("flush over mixed rw/ro components must succeed");
+    }
+
+    /// Same guest-controlled `sector * SECTOR_SIZE` overflow as the plain block device: the
+    /// composite disk reads the sector from the same wire field and used the same unbounded
+    /// multiply, so it needs the same bound. See `Block::byte_offset` for why refusing beats both
+    /// the silent wrap and the panic.
+    #[test]
+    fn a_sector_whose_byte_offset_would_overflow_is_out_of_range() {
+        let specs = vec![PartitionSpec {
+            label: "userdata".into(),
+            path: tmp_img("ovf", 8192),
+            writable: true,
+        }];
+        let cd = CompositeBlock::new(&specs).unwrap();
+        assert_eq!(cd.byte_offset(u64::MAX / SECTOR_SIZE + 1), None);
+        assert_eq!(cd.byte_offset(u64::MAX), None);
+        assert_eq!(cd.byte_offset(0), Some(0));
+        assert_eq!(
+            cd.byte_offset(cd.capacity_sectors),
+            None,
+            "capacity itself is past the end"
+        );
     }
 
     fn tmp_img(name: &str, bytes: u64) -> PathBuf {
