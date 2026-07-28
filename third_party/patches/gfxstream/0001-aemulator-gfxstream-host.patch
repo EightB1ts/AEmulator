@@ -1,5 +1,5 @@
 diff --git a/host/GfxStreamAgents.cpp b/host/GfxStreamAgents.cpp
-index df2a10b634f8513c96b3be60de514b843818bb11..2a5184765a12f1948cd4ae86463266bab61c23c2 100644
+index df2a10b63..2a5184765 100644
 --- a/host/GfxStreamAgents.cpp
 +++ b/host/GfxStreamAgents.cpp
 @@ -466,17 +466,17 @@ static const QAndroidVmOperations sQAndroidVmOperations =
@@ -24,7 +24,7 @@ index df2a10b634f8513c96b3be60de514b843818bb11..2a5184765a12f1948cd4ae86463266ba
          const {
      return &sQAndroidEmulatorWindowAgent;
 diff --git a/host/GfxStreamAgents.h b/host/GfxStreamAgents.h
-index 864d3ddec2f3767cca08844e5ade3d7fd0a3d990..47f26b0135037c37c3a0edc1f54f5375cf3fe870 100644
+index 864d3ddec..47f26b013 100644
 --- a/host/GfxStreamAgents.h
 +++ b/host/GfxStreamAgents.h
 @@ -26,13 +26,13 @@ namespace emulation {
@@ -45,7 +45,7 @@ index 864d3ddec2f3767cca08844e5ade3d7fd0a3d990..47f26b0135037c37c3a0edc1f54f5375
  };
  
 diff --git a/host/gl/gl-host-common/opengl/emugl_config.cpp b/host/gl/gl-host-common/opengl/emugl_config.cpp
-index d8f3f1601e568a061c725e186e48b8d48fbb01c1..89b7c9167ec7ad6e535f7295fccbbe0a4a8455ef 100644
+index d8f3f1601..89b7c9167 100644
 --- a/host/gl/gl-host-common/opengl/emugl_config.cpp
 +++ b/host/gl/gl-host-common/opengl/emugl_config.cpp
 @@ -393,7 +393,26 @@ bool emuglConfig_init(EmuglConfig* config,
@@ -76,7 +76,7 @@ index d8f3f1601e568a061c725e186e48b8d48fbb01c1..89b7c9167ec7ad6e535f7295fccbbe0a
          // Use Swiftshader vk icd if using swiftshader_indirect
          android::base::setEnvironmentVariable("ANDROID_EMU_VK_ICD", "swiftshader");
 diff --git a/host/gl/gl-host-common/opengles.cpp b/host/gl/gl-host-common/opengles.cpp
-index b83e959745c2eafe25696813c52245368ad3ba53..fc6f5fa67a3b38d1529f2e9a84b35ad7e6f15e23 100644
+index b83e95974..fc6f5fa67 100644
 --- a/host/gl/gl-host-common/opengles.cpp
 +++ b/host/gl/gl-host-common/opengles.cpp
 @@ -85,7 +85,37 @@ static bool sOpenglLoggerInitialized = false;
@@ -119,7 +119,7 @@ index b83e959745c2eafe25696813c52245368ad3ba53..fc6f5fa67a3b38d1529f2e9a84b35ad7
  int android_prepareOpenglesEmulation() {
      android_init_opengl_logger();
 diff --git a/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h b/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
-index eadee8d67862ff786eee8f8ad34a48ddf61e1bda..7dd6bdbff9ea3628eb27af0ddadccf9100970e17 100644
+index eadee8d67..7dd6bdbff 100644
 --- a/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
 +++ b/host/include/gfxstream/virtio-gpu-gfxstream-renderer-unstable.h
 @@ -70,6 +70,116 @@ VG_EXPORT void gfxstream_backend_setup_window(void* native_window_handle, int32_
@@ -240,7 +240,7 @@ index eadee8d67862ff786eee8f8ad34a48ddf61e1bda..7dd6bdbff9ea3628eb27af0ddadccf91
  
  // Platform resources and contexts support
 diff --git a/host/virtio-gpu-gfxstream-renderer.cpp b/host/virtio-gpu-gfxstream-renderer.cpp
-index 9f105497a675cc47f068ad803f7d0210df27b042..43dec60ab7d7d3292bb4eb2f99e4b69d1bd5c51c 100644
+index 9f105497a..43dec60ab 100644
 --- a/host/virtio-gpu-gfxstream-renderer.cpp
 +++ b/host/virtio-gpu-gfxstream-renderer.cpp
 @@ -33,6 +33,9 @@
@@ -391,7 +391,7 @@ index 9f105497a675cc47f068ad803f7d0210df27b042..43dec60ab7d7d3292bb4eb2f99e4b69d
  
  VG_EXPORT void stream_renderer_set_service_ops(const GoldfishPipeServiceOps* ops) {
 diff --git a/host/vulkan/Android.bp b/host/vulkan/Android.bp
-index a9364228d1e3be1d03267931f135293cc8156b73..ccf46fa30c27704fd78d824c54d39063150a4b13 100644
+index a9364228d..ccf46fa30 100644
 --- a/host/vulkan/Android.bp
 +++ b/host/vulkan/Android.bp
 @@ -58,6 +58,7 @@ cc_library_static {
@@ -403,7 +403,7 @@ index a9364228d1e3be1d03267931f135293cc8156b73..ccf46fa30c27704fd78d824c54d39063
          "PostWorkerVk.cpp",
          "RenderThreadInfoVk.cpp",
 diff --git a/host/vulkan/BUILD.bazel b/host/vulkan/BUILD.bazel
-index dc9de3d732073429cc1db8d450ab585e0c499d57..9fff67f87cafd2f6dcff54aef73edb735e69567f 100644
+index dc9de3d73..9fff67f87 100644
 --- a/host/vulkan/BUILD.bazel
 +++ b/host/vulkan/BUILD.bazel
 @@ -9,6 +9,7 @@ cc_library(
@@ -415,7 +415,7 @@ index dc9de3d732073429cc1db8d450ab585e0c499d57..9fff67f87cafd2f6dcff54aef73edb73
          "PostWorkerVk.cpp",
          "RenderThreadInfoVk.cpp",
 diff --git a/host/vulkan/CMakeLists.txt b/host/vulkan/CMakeLists.txt
-index a3151b0b2f155db909a49086af0f2a319ea56ff2..fb072f9aee4846bbb5c7af8f1ee9548162f23ba6 100644
+index a3151b0b2..fb072f9ae 100644
 --- a/host/vulkan/CMakeLists.txt
 +++ b/host/vulkan/CMakeLists.txt
 @@ -15,6 +15,7 @@ add_library(gfxstream-vulkan-server
@@ -427,7 +427,7 @@ index a3151b0b2f155db909a49086af0f2a319ea56ff2..fb072f9aee4846bbb5c7af8f1ee95481
              PostWorkerVk.cpp
              SwapChainStateVk.cpp
 diff --git a/host/vulkan/DisplaySurfaceVk.cpp b/host/vulkan/DisplaySurfaceVk.cpp
-index 4228b3eb83ea8cb0bc1ef7634369600851614287..32d3a0877855d448c12ae4c3faf4d53a03fc0ce4 100644
+index 4228b3eb8..32d3a0877 100644
 --- a/host/vulkan/DisplaySurfaceVk.cpp
 +++ b/host/vulkan/DisplaySurfaceVk.cpp
 @@ -37,13 +37,36 @@ std::unique_ptr<DisplaySurfaceVk> DisplaySurfaceVk::create(const VulkanDispatch&
@@ -469,7 +469,7 @@ index 4228b3eb83ea8cb0bc1ef7634369600851614287..32d3a0877855d448c12ae4c3faf4d53a
      return std::unique_ptr<DisplaySurfaceVk>(new DisplaySurfaceVk(vk, instance, surface));
 diff --git a/host/vulkan/MetalLayerPresenterVk.cpp b/host/vulkan/MetalLayerPresenterVk.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3bdab912363a77a97b4251f1d1c8309d0885af90
+index 000000000..3bdab9123
 --- /dev/null
 +++ b/host/vulkan/MetalLayerPresenterVk.cpp
 @@ -0,0 +1,594 @@
@@ -1069,7 +1069,7 @@ index 0000000000000000000000000000000000000000..3bdab912363a77a97b4251f1d1c8309d
 +#endif  // __APPLE__
 diff --git a/host/vulkan/MetalLayerPresenterVk.h b/host/vulkan/MetalLayerPresenterVk.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..9e9197db0d1f315998566e50b0255b47730fdaeb
+index 000000000..9e9197db0
 --- /dev/null
 +++ b/host/vulkan/MetalLayerPresenterVk.h
 @@ -0,0 +1,52 @@
@@ -1126,7 +1126,7 @@ index 0000000000000000000000000000000000000000..9e9197db0d1f315998566e50b0255b47
 +}  // namespace vk
 +}  // namespace gfxstream
 diff --git a/host/vulkan/VkAndroidNativeBuffer.cpp b/host/vulkan/VkAndroidNativeBuffer.cpp
-index 05de21d07302aa23e36d753a4ca65d8b714948f8..8fee5d70953e932107b0af354dbce03f20e4d472 100644
+index 05de21d07..8fee5d709 100644
 --- a/host/vulkan/VkAndroidNativeBuffer.cpp
 +++ b/host/vulkan/VkAndroidNativeBuffer.cpp
 @@ -185,8 +185,8 @@ VkResult prepareAndroidNativeBufferImage(VulkanDispatch* vk, VkDevice device,
@@ -1141,7 +1141,7 @@ index 05de21d07302aa23e36d753a4ca65d8b714948f8..8fee5d70953e932107b0af354dbce03f
          }
  #endif
 diff --git a/host/vulkan/VkCommonOperations.cpp b/host/vulkan/VkCommonOperations.cpp
-index 717a2130a72daffd67dbdf19c6a5d0966f0ed921..e68a694726f1da456489f64dc5750cd13f5cf203 100644
+index 717a2130a..e68a69472 100644
 --- a/host/vulkan/VkCommonOperations.cpp
 +++ b/host/vulkan/VkCommonOperations.cpp
 @@ -26,6 +26,7 @@
@@ -1531,7 +1531,7 @@ index 717a2130a72daffd67dbdf19c6a5d0966f0ed921..e68a694726f1da456489f64dc5750cd1
          handleTypeUsed = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
      }
 diff --git a/host/vulkan/VkCommonOperations.h b/host/vulkan/VkCommonOperations.h
-index 3891827454b8b7442dce4479d13b74c77c9be6bc..ecd7fea48c016c1ba5239d5173a19dac70bebbef 100644
+index 389182745..ecd7fea48 100644
 --- a/host/vulkan/VkCommonOperations.h
 +++ b/host/vulkan/VkCommonOperations.h
 @@ -152,14 +152,23 @@ struct VkEmulation {
@@ -1573,7 +1573,7 @@ index 3891827454b8b7442dce4479d13b74c77c9be6bc..ecd7fea48c016c1ba5239d5173a19dac
  #endif
          uint32_t streamHandleType;
 diff --git a/host/vulkan/VkDecoder.cpp b/host/vulkan/VkDecoder.cpp
-index ccc354a707e4af117a96a6c9fbf881c58944bf6e..e1ae207c3d93fc0b956b3f081e2025561b456c60 100644
+index ccc354a70..e1ae207c3 100644
 --- a/host/vulkan/VkDecoder.cpp
 +++ b/host/vulkan/VkDecoder.cpp
 @@ -4357,14 +4357,22 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
@@ -1616,10 +1616,10 @@ index ccc354a707e4af117a96a6c9fbf881c58944bf6e..e1ae207c3d93fc0b956b3f081e202556
                  m_state->on_CheckOutOfMemory(vkGetPipelineCacheData_VkResult_return, opcode,
 diff --git a/host/vulkan/VkDecoderCerealGap.inc b/host/vulkan/VkDecoderCerealGap.inc
 new file mode 100644
-index 0000000000000000000000000000000000000000..5e735f7c0736e1507795fb3bfa305efd29aed886
+index 000000000..caa2318fe
 --- /dev/null
 +++ b/host/vulkan/VkDecoderCerealGap.inc
-@@ -0,0 +1,733 @@
+@@ -0,0 +1,719 @@
 +// VkDecoderCerealGap.inc — GENERATED FILE, DO NOT EDIT.
 +//
 +// Vulkan device extensions that MUST NOT be advertised to the guest, because this gfxstream tree's
@@ -1639,8 +1639,8 @@ index 0000000000000000000000000000000000000000..5e735f7c0736e1507795fb3bfa305efd
 +// stream, which is strictly worse than aborting.
 +//
 +//   gfxstream pin : 5c5fe539389dc4fc6b0566f8f9785285f0144af9
-+//   extensions    : 168 (2 of them promoted spellings of a guard name)
-+//   struct types  : 329
++//   extensions    : 165 (2 of them promoted spellings of a guard name)
++//   struct types  : 322
 +//
 +// REGENERATE (do not hand-edit):
 +//   cargo run --manifest-path crates/aemulator-hvf/Cargo.toml --bin aemu-cereal-gap -- \
@@ -1696,9 +1696,6 @@ index 0000000000000000000000000000000000000000..5e735f7c0736e1507795fb3bfa305efd
 +        // VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ASTC_DECODE_FEATURES_EXT
 +    "VK_EXT_attachment_feedback_loop_dynamic_state",  // VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_FEATURES_EXT
 +    "VK_EXT_attachment_feedback_loop_layout",  // VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT
-+    "VK_EXT_blend_operation_advanced",  // VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT
-+        // VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_PROPERTIES_EXT
-+        // VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_ADVANCED_STATE_CREATE_INFO_EXT
 +    "VK_EXT_border_color_swizzle",  // VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BORDER_COLOR_SWIZZLE_FEATURES_EXT
 +        // VK_STRUCTURE_TYPE_SAMPLER_BORDER_COLOR_COMPONENT_MAPPING_CREATE_INFO_EXT
 +    "VK_EXT_buffer_device_address",  // VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_CREATE_INFO_EXT
@@ -1743,7 +1740,6 @@ index 0000000000000000000000000000000000000000..5e735f7c0736e1507795fb3bfa305efd
 +    "VK_EXT_image_view_min_lod",  // VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT
 +        // VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT
 +    "VK_EXT_legacy_dithering",  // VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LEGACY_DITHERING_FEATURES_EXT
-+    "VK_EXT_memory_budget",  // VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT
 +    "VK_EXT_memory_priority",  // VK_STRUCTURE_TYPE_MEMORY_PRIORITY_ALLOCATE_INFO_EXT
 +        // VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT
 +    "VK_EXT_mesh_shader",  // VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT
@@ -1850,9 +1846,6 @@ index 0000000000000000000000000000000000000000..5e735f7c0736e1507795fb3bfa305efd
 +        // VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR
 +        // VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_PROPERTIES_KHR
 +        // VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR
-+    "VK_KHR_global_priority",  // VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR
-+        // VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES_KHR
-+        // VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR
 +    "VK_KHR_performance_query",  // VK_STRUCTURE_TYPE_PERFORMANCE_QUERY_SUBMIT_INFO_KHR
 +        // VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PERFORMANCE_QUERY_FEATURES_KHR
 +        // VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PERFORMANCE_QUERY_PROPERTIES_KHR
@@ -2032,7 +2025,6 @@ index 0000000000000000000000000000000000000000..5e735f7c0736e1507795fb3bfa305efd
 +    {"VK_STRUCTURE_TYPE_DEVICE_ADDRESS_BINDING_CALLBACK_DATA_EXT", "VK_EXT_device_address_binding_report"},
 +    {"VK_STRUCTURE_TYPE_DEVICE_DIAGNOSTICS_CONFIG_CREATE_INFO_NV", "VK_NV_device_diagnostics_config"},
 +    {"VK_STRUCTURE_TYPE_DEVICE_MEMORY_OVERALLOCATION_CREATE_INFO_AMD", "VK_AMD_memory_overallocation_behavior"},
-+    {"VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR", "VK_KHR_global_priority"},
 +    {"VK_STRUCTURE_TYPE_DEVICE_QUEUE_SHADER_CORE_CONTROL_CREATE_INFO_ARM", "VK_ARM_scheduling_controls"},
 +    {"VK_STRUCTURE_TYPE_DIRECT_DRIVER_LOADING_LIST_LUNARG", "VK_LUNARG_direct_driver_loading"},
 +    {"VK_STRUCTURE_TYPE_DISPLAY_NATIVE_HDR_SURFACE_CAPABILITIES_AMD", "VK_AMD_display_native_hdr"},
@@ -2070,8 +2062,6 @@ index 0000000000000000000000000000000000000000..5e735f7c0736e1507795fb3bfa305efd
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ASTC_DECODE_FEATURES_EXT", "VK_EXT_astc_decode_mode"},
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_FEATURES_EXT", "VK_EXT_attachment_feedback_loop_dynamic_state"},
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT", "VK_EXT_attachment_feedback_loop_layout"},
-+    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT", "VK_EXT_blend_operation_advanced"},
-+    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_PROPERTIES_EXT", "VK_EXT_blend_operation_advanced"},
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BORDER_COLOR_SWIZZLE_FEATURES_EXT", "VK_EXT_border_color_swizzle"},
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT", "VK_EXT_buffer_device_address"},
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CLUSTER_CULLING_SHADER_FEATURES_HUAWEI", "VK_HUAWEI_cluster_culling_shader"},
@@ -2131,7 +2121,6 @@ index 0000000000000000000000000000000000000000..5e735f7c0736e1507795fb3bfa305efd
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR", "VK_KHR_fragment_shading_rate"},
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_PROPERTIES_KHR", "VK_KHR_fragment_shading_rate"},
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAME_BOUNDARY_FEATURES_EXT", "VK_EXT_frame_boundary"},
-+    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES_KHR", "VK_KHR_global_priority"},
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_2D_VIEW_OF_3D_FEATURES_EXT", "VK_EXT_image_2d_view_of_3d"},
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_PROCESSING_2_FEATURES_QCOM", "VK_QCOM_image_processing2"},
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_PROCESSING_2_PROPERTIES_QCOM", "VK_QCOM_image_processing2"},
@@ -2145,7 +2134,6 @@ index 0000000000000000000000000000000000000000..5e735f7c0736e1507795fb3bfa305efd
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_DRIVER_PROPERTIES_MSFT", "VK_MSFT_layered_driver"},
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LEGACY_DITHERING_FEATURES_EXT", "VK_EXT_legacy_dithering"},
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINEAR_COLOR_ATTACHMENT_FEATURES_NV", "VK_NV_linear_color_attachment"},
-+    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT", "VK_EXT_memory_budget"},
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_DECOMPRESSION_FEATURES_NV", "VK_NV_memory_decompression"},
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_DECOMPRESSION_PROPERTIES_NV", "VK_NV_memory_decompression"},
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT", "VK_EXT_memory_priority"},
@@ -2229,7 +2217,6 @@ index 0000000000000000000000000000000000000000..5e735f7c0736e1507795fb3bfa305efd
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_FEATURES_KHR", "VK_KHR_workgroup_memory_explicit_layout"},
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_YCBCR_DEGAMMA_FEATURES_QCOM", "VK_QCOM_ycbcr_degamma"},
 +    {"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_YCBCR_IMAGE_ARRAYS_FEATURES_EXT", "VK_EXT_ycbcr_image_arrays"},
-+    {"VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_ADVANCED_STATE_CREATE_INFO_EXT", "VK_EXT_blend_operation_advanced"},
 +    {"VK_STRUCTURE_TYPE_PIPELINE_COMPILER_CONTROL_CREATE_INFO_AMD", "VK_AMD_pipeline_compiler_control"},
 +    {"VK_STRUCTURE_TYPE_PIPELINE_COVERAGE_MODULATION_STATE_CREATE_INFO_NV", "VK_NV_framebuffer_mixed_samples"},
 +    {"VK_STRUCTURE_TYPE_PIPELINE_COVERAGE_REDUCTION_STATE_CREATE_INFO_NV", "VK_NV_coverage_reduction_mode"},
@@ -2257,7 +2244,6 @@ index 0000000000000000000000000000000000000000..5e735f7c0736e1507795fb3bfa305efd
 +    {"VK_STRUCTURE_TYPE_QUERY_POOL_PERFORMANCE_CREATE_INFO_KHR", "VK_KHR_performance_query"},
 +    {"VK_STRUCTURE_TYPE_QUERY_POOL_PERFORMANCE_QUERY_CREATE_INFO_INTEL", "VK_INTEL_performance_query"},
 +    {"VK_STRUCTURE_TYPE_QUERY_POOL_VIDEO_ENCODE_FEEDBACK_CREATE_INFO_KHR", "VK_KHR_video_encode_queue"},
-+    {"VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR", "VK_KHR_global_priority"},
 +    {"VK_STRUCTURE_TYPE_QUEUE_FAMILY_QUERY_RESULT_STATUS_PROPERTIES_KHR", "VK_KHR_video_queue"},
 +    {"VK_STRUCTURE_TYPE_QUEUE_FAMILY_VIDEO_PROPERTIES_KHR", "VK_KHR_video_queue"},
 +    {"VK_STRUCTURE_TYPE_RENDER_PASS_CREATION_CONTROL_EXT", "VK_EXT_subpass_merge_feedback"},
@@ -2354,7 +2340,7 @@ index 0000000000000000000000000000000000000000..5e735f7c0736e1507795fb3bfa305efd
 +
 +#endif  // AEMULATOR_VK_DECODER_CEREAL_GAP_INC
 diff --git a/host/vulkan/VkDecoderGlobalState.cpp b/host/vulkan/VkDecoderGlobalState.cpp
-index 9a4c1a36394c0381f11446207bb2f053f7626ce5..aef5700d1b45c5920d7b8a8ae508648d478fe36e 100644
+index 9a4c1a363..aef5700d1 100644
 --- a/host/vulkan/VkDecoderGlobalState.cpp
 +++ b/host/vulkan/VkDecoderGlobalState.cpp
 @@ -67,7 +67,6 @@
@@ -3351,7 +3337,7 @@ index 9a4c1a36394c0381f11446207bb2f053f7626ce5..aef5700d1b45c5920d7b8a8ae508648d
      android::base::BumpPool* pool, VkDevice boxed_device, VkPipelineCache pipelineCache,
      uint32_t createInfoCount, const VkGraphicsPipelineCreateInfo* pCreateInfos,
 diff --git a/host/vulkan/VkDecoderGlobalState.h b/host/vulkan/VkDecoderGlobalState.h
-index eb455a3999833b0f01c13eb75e550f064373bce3..8ed2edd67b40e4b97f0d0807e9619544e8032581 100644
+index eb455a399..8ed2edd67 100644
 --- a/host/vulkan/VkDecoderGlobalState.h
 +++ b/host/vulkan/VkDecoderGlobalState.h
 @@ -74,6 +74,46 @@ class VkDecoderGlobalState {
@@ -3418,7 +3404,7 @@ index eb455a3999833b0f01c13eb75e550f064373bce3..8ed2edd67b40e4b97f0d0807e9619544
                                            VkPipelineCache pipelineCache, uint32_t createInfoCount,
                                            const VkGraphicsPipelineCreateInfo* pCreateInfos,
 diff --git a/host/vulkan/VulkanDispatch.cpp b/host/vulkan/VulkanDispatch.cpp
-index fd3048888b992551fb0d03436f8d16fd826bf486..9126c8281fca9dfd718d91abe7fe267ef7ad9773 100644
+index fd3048888..9126c8281 100644
 --- a/host/vulkan/VulkanDispatch.cpp
 +++ b/host/vulkan/VulkanDispatch.cpp
 @@ -79,46 +79,50 @@ static void initIcdPaths(bool forTesting) {
@@ -3511,8 +3497,901 @@ index fd3048888b992551fb0d03436f8d16fd826bf486..9126c8281fca9dfd718d91abe7fe267e
  #else
          // By default, on other platforms, just use whatever the system
          // is packing.
+diff --git a/host/vulkan/cereal/common/goldfish_vk_deepcopy.cpp b/host/vulkan/cereal/common/goldfish_vk_deepcopy.cpp
+index bb0c4a063..8697a1bfb 100644
+--- a/host/vulkan/cereal/common/goldfish_vk_deepcopy.cpp
++++ b/host/vulkan/cereal/common/goldfish_vk_deepcopy.cpp
+@@ -6966,6 +6966,79 @@ void deepcopy_VkFenceGetFdInfoKHR(Allocator* alloc, VkStructureType rootType,
+     }
+ }
+ 
++#endif
++#ifdef VK_KHR_global_priority
++void deepcopy_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++    Allocator* alloc, VkStructureType rootType,
++    const VkDeviceQueueGlobalPriorityCreateInfoKHR* from,
++    VkDeviceQueueGlobalPriorityCreateInfoKHR* to) {
++    (void)alloc;
++    (void)rootType;
++    *to = *from;
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = from->sType;
++    }
++    const void* from_pNext = from;
++    size_t pNext_size = 0u;
++    while (!pNext_size && from_pNext) {
++        from_pNext = static_cast<const vk_struct_common*>(from_pNext)->pNext;
++        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
++    }
++    to->pNext = nullptr;
++    if (pNext_size) {
++        to->pNext = (void*)alloc->alloc(pNext_size);
++        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
++    }
++}
++
++void deepcopy_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++    Allocator* alloc, VkStructureType rootType,
++    const VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR* from,
++    VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR* to) {
++    (void)alloc;
++    (void)rootType;
++    *to = *from;
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = from->sType;
++    }
++    const void* from_pNext = from;
++    size_t pNext_size = 0u;
++    while (!pNext_size && from_pNext) {
++        from_pNext = static_cast<const vk_struct_common*>(from_pNext)->pNext;
++        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
++    }
++    to->pNext = nullptr;
++    if (pNext_size) {
++        to->pNext = (void*)alloc->alloc(pNext_size);
++        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
++    }
++}
++
++void deepcopy_VkQueueFamilyGlobalPriorityPropertiesKHR(
++    Allocator* alloc, VkStructureType rootType,
++    const VkQueueFamilyGlobalPriorityPropertiesKHR* from,
++    VkQueueFamilyGlobalPriorityPropertiesKHR* to) {
++    (void)alloc;
++    (void)rootType;
++    *to = *from;
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = from->sType;
++    }
++    const void* from_pNext = from;
++    size_t pNext_size = 0u;
++    while (!pNext_size && from_pNext) {
++        from_pNext = static_cast<const vk_struct_common*>(from_pNext)->pNext;
++        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
++    }
++    to->pNext = nullptr;
++    if (pNext_size) {
++        to->pNext = (void*)alloc->alloc(pNext_size);
++        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
++    }
++    memcpy(to->priorities, from->priorities,
++           VK_MAX_GLOBAL_PRIORITY_SIZE_KHR * sizeof(VkQueueGlobalPriorityKHR));
++}
++
+ #endif
+ #ifdef VK_KHR_pipeline_executable_properties
+ void deepcopy_VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR(
+@@ -7873,6 +7946,77 @@ void deepcopy_VkDebugUtilsObjectTagInfoEXT(Allocator* alloc, VkStructureType roo
+     }
+ }
+ 
++#endif
++#ifdef VK_EXT_blend_operation_advanced
++void deepcopy_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++    Allocator* alloc, VkStructureType rootType,
++    const VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* from,
++    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* to) {
++    (void)alloc;
++    (void)rootType;
++    *to = *from;
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = from->sType;
++    }
++    const void* from_pNext = from;
++    size_t pNext_size = 0u;
++    while (!pNext_size && from_pNext) {
++        from_pNext = static_cast<const vk_struct_common*>(from_pNext)->pNext;
++        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
++    }
++    to->pNext = nullptr;
++    if (pNext_size) {
++        to->pNext = (void*)alloc->alloc(pNext_size);
++        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
++    }
++}
++
++void deepcopy_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++    Allocator* alloc, VkStructureType rootType,
++    const VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* from,
++    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* to) {
++    (void)alloc;
++    (void)rootType;
++    *to = *from;
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = from->sType;
++    }
++    const void* from_pNext = from;
++    size_t pNext_size = 0u;
++    while (!pNext_size && from_pNext) {
++        from_pNext = static_cast<const vk_struct_common*>(from_pNext)->pNext;
++        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
++    }
++    to->pNext = nullptr;
++    if (pNext_size) {
++        to->pNext = (void*)alloc->alloc(pNext_size);
++        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
++    }
++}
++
++void deepcopy_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++    Allocator* alloc, VkStructureType rootType,
++    const VkPipelineColorBlendAdvancedStateCreateInfoEXT* from,
++    VkPipelineColorBlendAdvancedStateCreateInfoEXT* to) {
++    (void)alloc;
++    (void)rootType;
++    *to = *from;
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = from->sType;
++    }
++    const void* from_pNext = from;
++    size_t pNext_size = 0u;
++    while (!pNext_size && from_pNext) {
++        from_pNext = static_cast<const vk_struct_common*>(from_pNext)->pNext;
++        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
++    }
++    to->pNext = nullptr;
++    if (pNext_size) {
++        to->pNext = (void*)alloc->alloc(pNext_size);
++        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
++    }
++}
++
+ #endif
+ #ifdef VK_EXT_image_drm_format_modifier
+ void deepcopy_VkDrmFormatModifierPropertiesEXT(Allocator* alloc, VkStructureType rootType,
+@@ -8318,6 +8462,33 @@ void deepcopy_VkRenderPassFragmentDensityMapCreateInfoEXT(
+                                    (VkAttachmentReference*)(&to->fragmentDensityMapAttachment));
+ }
+ 
++#endif
++#ifdef VK_EXT_memory_budget
++void deepcopy_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++    Allocator* alloc, VkStructureType rootType,
++    const VkPhysicalDeviceMemoryBudgetPropertiesEXT* from,
++    VkPhysicalDeviceMemoryBudgetPropertiesEXT* to) {
++    (void)alloc;
++    (void)rootType;
++    *to = *from;
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = from->sType;
++    }
++    const void* from_pNext = from;
++    size_t pNext_size = 0u;
++    while (!pNext_size && from_pNext) {
++        from_pNext = static_cast<const vk_struct_common*>(from_pNext)->pNext;
++        pNext_size = goldfish_vk_extension_struct_size(rootType, from_pNext);
++    }
++    to->pNext = nullptr;
++    if (pNext_size) {
++        to->pNext = (void*)alloc->alloc(pNext_size);
++        deepcopy_extension_struct(alloc, rootType, from_pNext, (void*)(to->pNext));
++    }
++    memcpy(to->heapBudget, from->heapBudget, VK_MAX_MEMORY_HEAPS * sizeof(VkDeviceSize));
++    memcpy(to->heapUsage, from->heapUsage, VK_MAX_MEMORY_HEAPS * sizeof(VkDeviceSize));
++}
++
+ #endif
+ #ifdef VK_EXT_validation_features
+ void deepcopy_VkValidationFeaturesEXT(Allocator* alloc, VkStructureType rootType,
+@@ -10604,6 +10775,31 @@ void deepcopy_extension_struct(Allocator* alloc, VkStructureType rootType,
+             break;
+         }
+ #endif
++#ifdef VK_KHR_global_priority
++        case VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR: {
++            deepcopy_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++                alloc, rootType,
++                reinterpret_cast<const VkDeviceQueueGlobalPriorityCreateInfoKHR*>(structExtension),
++                reinterpret_cast<VkDeviceQueueGlobalPriorityCreateInfoKHR*>(structExtension_out));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES_KHR: {
++            deepcopy_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++                alloc, rootType,
++                reinterpret_cast<const VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR*>(
++                    structExtension),
++                reinterpret_cast<VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR*>(
++                    structExtension_out));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR: {
++            deepcopy_VkQueueFamilyGlobalPriorityPropertiesKHR(
++                alloc, rootType,
++                reinterpret_cast<const VkQueueFamilyGlobalPriorityPropertiesKHR*>(structExtension),
++                reinterpret_cast<VkQueueFamilyGlobalPriorityPropertiesKHR*>(structExtension_out));
++            break;
++        }
++#endif
+ #ifdef VK_KHR_pipeline_executable_properties
+         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR: {
+             deepcopy_VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR(
+@@ -10773,6 +10969,35 @@ void deepcopy_extension_struct(Allocator* alloc, VkStructureType rootType,
+             break;
+         }
+ #endif
++#ifdef VK_EXT_blend_operation_advanced
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT: {
++            deepcopy_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++                alloc, rootType,
++                reinterpret_cast<const VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT*>(
++                    structExtension),
++                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT*>(
++                    structExtension_out));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_PROPERTIES_EXT: {
++            deepcopy_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++                alloc, rootType,
++                reinterpret_cast<const VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT*>(
++                    structExtension),
++                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT*>(
++                    structExtension_out));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_ADVANCED_STATE_CREATE_INFO_EXT: {
++            deepcopy_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++                alloc, rootType,
++                reinterpret_cast<const VkPipelineColorBlendAdvancedStateCreateInfoEXT*>(
++                    structExtension),
++                reinterpret_cast<VkPipelineColorBlendAdvancedStateCreateInfoEXT*>(
++                    structExtension_out));
++            break;
++        }
++#endif
+ #ifdef VK_EXT_image_drm_format_modifier
+         case VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT: {
+             deepcopy_VkDrmFormatModifierPropertiesListEXT(
+@@ -10971,6 +11196,15 @@ void deepcopy_extension_struct(Allocator* alloc, VkStructureType rootType,
+             break;
+         }
+ #endif
++#ifdef VK_EXT_memory_budget
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
++            deepcopy_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++                alloc, rootType,
++                reinterpret_cast<const VkPhysicalDeviceMemoryBudgetPropertiesEXT*>(structExtension),
++                reinterpret_cast<VkPhysicalDeviceMemoryBudgetPropertiesEXT*>(structExtension_out));
++            break;
++        }
++#endif
+ #ifdef VK_EXT_validation_features
+         case VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT: {
+             deepcopy_VkValidationFeaturesEXT(
+diff --git a/host/vulkan/cereal/common/goldfish_vk_deepcopy.h b/host/vulkan/cereal/common/goldfish_vk_deepcopy.h
+index 26f32e0a2..d9636b624 100644
+--- a/host/vulkan/cereal/common/goldfish_vk_deepcopy.h
++++ b/host/vulkan/cereal/common/goldfish_vk_deepcopy.h
+@@ -1442,6 +1442,23 @@ DEFINE_ALIAS_FUNCTION(deepcopy_VkDescriptorSetLayoutSupport,
+ DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures,
+                       deepcopy_VkPhysicalDeviceShaderSubgroupExtendedTypesFeaturesKHR)
+ 
++#endif
++#ifdef VK_KHR_global_priority
++void deepcopy_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++    Allocator* alloc, VkStructureType rootType,
++    const VkDeviceQueueGlobalPriorityCreateInfoKHR* from,
++    VkDeviceQueueGlobalPriorityCreateInfoKHR* to);
++
++void deepcopy_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++    Allocator* alloc, VkStructureType rootType,
++    const VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR* from,
++    VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR* to);
++
++void deepcopy_VkQueueFamilyGlobalPriorityPropertiesKHR(
++    Allocator* alloc, VkStructureType rootType,
++    const VkQueueFamilyGlobalPriorityPropertiesKHR* from,
++    VkQueueFamilyGlobalPriorityPropertiesKHR* to);
++
+ #endif
+ #ifdef VK_KHR_vulkan_memory_model
+ DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceVulkanMemoryModelFeatures,
+@@ -1731,6 +1748,23 @@ DEFINE_ALIAS_FUNCTION(deepcopy_VkWriteDescriptorSetInlineUniformBlock,
+ DEFINE_ALIAS_FUNCTION(deepcopy_VkDescriptorPoolInlineUniformBlockCreateInfo,
+                       deepcopy_VkDescriptorPoolInlineUniformBlockCreateInfoEXT)
+ 
++#endif
++#ifdef VK_EXT_blend_operation_advanced
++void deepcopy_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++    Allocator* alloc, VkStructureType rootType,
++    const VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* from,
++    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* to);
++
++void deepcopy_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++    Allocator* alloc, VkStructureType rootType,
++    const VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* from,
++    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* to);
++
++void deepcopy_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++    Allocator* alloc, VkStructureType rootType,
++    const VkPipelineColorBlendAdvancedStateCreateInfoEXT* from,
++    VkPipelineColorBlendAdvancedStateCreateInfoEXT* to);
++
+ #endif
+ #ifdef VK_EXT_image_drm_format_modifier
+ void deepcopy_VkDrmFormatModifierPropertiesEXT(Allocator* alloc, VkStructureType rootType,
+@@ -1845,6 +1879,13 @@ DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceSubgroupSizeControlProperties,
+ DEFINE_ALIAS_FUNCTION(deepcopy_VkPipelineShaderStageRequiredSubgroupSizeCreateInfo,
+                       deepcopy_VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT)
+ 
++#endif
++#ifdef VK_EXT_memory_budget
++void deepcopy_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++    Allocator* alloc, VkStructureType rootType,
++    const VkPhysicalDeviceMemoryBudgetPropertiesEXT* from,
++    VkPhysicalDeviceMemoryBudgetPropertiesEXT* to);
++
+ #endif
+ #ifdef VK_EXT_tooling_info
+ DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceToolProperties,
+diff --git a/host/vulkan/cereal/common/goldfish_vk_marshaling.cpp b/host/vulkan/cereal/common/goldfish_vk_marshaling.cpp
+index 7e8873b17..1438e92ee 100644
+--- a/host/vulkan/cereal/common/goldfish_vk_marshaling.cpp
++++ b/host/vulkan/cereal/common/goldfish_vk_marshaling.cpp
+@@ -14368,6 +14368,122 @@ void unmarshal_VkFenceGetFdInfoKHR(VulkanStream* vkStream, VkStructureType rootT
+                    sizeof(VkExternalFenceHandleTypeFlagBits));
+ }
+ 
++#endif
++#ifdef VK_KHR_global_priority
++void marshal_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    const VkDeviceQueueGlobalPriorityCreateInfoKHR* forMarshaling) {
++    (void)rootType;
++    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forMarshaling->sType;
++    }
++    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
++    vkStream->write((VkQueueGlobalPriorityKHR*)&forMarshaling->globalPriority,
++                    sizeof(VkQueueGlobalPriorityKHR));
++}
++
++void unmarshal_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkDeviceQueueGlobalPriorityCreateInfoKHR* forUnmarshaling) {
++    (void)rootType;
++    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    size_t pNext_size;
++    pNext_size = vkStream->getBe32();
++    forUnmarshaling->pNext = nullptr;
++    if (pNext_size) {
++        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
++        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
++        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
++        vkStream->alloc((void**)&forUnmarshaling->pNext,
++                        goldfish_vk_extension_struct_size_with_stream_features(
++                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
++        *(VkStructureType*)forUnmarshaling->pNext = extType;
++        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
++    }
++    vkStream->read((VkQueueGlobalPriorityKHR*)&forUnmarshaling->globalPriority,
++                   sizeof(VkQueueGlobalPriorityKHR));
++}
++
++void marshal_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    const VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR* forMarshaling) {
++    (void)rootType;
++    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forMarshaling->sType;
++    }
++    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
++    vkStream->write((VkBool32*)&forMarshaling->globalPriorityQuery, sizeof(VkBool32));
++}
++
++void unmarshal_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR* forUnmarshaling) {
++    (void)rootType;
++    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    size_t pNext_size;
++    pNext_size = vkStream->getBe32();
++    forUnmarshaling->pNext = nullptr;
++    if (pNext_size) {
++        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
++        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
++        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
++        vkStream->alloc((void**)&forUnmarshaling->pNext,
++                        goldfish_vk_extension_struct_size_with_stream_features(
++                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
++        *(VkStructureType*)forUnmarshaling->pNext = extType;
++        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
++    }
++    vkStream->read((VkBool32*)&forUnmarshaling->globalPriorityQuery, sizeof(VkBool32));
++}
++
++void marshal_VkQueueFamilyGlobalPriorityPropertiesKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    const VkQueueFamilyGlobalPriorityPropertiesKHR* forMarshaling) {
++    (void)rootType;
++    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forMarshaling->sType;
++    }
++    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
++    vkStream->write((uint32_t*)&forMarshaling->priorityCount, sizeof(uint32_t));
++    vkStream->write((VkQueueGlobalPriorityKHR*)forMarshaling->priorities,
++                    VK_MAX_GLOBAL_PRIORITY_SIZE_KHR * sizeof(VkQueueGlobalPriorityKHR));
++}
++
++void unmarshal_VkQueueFamilyGlobalPriorityPropertiesKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkQueueFamilyGlobalPriorityPropertiesKHR* forUnmarshaling) {
++    (void)rootType;
++    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    size_t pNext_size;
++    pNext_size = vkStream->getBe32();
++    forUnmarshaling->pNext = nullptr;
++    if (pNext_size) {
++        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
++        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
++        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
++        vkStream->alloc((void**)&forUnmarshaling->pNext,
++                        goldfish_vk_extension_struct_size_with_stream_features(
++                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
++        *(VkStructureType*)forUnmarshaling->pNext = extType;
++        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
++    }
++    vkStream->read((uint32_t*)&forUnmarshaling->priorityCount, sizeof(uint32_t));
++    vkStream->read((VkQueueGlobalPriorityKHR*)forUnmarshaling->priorities,
++                   VK_MAX_GLOBAL_PRIORITY_SIZE_KHR * sizeof(VkQueueGlobalPriorityKHR));
++}
++
+ #endif
+ #ifdef VK_KHR_pipeline_executable_properties
+ void marshal_VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR(
+@@ -15977,6 +16093,134 @@ void unmarshal_VkDebugUtilsObjectTagInfoEXT(VulkanStream* vkStream, VkStructureT
+     vkStream->read((void*)forUnmarshaling->pTag, forUnmarshaling->tagSize * sizeof(const uint8_t));
+ }
+ 
++#endif
++#ifdef VK_EXT_blend_operation_advanced
++void marshal_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    const VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* forMarshaling) {
++    (void)rootType;
++    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forMarshaling->sType;
++    }
++    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
++    vkStream->write((VkBool32*)&forMarshaling->advancedBlendCoherentOperations, sizeof(VkBool32));
++}
++
++void unmarshal_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* forUnmarshaling) {
++    (void)rootType;
++    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    size_t pNext_size;
++    pNext_size = vkStream->getBe32();
++    forUnmarshaling->pNext = nullptr;
++    if (pNext_size) {
++        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
++        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
++        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
++        vkStream->alloc((void**)&forUnmarshaling->pNext,
++                        goldfish_vk_extension_struct_size_with_stream_features(
++                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
++        *(VkStructureType*)forUnmarshaling->pNext = extType;
++        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
++    }
++    vkStream->read((VkBool32*)&forUnmarshaling->advancedBlendCoherentOperations, sizeof(VkBool32));
++}
++
++void marshal_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    const VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* forMarshaling) {
++    (void)rootType;
++    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forMarshaling->sType;
++    }
++    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
++    vkStream->write((uint32_t*)&forMarshaling->advancedBlendMaxColorAttachments, sizeof(uint32_t));
++    vkStream->write((VkBool32*)&forMarshaling->advancedBlendIndependentBlend, sizeof(VkBool32));
++    vkStream->write((VkBool32*)&forMarshaling->advancedBlendNonPremultipliedSrcColor,
++                    sizeof(VkBool32));
++    vkStream->write((VkBool32*)&forMarshaling->advancedBlendNonPremultipliedDstColor,
++                    sizeof(VkBool32));
++    vkStream->write((VkBool32*)&forMarshaling->advancedBlendCorrelatedOverlap, sizeof(VkBool32));
++    vkStream->write((VkBool32*)&forMarshaling->advancedBlendAllOperations, sizeof(VkBool32));
++}
++
++void unmarshal_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* forUnmarshaling) {
++    (void)rootType;
++    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    size_t pNext_size;
++    pNext_size = vkStream->getBe32();
++    forUnmarshaling->pNext = nullptr;
++    if (pNext_size) {
++        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
++        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
++        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
++        vkStream->alloc((void**)&forUnmarshaling->pNext,
++                        goldfish_vk_extension_struct_size_with_stream_features(
++                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
++        *(VkStructureType*)forUnmarshaling->pNext = extType;
++        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
++    }
++    vkStream->read((uint32_t*)&forUnmarshaling->advancedBlendMaxColorAttachments, sizeof(uint32_t));
++    vkStream->read((VkBool32*)&forUnmarshaling->advancedBlendIndependentBlend, sizeof(VkBool32));
++    vkStream->read((VkBool32*)&forUnmarshaling->advancedBlendNonPremultipliedSrcColor,
++                   sizeof(VkBool32));
++    vkStream->read((VkBool32*)&forUnmarshaling->advancedBlendNonPremultipliedDstColor,
++                   sizeof(VkBool32));
++    vkStream->read((VkBool32*)&forUnmarshaling->advancedBlendCorrelatedOverlap, sizeof(VkBool32));
++    vkStream->read((VkBool32*)&forUnmarshaling->advancedBlendAllOperations, sizeof(VkBool32));
++}
++
++void marshal_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    const VkPipelineColorBlendAdvancedStateCreateInfoEXT* forMarshaling) {
++    (void)rootType;
++    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forMarshaling->sType;
++    }
++    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
++    vkStream->write((VkBool32*)&forMarshaling->srcPremultiplied, sizeof(VkBool32));
++    vkStream->write((VkBool32*)&forMarshaling->dstPremultiplied, sizeof(VkBool32));
++    vkStream->write((VkBlendOverlapEXT*)&forMarshaling->blendOverlap, sizeof(VkBlendOverlapEXT));
++}
++
++void unmarshal_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPipelineColorBlendAdvancedStateCreateInfoEXT* forUnmarshaling) {
++    (void)rootType;
++    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    size_t pNext_size;
++    pNext_size = vkStream->getBe32();
++    forUnmarshaling->pNext = nullptr;
++    if (pNext_size) {
++        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
++        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
++        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
++        vkStream->alloc((void**)&forUnmarshaling->pNext,
++                        goldfish_vk_extension_struct_size_with_stream_features(
++                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
++        *(VkStructureType*)forUnmarshaling->pNext = extType;
++        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
++    }
++    vkStream->read((VkBool32*)&forUnmarshaling->srcPremultiplied, sizeof(VkBool32));
++    vkStream->read((VkBool32*)&forUnmarshaling->dstPremultiplied, sizeof(VkBool32));
++    vkStream->read((VkBlendOverlapEXT*)&forUnmarshaling->blendOverlap, sizeof(VkBlendOverlapEXT));
++}
++
+ #endif
+ #ifdef VK_EXT_image_drm_format_modifier
+ void marshal_VkDrmFormatModifierPropertiesEXT(
+@@ -16736,6 +16980,50 @@ void unmarshal_VkRenderPassFragmentDensityMapCreateInfoEXT(
+         (VkAttachmentReference*)(&forUnmarshaling->fragmentDensityMapAttachment));
+ }
+ 
++#endif
++#ifdef VK_EXT_memory_budget
++void marshal_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    const VkPhysicalDeviceMemoryBudgetPropertiesEXT* forMarshaling) {
++    (void)rootType;
++    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forMarshaling->sType;
++    }
++    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
++    vkStream->write((VkDeviceSize*)forMarshaling->heapBudget,
++                    VK_MAX_MEMORY_HEAPS * sizeof(VkDeviceSize));
++    vkStream->write((VkDeviceSize*)forMarshaling->heapUsage,
++                    VK_MAX_MEMORY_HEAPS * sizeof(VkDeviceSize));
++}
++
++void unmarshal_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceMemoryBudgetPropertiesEXT* forUnmarshaling) {
++    (void)rootType;
++    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    size_t pNext_size;
++    pNext_size = vkStream->getBe32();
++    forUnmarshaling->pNext = nullptr;
++    if (pNext_size) {
++        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
++        vkStream->read((void*)forUnmarshaling->pNext, sizeof(VkStructureType));
++        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
++        vkStream->alloc((void**)&forUnmarshaling->pNext,
++                        goldfish_vk_extension_struct_size_with_stream_features(
++                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
++        *(VkStructureType*)forUnmarshaling->pNext = extType;
++        unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
++    }
++    vkStream->read((VkDeviceSize*)forUnmarshaling->heapBudget,
++                   VK_MAX_MEMORY_HEAPS * sizeof(VkDeviceSize));
++    vkStream->read((VkDeviceSize*)forUnmarshaling->heapUsage,
++                   VK_MAX_MEMORY_HEAPS * sizeof(VkDeviceSize));
++}
++
+ #endif
+ #ifdef VK_EXT_validation_features
+ void marshal_VkValidationFeaturesEXT(VulkanStream* vkStream, VkStructureType rootType,
+@@ -19948,6 +20236,27 @@ void marshal_extension_struct(VulkanStream* vkStream, VkStructureType rootType,
+             break;
+         }
+ #endif
++#ifdef VK_KHR_global_priority
++        case VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR: {
++            marshal_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++                vkStream, rootType,
++                reinterpret_cast<const VkDeviceQueueGlobalPriorityCreateInfoKHR*>(structExtension));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES_KHR: {
++            marshal_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++                vkStream, rootType,
++                reinterpret_cast<const VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR*>(
++                    structExtension));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR: {
++            marshal_VkQueueFamilyGlobalPriorityPropertiesKHR(
++                vkStream, rootType,
++                reinterpret_cast<const VkQueueFamilyGlobalPriorityPropertiesKHR*>(structExtension));
++            break;
++        }
++#endif
+ #ifdef VK_KHR_pipeline_executable_properties
+         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR: {
+             marshal_VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR(
+@@ -20092,6 +20401,29 @@ void marshal_extension_struct(VulkanStream* vkStream, VkStructureType rootType,
+             break;
+         }
+ #endif
++#ifdef VK_EXT_blend_operation_advanced
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT: {
++            marshal_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++                vkStream, rootType,
++                reinterpret_cast<const VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT*>(
++                    structExtension));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_PROPERTIES_EXT: {
++            marshal_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++                vkStream, rootType,
++                reinterpret_cast<const VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT*>(
++                    structExtension));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_ADVANCED_STATE_CREATE_INFO_EXT: {
++            marshal_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++                vkStream, rootType,
++                reinterpret_cast<const VkPipelineColorBlendAdvancedStateCreateInfoEXT*>(
++                    structExtension));
++            break;
++        }
++#endif
+ #ifdef VK_EXT_image_drm_format_modifier
+         case VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT: {
+             marshal_VkDrmFormatModifierPropertiesListEXT(
+@@ -20256,6 +20588,15 @@ void marshal_extension_struct(VulkanStream* vkStream, VkStructureType rootType,
+             break;
+         }
+ #endif
++#ifdef VK_EXT_memory_budget
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
++            marshal_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++                vkStream, rootType,
++                reinterpret_cast<const VkPhysicalDeviceMemoryBudgetPropertiesEXT*>(
++                    structExtension));
++            break;
++        }
++#endif
+ #ifdef VK_EXT_validation_features
+         case VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT: {
+             marshal_VkValidationFeaturesEXT(
+@@ -21330,6 +21671,27 @@ void unmarshal_extension_struct(VulkanStream* vkStream, VkStructureType rootType
+             break;
+         }
+ #endif
++#ifdef VK_KHR_global_priority
++        case VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR: {
++            unmarshal_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++                vkStream, rootType,
++                reinterpret_cast<VkDeviceQueueGlobalPriorityCreateInfoKHR*>(structExtension_out));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES_KHR: {
++            unmarshal_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++                vkStream, rootType,
++                reinterpret_cast<VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR*>(
++                    structExtension_out));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR: {
++            unmarshal_VkQueueFamilyGlobalPriorityPropertiesKHR(
++                vkStream, rootType,
++                reinterpret_cast<VkQueueFamilyGlobalPriorityPropertiesKHR*>(structExtension_out));
++            break;
++        }
++#endif
+ #ifdef VK_KHR_pipeline_executable_properties
+         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR: {
+             unmarshal_VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR(
+@@ -21471,6 +21833,29 @@ void unmarshal_extension_struct(VulkanStream* vkStream, VkStructureType rootType
+             break;
+         }
+ #endif
++#ifdef VK_EXT_blend_operation_advanced
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT: {
++            unmarshal_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++                vkStream, rootType,
++                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT*>(
++                    structExtension_out));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_PROPERTIES_EXT: {
++            unmarshal_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++                vkStream, rootType,
++                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT*>(
++                    structExtension_out));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_ADVANCED_STATE_CREATE_INFO_EXT: {
++            unmarshal_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++                vkStream, rootType,
++                reinterpret_cast<VkPipelineColorBlendAdvancedStateCreateInfoEXT*>(
++                    structExtension_out));
++            break;
++        }
++#endif
+ #ifdef VK_EXT_image_drm_format_modifier
+         case VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT: {
+             unmarshal_VkDrmFormatModifierPropertiesListEXT(
+@@ -21634,6 +22019,14 @@ void unmarshal_extension_struct(VulkanStream* vkStream, VkStructureType rootType
+             break;
+         }
+ #endif
++#ifdef VK_EXT_memory_budget
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
++            unmarshal_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++                vkStream, rootType,
++                reinterpret_cast<VkPhysicalDeviceMemoryBudgetPropertiesEXT*>(structExtension_out));
++            break;
++        }
++#endif
+ #ifdef VK_EXT_validation_features
+         case VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT: {
+             unmarshal_VkValidationFeaturesEXT(
+diff --git a/host/vulkan/cereal/common/goldfish_vk_marshaling.h b/host/vulkan/cereal/common/goldfish_vk_marshaling.h
+index 2b2453f3a..4233605e7 100644
+--- a/host/vulkan/cereal/common/goldfish_vk_marshaling.h
++++ b/host/vulkan/cereal/common/goldfish_vk_marshaling.h
+@@ -2744,6 +2744,32 @@ DEFINE_ALIAS_FUNCTION(marshal_VkPhysicalDeviceShaderSubgroupExtendedTypesFeature
+ DEFINE_ALIAS_FUNCTION(unmarshal_VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures,
+                       unmarshal_VkPhysicalDeviceShaderSubgroupExtendedTypesFeaturesKHR)
+ 
++#endif
++#ifdef VK_KHR_global_priority
++void marshal_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    const VkDeviceQueueGlobalPriorityCreateInfoKHR* forMarshaling);
++
++void unmarshal_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkDeviceQueueGlobalPriorityCreateInfoKHR* forUnmarshaling);
++
++void marshal_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    const VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR* forMarshaling);
++
++void unmarshal_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR* forUnmarshaling);
++
++void marshal_VkQueueFamilyGlobalPriorityPropertiesKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    const VkQueueFamilyGlobalPriorityPropertiesKHR* forMarshaling);
++
++void unmarshal_VkQueueFamilyGlobalPriorityPropertiesKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkQueueFamilyGlobalPriorityPropertiesKHR* forUnmarshaling);
++
+ #endif
+ #ifdef VK_KHR_vulkan_memory_model
+ DEFINE_ALIAS_FUNCTION(marshal_VkPhysicalDeviceVulkanMemoryModelFeatures,
+@@ -3290,6 +3316,32 @@ DEFINE_ALIAS_FUNCTION(marshal_VkDescriptorPoolInlineUniformBlockCreateInfo,
+ DEFINE_ALIAS_FUNCTION(unmarshal_VkDescriptorPoolInlineUniformBlockCreateInfo,
+                       unmarshal_VkDescriptorPoolInlineUniformBlockCreateInfoEXT)
+ 
++#endif
++#ifdef VK_EXT_blend_operation_advanced
++void marshal_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    const VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* forMarshaling);
++
++void unmarshal_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* forUnmarshaling);
++
++void marshal_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    const VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* forMarshaling);
++
++void unmarshal_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* forUnmarshaling);
++
++void marshal_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    const VkPipelineColorBlendAdvancedStateCreateInfoEXT* forMarshaling);
++
++void unmarshal_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPipelineColorBlendAdvancedStateCreateInfoEXT* forUnmarshaling);
++
+ #endif
+ #ifdef VK_EXT_image_drm_format_modifier
+ void marshal_VkDrmFormatModifierPropertiesEXT(
+@@ -3481,6 +3533,16 @@ DEFINE_ALIAS_FUNCTION(marshal_VkPipelineShaderStageRequiredSubgroupSizeCreateInf
+ DEFINE_ALIAS_FUNCTION(unmarshal_VkPipelineShaderStageRequiredSubgroupSizeCreateInfo,
+                       unmarshal_VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT)
+ 
++#endif
++#ifdef VK_EXT_memory_budget
++void marshal_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    const VkPhysicalDeviceMemoryBudgetPropertiesEXT* forMarshaling);
++
++void unmarshal_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceMemoryBudgetPropertiesEXT* forUnmarshaling);
++
+ #endif
+ #ifdef VK_EXT_tooling_info
+ DEFINE_ALIAS_FUNCTION(marshal_VkPhysicalDeviceToolProperties,
 diff --git a/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.cpp b/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.cpp
-index bd76867c1df44b1801b7fb8feb8e564a0c1bde15..18d5bff8d78de6562b2425ea7f849a5e826fdb15 100644
+index bd76867c1..6d3ecbfac 100644
 --- a/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.cpp
 +++ b/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.cpp
 @@ -38,6 +38,12 @@
@@ -3528,7 +4407,341 @@ index bd76867c1df44b1801b7fb8feb8e564a0c1bde15..18d5bff8d78de6562b2425ea7f849a5e
  namespace gfxstream {
  namespace vk {
  
-@@ -16314,9 +16320,31 @@ void reservedunmarshal_extension_struct(VulkanStream* vkStream, VkStructureType
+@@ -11046,6 +11052,99 @@ void reservedunmarshal_VkFenceGetFdInfoKHR(VulkanStream* vkStream, VkStructureTy
+     *ptr += sizeof(VkExternalFenceHandleTypeFlagBits);
+ }
+ 
++#endif
++#ifdef VK_KHR_global_priority
++void reservedunmarshal_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkDeviceQueueGlobalPriorityCreateInfoKHR* forUnmarshaling, uint8_t** ptr) {
++    memcpy((VkStructureType*)&forUnmarshaling->sType, *ptr, sizeof(VkStructureType));
++    *ptr += sizeof(VkStructureType);
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    uint32_t pNext_size;
++    memcpy((uint32_t*)&pNext_size, *ptr, sizeof(uint32_t));
++    android::base::Stream::fromBe32((uint8_t*)&pNext_size);
++    *ptr += sizeof(uint32_t);
++    forUnmarshaling->pNext = nullptr;
++    if (pNext_size) {
++        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
++        memcpy((void*)forUnmarshaling->pNext, *ptr, sizeof(VkStructureType));
++        *ptr += sizeof(VkStructureType);
++        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
++        vkStream->alloc((void**)&forUnmarshaling->pNext,
++                        goldfish_vk_extension_struct_size_with_stream_features(
++                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
++        *(VkStructureType*)forUnmarshaling->pNext = extType;
++        reservedunmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext),
++                                           ptr);
++    }
++    memcpy((VkQueueGlobalPriorityKHR*)&forUnmarshaling->globalPriority, *ptr,
++           sizeof(VkQueueGlobalPriorityKHR));
++    *ptr += sizeof(VkQueueGlobalPriorityKHR);
++}
++
++void reservedunmarshal_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR* forUnmarshaling, uint8_t** ptr) {
++    memcpy((VkStructureType*)&forUnmarshaling->sType, *ptr, sizeof(VkStructureType));
++    *ptr += sizeof(VkStructureType);
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    uint32_t pNext_size;
++    memcpy((uint32_t*)&pNext_size, *ptr, sizeof(uint32_t));
++    android::base::Stream::fromBe32((uint8_t*)&pNext_size);
++    *ptr += sizeof(uint32_t);
++    forUnmarshaling->pNext = nullptr;
++    if (pNext_size) {
++        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
++        memcpy((void*)forUnmarshaling->pNext, *ptr, sizeof(VkStructureType));
++        *ptr += sizeof(VkStructureType);
++        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
++        vkStream->alloc((void**)&forUnmarshaling->pNext,
++                        goldfish_vk_extension_struct_size_with_stream_features(
++                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
++        *(VkStructureType*)forUnmarshaling->pNext = extType;
++        reservedunmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext),
++                                           ptr);
++    }
++    memcpy((VkBool32*)&forUnmarshaling->globalPriorityQuery, *ptr, sizeof(VkBool32));
++    *ptr += sizeof(VkBool32);
++}
++
++void reservedunmarshal_VkQueueFamilyGlobalPriorityPropertiesKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkQueueFamilyGlobalPriorityPropertiesKHR* forUnmarshaling, uint8_t** ptr) {
++    memcpy((VkStructureType*)&forUnmarshaling->sType, *ptr, sizeof(VkStructureType));
++    *ptr += sizeof(VkStructureType);
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    uint32_t pNext_size;
++    memcpy((uint32_t*)&pNext_size, *ptr, sizeof(uint32_t));
++    android::base::Stream::fromBe32((uint8_t*)&pNext_size);
++    *ptr += sizeof(uint32_t);
++    forUnmarshaling->pNext = nullptr;
++    if (pNext_size) {
++        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
++        memcpy((void*)forUnmarshaling->pNext, *ptr, sizeof(VkStructureType));
++        *ptr += sizeof(VkStructureType);
++        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
++        vkStream->alloc((void**)&forUnmarshaling->pNext,
++                        goldfish_vk_extension_struct_size_with_stream_features(
++                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
++        *(VkStructureType*)forUnmarshaling->pNext = extType;
++        reservedunmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext),
++                                           ptr);
++    }
++    memcpy((uint32_t*)&forUnmarshaling->priorityCount, *ptr, sizeof(uint32_t));
++    *ptr += sizeof(uint32_t);
++    memcpy((VkQueueGlobalPriorityKHR*)forUnmarshaling->priorities, *ptr,
++           VK_MAX_GLOBAL_PRIORITY_SIZE_KHR * sizeof(VkQueueGlobalPriorityKHR));
++    *ptr += VK_MAX_GLOBAL_PRIORITY_SIZE_KHR * sizeof(VkQueueGlobalPriorityKHR);
++}
++
+ #endif
+ #ifdef VK_KHR_pipeline_executable_properties
+ void reservedunmarshal_VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR(
+@@ -12323,6 +12422,111 @@ void reservedunmarshal_VkDebugUtilsObjectTagInfoEXT(VulkanStream* vkStream,
+     *ptr += forUnmarshaling->tagSize * sizeof(const uint8_t);
+ }
+ 
++#endif
++#ifdef VK_EXT_blend_operation_advanced
++void reservedunmarshal_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* forUnmarshaling, uint8_t** ptr) {
++    memcpy((VkStructureType*)&forUnmarshaling->sType, *ptr, sizeof(VkStructureType));
++    *ptr += sizeof(VkStructureType);
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    uint32_t pNext_size;
++    memcpy((uint32_t*)&pNext_size, *ptr, sizeof(uint32_t));
++    android::base::Stream::fromBe32((uint8_t*)&pNext_size);
++    *ptr += sizeof(uint32_t);
++    forUnmarshaling->pNext = nullptr;
++    if (pNext_size) {
++        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
++        memcpy((void*)forUnmarshaling->pNext, *ptr, sizeof(VkStructureType));
++        *ptr += sizeof(VkStructureType);
++        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
++        vkStream->alloc((void**)&forUnmarshaling->pNext,
++                        goldfish_vk_extension_struct_size_with_stream_features(
++                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
++        *(VkStructureType*)forUnmarshaling->pNext = extType;
++        reservedunmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext),
++                                           ptr);
++    }
++    memcpy((VkBool32*)&forUnmarshaling->advancedBlendCoherentOperations, *ptr, sizeof(VkBool32));
++    *ptr += sizeof(VkBool32);
++}
++
++void reservedunmarshal_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* forUnmarshaling, uint8_t** ptr) {
++    memcpy((VkStructureType*)&forUnmarshaling->sType, *ptr, sizeof(VkStructureType));
++    *ptr += sizeof(VkStructureType);
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    uint32_t pNext_size;
++    memcpy((uint32_t*)&pNext_size, *ptr, sizeof(uint32_t));
++    android::base::Stream::fromBe32((uint8_t*)&pNext_size);
++    *ptr += sizeof(uint32_t);
++    forUnmarshaling->pNext = nullptr;
++    if (pNext_size) {
++        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
++        memcpy((void*)forUnmarshaling->pNext, *ptr, sizeof(VkStructureType));
++        *ptr += sizeof(VkStructureType);
++        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
++        vkStream->alloc((void**)&forUnmarshaling->pNext,
++                        goldfish_vk_extension_struct_size_with_stream_features(
++                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
++        *(VkStructureType*)forUnmarshaling->pNext = extType;
++        reservedunmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext),
++                                           ptr);
++    }
++    memcpy((uint32_t*)&forUnmarshaling->advancedBlendMaxColorAttachments, *ptr, sizeof(uint32_t));
++    *ptr += sizeof(uint32_t);
++    memcpy((VkBool32*)&forUnmarshaling->advancedBlendIndependentBlend, *ptr, sizeof(VkBool32));
++    *ptr += sizeof(VkBool32);
++    memcpy((VkBool32*)&forUnmarshaling->advancedBlendNonPremultipliedSrcColor, *ptr,
++           sizeof(VkBool32));
++    *ptr += sizeof(VkBool32);
++    memcpy((VkBool32*)&forUnmarshaling->advancedBlendNonPremultipliedDstColor, *ptr,
++           sizeof(VkBool32));
++    *ptr += sizeof(VkBool32);
++    memcpy((VkBool32*)&forUnmarshaling->advancedBlendCorrelatedOverlap, *ptr, sizeof(VkBool32));
++    *ptr += sizeof(VkBool32);
++    memcpy((VkBool32*)&forUnmarshaling->advancedBlendAllOperations, *ptr, sizeof(VkBool32));
++    *ptr += sizeof(VkBool32);
++}
++
++void reservedunmarshal_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPipelineColorBlendAdvancedStateCreateInfoEXT* forUnmarshaling, uint8_t** ptr) {
++    memcpy((VkStructureType*)&forUnmarshaling->sType, *ptr, sizeof(VkStructureType));
++    *ptr += sizeof(VkStructureType);
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    uint32_t pNext_size;
++    memcpy((uint32_t*)&pNext_size, *ptr, sizeof(uint32_t));
++    android::base::Stream::fromBe32((uint8_t*)&pNext_size);
++    *ptr += sizeof(uint32_t);
++    forUnmarshaling->pNext = nullptr;
++    if (pNext_size) {
++        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
++        memcpy((void*)forUnmarshaling->pNext, *ptr, sizeof(VkStructureType));
++        *ptr += sizeof(VkStructureType);
++        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
++        vkStream->alloc((void**)&forUnmarshaling->pNext,
++                        goldfish_vk_extension_struct_size_with_stream_features(
++                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
++        *(VkStructureType*)forUnmarshaling->pNext = extType;
++        reservedunmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext),
++                                           ptr);
++    }
++    memcpy((VkBool32*)&forUnmarshaling->srcPremultiplied, *ptr, sizeof(VkBool32));
++    *ptr += sizeof(VkBool32);
++    memcpy((VkBool32*)&forUnmarshaling->dstPremultiplied, *ptr, sizeof(VkBool32));
++    *ptr += sizeof(VkBool32);
++    memcpy((VkBlendOverlapEXT*)&forUnmarshaling->blendOverlap, *ptr, sizeof(VkBlendOverlapEXT));
++    *ptr += sizeof(VkBlendOverlapEXT);
++}
++
+ #endif
+ #ifdef VK_EXT_image_drm_format_modifier
+ void reservedunmarshal_VkDrmFormatModifierPropertiesEXT(
+@@ -12893,6 +13097,41 @@ void reservedunmarshal_VkRenderPassFragmentDensityMapCreateInfoEXT(
+         (VkAttachmentReference*)(&forUnmarshaling->fragmentDensityMapAttachment), ptr);
+ }
+ 
++#endif
++#ifdef VK_EXT_memory_budget
++void reservedunmarshal_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceMemoryBudgetPropertiesEXT* forUnmarshaling, uint8_t** ptr) {
++    memcpy((VkStructureType*)&forUnmarshaling->sType, *ptr, sizeof(VkStructureType));
++    *ptr += sizeof(VkStructureType);
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    uint32_t pNext_size;
++    memcpy((uint32_t*)&pNext_size, *ptr, sizeof(uint32_t));
++    android::base::Stream::fromBe32((uint8_t*)&pNext_size);
++    *ptr += sizeof(uint32_t);
++    forUnmarshaling->pNext = nullptr;
++    if (pNext_size) {
++        vkStream->alloc((void**)&forUnmarshaling->pNext, sizeof(VkStructureType));
++        memcpy((void*)forUnmarshaling->pNext, *ptr, sizeof(VkStructureType));
++        *ptr += sizeof(VkStructureType);
++        VkStructureType extType = *(VkStructureType*)(forUnmarshaling->pNext);
++        vkStream->alloc((void**)&forUnmarshaling->pNext,
++                        goldfish_vk_extension_struct_size_with_stream_features(
++                            vkStream->getFeatureBits(), rootType, forUnmarshaling->pNext));
++        *(VkStructureType*)forUnmarshaling->pNext = extType;
++        reservedunmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext),
++                                           ptr);
++    }
++    memcpy((VkDeviceSize*)forUnmarshaling->heapBudget, *ptr,
++           VK_MAX_MEMORY_HEAPS * sizeof(VkDeviceSize));
++    *ptr += VK_MAX_MEMORY_HEAPS * sizeof(VkDeviceSize);
++    memcpy((VkDeviceSize*)forUnmarshaling->heapUsage, *ptr,
++           VK_MAX_MEMORY_HEAPS * sizeof(VkDeviceSize));
++    *ptr += VK_MAX_MEMORY_HEAPS * sizeof(VkDeviceSize);
++}
++
+ #endif
+ #ifdef VK_EXT_validation_features
+ void reservedunmarshal_VkValidationFeaturesEXT(VulkanStream* vkStream, VkStructureType rootType,
+@@ -15649,6 +15888,30 @@ void reservedunmarshal_extension_struct(VulkanStream* vkStream, VkStructureType
+             break;
+         }
+ #endif
++#ifdef VK_KHR_global_priority
++        case VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR: {
++            reservedunmarshal_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++                vkStream, rootType,
++                reinterpret_cast<VkDeviceQueueGlobalPriorityCreateInfoKHR*>(structExtension_out),
++                ptr);
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES_KHR: {
++            reservedunmarshal_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++                vkStream, rootType,
++                reinterpret_cast<VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR*>(
++                    structExtension_out),
++                ptr);
++            break;
++        }
++        case VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR: {
++            reservedunmarshal_VkQueueFamilyGlobalPriorityPropertiesKHR(
++                vkStream, rootType,
++                reinterpret_cast<VkQueueFamilyGlobalPriorityPropertiesKHR*>(structExtension_out),
++                ptr);
++            break;
++        }
++#endif
+ #ifdef VK_KHR_pipeline_executable_properties
+         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR: {
+             reservedunmarshal_VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR(
+@@ -15802,6 +16065,32 @@ void reservedunmarshal_extension_struct(VulkanStream* vkStream, VkStructureType
+             break;
+         }
+ #endif
++#ifdef VK_EXT_blend_operation_advanced
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT: {
++            reservedunmarshal_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++                vkStream, rootType,
++                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT*>(
++                    structExtension_out),
++                ptr);
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_PROPERTIES_EXT: {
++            reservedunmarshal_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++                vkStream, rootType,
++                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT*>(
++                    structExtension_out),
++                ptr);
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_ADVANCED_STATE_CREATE_INFO_EXT: {
++            reservedunmarshal_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++                vkStream, rootType,
++                reinterpret_cast<VkPipelineColorBlendAdvancedStateCreateInfoEXT*>(
++                    structExtension_out),
++                ptr);
++            break;
++        }
++#endif
+ #ifdef VK_EXT_image_drm_format_modifier
+         case VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT: {
+             reservedunmarshal_VkDrmFormatModifierPropertiesListEXT(
+@@ -15980,6 +16269,15 @@ void reservedunmarshal_extension_struct(VulkanStream* vkStream, VkStructureType
+             break;
+         }
+ #endif
++#ifdef VK_EXT_memory_budget
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
++            reservedunmarshal_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++                vkStream, rootType,
++                reinterpret_cast<VkPhysicalDeviceMemoryBudgetPropertiesEXT*>(structExtension_out),
++                ptr);
++            break;
++        }
++#endif
+ #ifdef VK_EXT_validation_features
+         case VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT: {
+             reservedunmarshal_VkValidationFeaturesEXT(
+@@ -16314,9 +16612,31 @@ void reservedunmarshal_extension_struct(VulkanStream* vkStream, VkStructureType
          }
  #endif
          default: {
@@ -3563,8 +4776,455 @@ index bd76867c1df44b1801b7fb8feb8e564a0c1bde15..18d5bff8d78de6562b2425ea7f849a5e
              abort();
          }
      }
+diff --git a/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.h b/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.h
+index 184670ec0..5e954fdfc 100644
+--- a/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.h
++++ b/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.h
+@@ -1437,6 +1437,20 @@ DEFINE_ALIAS_FUNCTION(reservedunmarshal_VkDescriptorSetLayoutSupport,
+ DEFINE_ALIAS_FUNCTION(reservedunmarshal_VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures,
+                       reservedunmarshal_VkPhysicalDeviceShaderSubgroupExtendedTypesFeaturesKHR)
+ 
++#endif
++#ifdef VK_KHR_global_priority
++void reservedunmarshal_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkDeviceQueueGlobalPriorityCreateInfoKHR* forUnmarshaling, uint8_t** ptr);
++
++void reservedunmarshal_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR* forUnmarshaling, uint8_t** ptr);
++
++void reservedunmarshal_VkQueueFamilyGlobalPriorityPropertiesKHR(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkQueueFamilyGlobalPriorityPropertiesKHR* forUnmarshaling, uint8_t** ptr);
++
+ #endif
+ #ifdef VK_KHR_vulkan_memory_model
+ DEFINE_ALIAS_FUNCTION(reservedunmarshal_VkPhysicalDeviceVulkanMemoryModelFeatures,
+@@ -1725,6 +1739,20 @@ DEFINE_ALIAS_FUNCTION(reservedunmarshal_VkWriteDescriptorSetInlineUniformBlock,
+ DEFINE_ALIAS_FUNCTION(reservedunmarshal_VkDescriptorPoolInlineUniformBlockCreateInfo,
+                       reservedunmarshal_VkDescriptorPoolInlineUniformBlockCreateInfoEXT)
+ 
++#endif
++#ifdef VK_EXT_blend_operation_advanced
++void reservedunmarshal_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* forUnmarshaling, uint8_t** ptr);
++
++void reservedunmarshal_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* forUnmarshaling, uint8_t** ptr);
++
++void reservedunmarshal_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPipelineColorBlendAdvancedStateCreateInfoEXT* forUnmarshaling, uint8_t** ptr);
++
+ #endif
+ #ifdef VK_EXT_image_drm_format_modifier
+ void reservedunmarshal_VkDrmFormatModifierPropertiesEXT(
+@@ -1829,6 +1857,12 @@ DEFINE_ALIAS_FUNCTION(reservedunmarshal_VkPhysicalDeviceSubgroupSizeControlPrope
+ DEFINE_ALIAS_FUNCTION(reservedunmarshal_VkPipelineShaderStageRequiredSubgroupSizeCreateInfo,
+                       reservedunmarshal_VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT)
+ 
++#endif
++#ifdef VK_EXT_memory_budget
++void reservedunmarshal_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++    VulkanStream* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceMemoryBudgetPropertiesEXT* forUnmarshaling, uint8_t** ptr);
++
+ #endif
+ #ifdef VK_EXT_tooling_info
+ DEFINE_ALIAS_FUNCTION(reservedunmarshal_VkPhysicalDeviceToolProperties,
+diff --git a/host/vulkan/cereal/common/goldfish_vk_transform.cpp b/host/vulkan/cereal/common/goldfish_vk_transform.cpp
+index 2648c5b67..a1e0a0f0a 100644
+--- a/host/vulkan/cereal/common/goldfish_vk_transform.cpp
++++ b/host/vulkan/cereal/common/goldfish_vk_transform.cpp
+@@ -6524,6 +6524,64 @@ void transform_fromhost_VkFenceGetFdInfoKHR(VkDecoderGlobalState* resourceTracke
+     }
+ }
+ 
++#endif
++#ifdef VK_KHR_global_priority
++void transform_tohost_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++    VkDecoderGlobalState* resourceTracker, VkDeviceQueueGlobalPriorityCreateInfoKHR* toTransform) {
++    (void)resourceTracker;
++    (void)toTransform;
++    if (toTransform->pNext) {
++        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
++    }
++}
++
++void transform_fromhost_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++    VkDecoderGlobalState* resourceTracker, VkDeviceQueueGlobalPriorityCreateInfoKHR* toTransform) {
++    (void)resourceTracker;
++    (void)toTransform;
++    if (toTransform->pNext) {
++        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
++    }
++}
++
++void transform_tohost_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++    VkDecoderGlobalState* resourceTracker,
++    VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR* toTransform) {
++    (void)resourceTracker;
++    (void)toTransform;
++    if (toTransform->pNext) {
++        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
++    }
++}
++
++void transform_fromhost_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++    VkDecoderGlobalState* resourceTracker,
++    VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR* toTransform) {
++    (void)resourceTracker;
++    (void)toTransform;
++    if (toTransform->pNext) {
++        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
++    }
++}
++
++void transform_tohost_VkQueueFamilyGlobalPriorityPropertiesKHR(
++    VkDecoderGlobalState* resourceTracker, VkQueueFamilyGlobalPriorityPropertiesKHR* toTransform) {
++    (void)resourceTracker;
++    (void)toTransform;
++    if (toTransform->pNext) {
++        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
++    }
++}
++
++void transform_fromhost_VkQueueFamilyGlobalPriorityPropertiesKHR(
++    VkDecoderGlobalState* resourceTracker, VkQueueFamilyGlobalPriorityPropertiesKHR* toTransform) {
++    (void)resourceTracker;
++    (void)toTransform;
++    if (toTransform->pNext) {
++        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
++    }
++}
++
+ #endif
+ #ifdef VK_KHR_pipeline_executable_properties
+ void transform_tohost_VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR(
+@@ -7284,6 +7342,68 @@ void transform_fromhost_VkDebugUtilsObjectTagInfoEXT(VkDecoderGlobalState* resou
+     }
+ }
+ 
++#endif
++#ifdef VK_EXT_blend_operation_advanced
++void transform_tohost_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++    VkDecoderGlobalState* resourceTracker,
++    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* toTransform) {
++    (void)resourceTracker;
++    (void)toTransform;
++    if (toTransform->pNext) {
++        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
++    }
++}
++
++void transform_fromhost_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++    VkDecoderGlobalState* resourceTracker,
++    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* toTransform) {
++    (void)resourceTracker;
++    (void)toTransform;
++    if (toTransform->pNext) {
++        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
++    }
++}
++
++void transform_tohost_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++    VkDecoderGlobalState* resourceTracker,
++    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* toTransform) {
++    (void)resourceTracker;
++    (void)toTransform;
++    if (toTransform->pNext) {
++        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
++    }
++}
++
++void transform_fromhost_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++    VkDecoderGlobalState* resourceTracker,
++    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* toTransform) {
++    (void)resourceTracker;
++    (void)toTransform;
++    if (toTransform->pNext) {
++        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
++    }
++}
++
++void transform_tohost_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++    VkDecoderGlobalState* resourceTracker,
++    VkPipelineColorBlendAdvancedStateCreateInfoEXT* toTransform) {
++    (void)resourceTracker;
++    (void)toTransform;
++    if (toTransform->pNext) {
++        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
++    }
++}
++
++void transform_fromhost_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++    VkDecoderGlobalState* resourceTracker,
++    VkPipelineColorBlendAdvancedStateCreateInfoEXT* toTransform) {
++    (void)resourceTracker;
++    (void)toTransform;
++    if (toTransform->pNext) {
++        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
++    }
++}
++
+ #endif
+ #ifdef VK_EXT_image_drm_format_modifier
+ void transform_tohost_VkDrmFormatModifierPropertiesEXT(
+@@ -7712,6 +7832,26 @@ void transform_fromhost_VkRenderPassFragmentDensityMapCreateInfoEXT(
+         resourceTracker, (VkAttachmentReference*)(&toTransform->fragmentDensityMapAttachment));
+ }
+ 
++#endif
++#ifdef VK_EXT_memory_budget
++void transform_tohost_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceMemoryBudgetPropertiesEXT* toTransform) {
++    (void)resourceTracker;
++    (void)toTransform;
++    if (toTransform->pNext) {
++        transform_tohost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
++    }
++}
++
++void transform_fromhost_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceMemoryBudgetPropertiesEXT* toTransform) {
++    (void)resourceTracker;
++    (void)toTransform;
++    if (toTransform->pNext) {
++        transform_fromhost_extension_struct(resourceTracker, (void*)(toTransform->pNext));
++    }
++}
++
+ #endif
+ #ifdef VK_EXT_validation_features
+ void transform_tohost_VkValidationFeaturesEXT(VkDecoderGlobalState* resourceTracker,
+@@ -9617,6 +9757,26 @@ void transform_tohost_extension_struct(VkDecoderGlobalState* resourceTracker,
+             break;
+         }
+ #endif
++#ifdef VK_KHR_global_priority
++        case VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR: {
++            transform_tohost_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++                resourceTracker,
++                reinterpret_cast<VkDeviceQueueGlobalPriorityCreateInfoKHR*>(structExtension_out));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES_KHR: {
++            transform_tohost_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++                resourceTracker, reinterpret_cast<VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR*>(
++                                     structExtension_out));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR: {
++            transform_tohost_VkQueueFamilyGlobalPriorityPropertiesKHR(
++                resourceTracker,
++                reinterpret_cast<VkQueueFamilyGlobalPriorityPropertiesKHR*>(structExtension_out));
++            break;
++        }
++#endif
+ #ifdef VK_KHR_pipeline_executable_properties
+         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR: {
+             transform_tohost_VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR(
+@@ -9752,6 +9912,28 @@ void transform_tohost_extension_struct(VkDecoderGlobalState* resourceTracker,
+             break;
+         }
+ #endif
++#ifdef VK_EXT_blend_operation_advanced
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT: {
++            transform_tohost_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++                resourceTracker,
++                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT*>(
++                    structExtension_out));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_PROPERTIES_EXT: {
++            transform_tohost_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++                resourceTracker,
++                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT*>(
++                    structExtension_out));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_ADVANCED_STATE_CREATE_INFO_EXT: {
++            transform_tohost_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++                resourceTracker, reinterpret_cast<VkPipelineColorBlendAdvancedStateCreateInfoEXT*>(
++                                     structExtension_out));
++            break;
++        }
++#endif
+ #ifdef VK_EXT_image_drm_format_modifier
+         case VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT: {
+             transform_tohost_VkDrmFormatModifierPropertiesListEXT(
+@@ -9840,6 +10022,14 @@ void transform_tohost_extension_struct(VkDecoderGlobalState* resourceTracker,
+             break;
+         }
+ #endif
++#ifdef VK_EXT_memory_budget
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
++            transform_tohost_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++                resourceTracker,
++                reinterpret_cast<VkPhysicalDeviceMemoryBudgetPropertiesEXT*>(structExtension_out));
++            break;
++        }
++#endif
+ #ifdef VK_EXT_validation_features
+         case VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT: {
+             transform_tohost_VkValidationFeaturesEXT(
+@@ -10867,6 +11057,26 @@ void transform_fromhost_extension_struct(VkDecoderGlobalState* resourceTracker,
+             break;
+         }
+ #endif
++#ifdef VK_KHR_global_priority
++        case VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR: {
++            transform_fromhost_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++                resourceTracker,
++                reinterpret_cast<VkDeviceQueueGlobalPriorityCreateInfoKHR*>(structExtension_out));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES_KHR: {
++            transform_fromhost_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++                resourceTracker, reinterpret_cast<VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR*>(
++                                     structExtension_out));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR: {
++            transform_fromhost_VkQueueFamilyGlobalPriorityPropertiesKHR(
++                resourceTracker,
++                reinterpret_cast<VkQueueFamilyGlobalPriorityPropertiesKHR*>(structExtension_out));
++            break;
++        }
++#endif
+ #ifdef VK_KHR_pipeline_executable_properties
+         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR: {
+             transform_fromhost_VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR(
+@@ -11002,6 +11212,28 @@ void transform_fromhost_extension_struct(VkDecoderGlobalState* resourceTracker,
+             break;
+         }
+ #endif
++#ifdef VK_EXT_blend_operation_advanced
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT: {
++            transform_fromhost_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++                resourceTracker,
++                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT*>(
++                    structExtension_out));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_PROPERTIES_EXT: {
++            transform_fromhost_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++                resourceTracker,
++                reinterpret_cast<VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT*>(
++                    structExtension_out));
++            break;
++        }
++        case VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_ADVANCED_STATE_CREATE_INFO_EXT: {
++            transform_fromhost_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++                resourceTracker, reinterpret_cast<VkPipelineColorBlendAdvancedStateCreateInfoEXT*>(
++                                     structExtension_out));
++            break;
++        }
++#endif
+ #ifdef VK_EXT_image_drm_format_modifier
+         case VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT: {
+             transform_fromhost_VkDrmFormatModifierPropertiesListEXT(
+@@ -11090,6 +11322,14 @@ void transform_fromhost_extension_struct(VkDecoderGlobalState* resourceTracker,
+             break;
+         }
+ #endif
++#ifdef VK_EXT_memory_budget
++        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
++            transform_fromhost_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++                resourceTracker,
++                reinterpret_cast<VkPhysicalDeviceMemoryBudgetPropertiesEXT*>(structExtension_out));
++            break;
++        }
++#endif
+ #ifdef VK_EXT_validation_features
+         case VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT: {
+             transform_fromhost_VkValidationFeaturesEXT(
+diff --git a/host/vulkan/cereal/common/goldfish_vk_transform.h b/host/vulkan/cereal/common/goldfish_vk_transform.h
+index 6b4f90f51..d6a338a1b 100644
+--- a/host/vulkan/cereal/common/goldfish_vk_transform.h
++++ b/host/vulkan/cereal/common/goldfish_vk_transform.h
+@@ -2389,6 +2389,28 @@ DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDeviceShaderSubgroupExtendedTyp
+ DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures,
+                       transform_fromhost_VkPhysicalDeviceShaderSubgroupExtendedTypesFeaturesKHR)
+ 
++#endif
++#ifdef VK_KHR_global_priority
++void transform_tohost_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++    VkDecoderGlobalState* resourceTracker, VkDeviceQueueGlobalPriorityCreateInfoKHR* toTransform);
++
++void transform_fromhost_VkDeviceQueueGlobalPriorityCreateInfoKHR(
++    VkDecoderGlobalState* resourceTracker, VkDeviceQueueGlobalPriorityCreateInfoKHR* toTransform);
++
++void transform_tohost_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++    VkDecoderGlobalState* resourceTracker,
++    VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR* toTransform);
++
++void transform_fromhost_VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR(
++    VkDecoderGlobalState* resourceTracker,
++    VkPhysicalDeviceGlobalPriorityQueryFeaturesKHR* toTransform);
++
++void transform_tohost_VkQueueFamilyGlobalPriorityPropertiesKHR(
++    VkDecoderGlobalState* resourceTracker, VkQueueFamilyGlobalPriorityPropertiesKHR* toTransform);
++
++void transform_fromhost_VkQueueFamilyGlobalPriorityPropertiesKHR(
++    VkDecoderGlobalState* resourceTracker, VkQueueFamilyGlobalPriorityPropertiesKHR* toTransform);
++
+ #endif
+ #ifdef VK_KHR_vulkan_memory_model
+ DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDeviceVulkanMemoryModelFeatures,
+@@ -2876,6 +2898,32 @@ DEFINE_ALIAS_FUNCTION(transform_tohost_VkDescriptorPoolInlineUniformBlockCreateI
+ DEFINE_ALIAS_FUNCTION(transform_fromhost_VkDescriptorPoolInlineUniformBlockCreateInfo,
+                       transform_fromhost_VkDescriptorPoolInlineUniformBlockCreateInfoEXT)
+ 
++#endif
++#ifdef VK_EXT_blend_operation_advanced
++void transform_tohost_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++    VkDecoderGlobalState* resourceTracker,
++    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* toTransform);
++
++void transform_fromhost_VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT(
++    VkDecoderGlobalState* resourceTracker,
++    VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT* toTransform);
++
++void transform_tohost_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++    VkDecoderGlobalState* resourceTracker,
++    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* toTransform);
++
++void transform_fromhost_VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT(
++    VkDecoderGlobalState* resourceTracker,
++    VkPhysicalDeviceBlendOperationAdvancedPropertiesEXT* toTransform);
++
++void transform_tohost_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++    VkDecoderGlobalState* resourceTracker,
++    VkPipelineColorBlendAdvancedStateCreateInfoEXT* toTransform);
++
++void transform_fromhost_VkPipelineColorBlendAdvancedStateCreateInfoEXT(
++    VkDecoderGlobalState* resourceTracker,
++    VkPipelineColorBlendAdvancedStateCreateInfoEXT* toTransform);
++
+ #endif
+ #ifdef VK_EXT_image_drm_format_modifier
+ void transform_tohost_VkDrmFormatModifierPropertiesEXT(
+@@ -3052,6 +3100,14 @@ DEFINE_ALIAS_FUNCTION(transform_tohost_VkPipelineShaderStageRequiredSubgroupSize
+ DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPipelineShaderStageRequiredSubgroupSizeCreateInfo,
+                       transform_fromhost_VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT)
+ 
++#endif
++#ifdef VK_EXT_memory_budget
++void transform_tohost_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceMemoryBudgetPropertiesEXT* toTransform);
++
++void transform_fromhost_VkPhysicalDeviceMemoryBudgetPropertiesEXT(
++    VkDecoderGlobalState* resourceTracker, VkPhysicalDeviceMemoryBudgetPropertiesEXT* toTransform);
++
+ #endif
+ #ifdef VK_EXT_tooling_info
+ DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDeviceToolProperties,
 diff --git a/host/vulkan/cereal/common/vk_struct_id.h b/host/vulkan/cereal/common/vk_struct_id.h
-index 081d6795f8fa41fb07aef7fbce3796397eb16964..21da52efa9c71018cdae92b3da96eb269b809521 100644
+index 081d6795f..21da52efa 100644
 --- a/host/vulkan/cereal/common/vk_struct_id.h
 +++ b/host/vulkan/cereal/common/vk_struct_id.h
 @@ -77,6 +77,19 @@ REGISTER_VK_STRUCT_ID(VkPhysicalDeviceIDProperties,
@@ -3588,7 +5248,7 @@ index 081d6795f8fa41fb07aef7fbce3796397eb16964..21da52efa9c71018cdae92b3da96eb26
                        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT);
  REGISTER_VK_STRUCT_ID(VkSemaphoreTypeCreateInfoKHR,
 diff --git a/host/vulkan/meson.build b/host/vulkan/meson.build
-index c119570708be15e4e1f5f447f2447a80ca1a3a7d..acb960602635994da184cc9caf57932d6e19451a 100644
+index c11957070..acb960602 100644
 --- a/host/vulkan/meson.build
 +++ b/host/vulkan/meson.build
 @@ -17,6 +17,7 @@ files_lib_vulkan_server = files(
@@ -3600,7 +5260,7 @@ index c119570708be15e4e1f5f447f2447a80ca1a3a7d..acb960602635994da184cc9caf57932d
    'DebugUtilsHelper.cpp',
    'SwapChainStateVk.cpp',
 diff --git a/third-party/CMakeLists.txt b/third-party/CMakeLists.txt
-index f7257003af6ff01c00350c5f11083ca2ffca532f..5758de7b0f53c40a885de75e2f0eab70ee7f02ac 100644
+index f7257003a..5758de7b0 100644
 --- a/third-party/CMakeLists.txt
 +++ b/third-party/CMakeLists.txt
 @@ -95,6 +95,9 @@ if(NOT TARGET aemu_common)

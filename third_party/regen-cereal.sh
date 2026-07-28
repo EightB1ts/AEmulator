@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # third_party/regen-cereal.sh — regenerate gfxstream's host Vulkan "cereal" serialization code.
 #
-#   third_party/regen-cereal.sh --reproduce    # generate to scratch, prove we drive the RIGHT generator
+#   third_party/regen-cereal.sh --reproduce    # gate: generator + codegen patches + baseline == checkout
+#   third_party/regen-cereal.sh --pristine     # bring-up only: generator alone, no codegen patches
 #   third_party/regen-cereal.sh                # regenerate in place, into the gfxstream checkout
 #   third_party/regen-cereal.sh --opcode-diff  # wire-compat gate: no EXISTING OP_vk* value may move
 #
@@ -73,12 +74,15 @@ MODE="regen"
 for a in "$@"; do
     case "$a" in
         --reproduce)        MODE="reproduce" ;;
+        # Bring-up only: prove the recorded codegen IS the one that produced the checkout. Only
+        # meaningful before any SUPPORTED_FEATURES additions exist in the checkout's cereal.
+        --pristine)         MODE="pristine" ;;
         --opcode-diff)      MODE="opcode" ;;
         # Accept the CURRENT generator-vs-checkout delta as the reviewed baseline. Only legitimate
         # when the delta has been read and understood as upstream's post-codegen hand-work plus our
         # own patch hunks — it is the moral equivalent of bootstrap.sh --record-digest.
         --record-baseline)  MODE="record" ;;
-        *) die "unknown argument '$a' (expected --reproduce, --opcode-diff or --record-baseline)" ;;
+        *) die "unknown argument '$a' (expected --reproduce, --pristine, --opcode-diff or --record-baseline)" ;;
     esac
 done
 
@@ -147,12 +151,30 @@ REGISTRY="$TP_GFXSTREAM_SRC/codegen/vulkan/vulkan-docs-next/xml/vk.xml"
 [ -f "$REGISTRY" ] || die "no in-tree registry at $REGISTRY"
 ok "registry: in-tree vk.xml ($(wc -c < "$REGISTRY" | tr -d ' ') bytes)"
 
-if [ -d "$CODEGEN_PATCH_DIR" ]; then
+# --pristine runs the codegen with NO codegen patches. That answers the bring-up question — "are we
+# driving the right generator at all?" — and is only meaningful against a checkout whose cereal has
+# not had features added yet. It is kept because it is how the generator was originally identified.
+#
+# --reproduce applies the patches, because once features ARE added the checkout legitimately
+# contains them; the useful standing invariant is the stronger one:
+#     generator + codegen patches + recorded baseline == the checkout
+# which is what catches a hand-edit to a generated file, or a pin bump that moves the codegen.
+if [ "$MODE" = "pristine" ]; then
+    warn "pristine mode: codegen patches NOT applied (tests the generator alone)"
+elif [ -d "$CODEGEN_PATCH_DIR" ]; then
     shopt -s nullglob
     for p in "$CODEGEN_PATCH_DIR"/*.patch; do
-        git -C "$SCRATCH/codegen" apply --whitespace=nowarn "$p" 2>/dev/null \
-            || patch -d "$SCRATCH/codegen" -p1 -s < "$p" \
+        # `patch`, never `git apply`. $SCRATCH lives under third_party/, which is INSIDE this repo's
+        # worktree, so `git apply` resolves the patch's paths against the AEmulator repo root
+        # instead of the scratch dir — finds nothing to do, changes nothing, and EXITS 0. That
+        # silent no-op shipped a "✓ applied" log next to a completely unpatched generator.
+        before="$(find "$SCRATCH/codegen" -type f -exec shasum {} + | shasum | cut -d' ' -f1)"
+        patch -d "$SCRATCH/codegen" -p1 -s --no-backup-if-mismatch < "$p" \
             || die "codegen patch does not apply: $(basename "$p")"
+        after="$(find "$SCRATCH/codegen" -type f -exec shasum {} + | shasum | cut -d' ' -f1)"
+        [ "$before" != "$after" ] \
+            || die "codegen patch changed NOTHING: $(basename "$p") — it applied as a no-op, which
+   means its paths do not match the extracted tree (expected paths like a/scripts/cerealgenerator.py)"
         ok "applied $(basename "$p")"
     done
     shopt -u nullglob
@@ -292,8 +314,8 @@ record)
     warn "and 'regen' re-applies it verbatim on top of every future regeneration."
     ;;
 
-reproduce)
-    step "reproduce: generating with the recorded codegen, comparing against the checkout"
+reproduce|pristine)
+    step "$MODE: generating with the recorded codegen, comparing against the checkout"
     OUT="$SCRATCH/out"
     run_codegen "$OUT" "$SCRATCH/gen.out" "$SCRATCH/gen.err"
     graft_all "$OUT"

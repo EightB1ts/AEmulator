@@ -1,0 +1,24 @@
+diff --git a/scripts/cerealgenerator.py b/scripts/cerealgenerator.py
+index 0bbc812..6c1c0b0 100644
+--- a/scripts/cerealgenerator.py
++++ b/scripts/cerealgenerator.py
+@@ -88,6 +88,19 @@ SUPPORTED_FEATURES = [
+     "VK_KHR_shader_terminate_invocation",
+     "VK_KHR_synchronization2",
+     "VK_KHR_zero_initialize_workgroup_memory",
++    # ---------------------------------------------------------------------------------------
++    # AEMULATOR: extensions the HOST DRIVER (Mesa KosmicKrisp) advertises but whose pNext structs
++    # this codegen could size and not decode — i.e. members of the cereal gap, whose default: arm
++    # is abort() of the whole VMM. Listing them here makes the marshal / reservedunmarshal /
++    # deepcopy / transform wrappers emit real cases instead of only the size table, so
++    # VkDecoderCerealGap.inc stops having to hide them from the guest.
++    #
++    # These three are the empirically reachable ones: each is ALSO in the guest encoder's own
++    # SUPPORTED_FEATURES, so the guest can put the struct on the wire today. VK_EXT_memory_budget
++    # is the one recorded as having actually killed the VMM.
++    "VK_EXT_memory_budget",
++    "VK_EXT_blend_operation_advanced",
++    "VK_KHR_global_priority",
+     "VK_EXT_4444_formats",
+     "VK_EXT_extended_dynamic_state",
+     "VK_EXT_extended_dynamic_state2",

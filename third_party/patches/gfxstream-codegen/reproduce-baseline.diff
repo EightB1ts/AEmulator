@@ -1,6 +1,6 @@
 --- a/host/vulkan/cereal/common/goldfish_vk_deepcopy.h
 +++ b/host/vulkan/cereal/common/goldfish_vk_deepcopy.h
-@@ -1874,6 +1874,17 @@
+@@ -1915,6 +1915,17 @@
      VkPipelineRasterizationProvokingVertexStateCreateInfoEXT* to);
  
  #endif
@@ -87,7 +87,7 @@
  }
 --- a/host/vulkan/cereal/common/goldfish_vk_marshaling.cpp
 +++ b/host/vulkan/cereal/common/goldfish_vk_marshaling.cpp
-@@ -23101,6 +23101,11 @@
+@@ -23494,6 +23494,11 @@
              return "OP_vkCmdSetPrimitiveTopology";
          }
  #endif
@@ -101,7 +101,7 @@
              return "OP_vkCmdSetCullModeEXT";
 --- a/host/vulkan/cereal/common/goldfish_vk_marshaling.h
 +++ b/host/vulkan/cereal/common/goldfish_vk_marshaling.h
-@@ -3525,6 +3525,27 @@
+@@ -3587,6 +3587,27 @@
      VkPipelineRasterizationProvokingVertexStateCreateInfoEXT* forUnmarshaling);
  
  #endif
@@ -153,7 +153,7 @@
      memcpy((VkDeviceSize*)&forUnmarshaling->offset, *ptr, sizeof(VkDeviceSize));
      *ptr += sizeof(VkDeviceSize);
      memcpy((VkDeviceSize*)&forUnmarshaling->range, *ptr, sizeof(VkDeviceSize));
-@@ -16314,9 +16320,31 @@
+@@ -16606,9 +16612,31 @@
          }
  #endif
          default: {
@@ -190,7 +190,7 @@
      }
 --- a/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.h
 +++ b/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.h
-@@ -1855,6 +1855,17 @@
+@@ -1889,6 +1889,17 @@
      VkPipelineRasterizationProvokingVertexStateCreateInfoEXT* forUnmarshaling, uint8_t** ptr);
  
  #endif
@@ -210,7 +210,7 @@
      VulkanStream* vkStream, VkStructureType rootType,
 --- a/host/vulkan/cereal/common/goldfish_vk_transform.h
 +++ b/host/vulkan/cereal/common/goldfish_vk_transform.h
-@@ -3091,7 +3091,27 @@
+@@ -3147,7 +3147,27 @@
  void transform_fromhost_VkPipelineRasterizationProvokingVertexStateCreateInfoEXT(
      VkDecoderGlobalState* resourceTracker,
      VkPipelineRasterizationProvokingVertexStateCreateInfoEXT* toTransform);
