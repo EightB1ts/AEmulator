@@ -1,1 +1,5 @@
 kk-gate
+vk-rt-probe
+vk-rt-probe.spv
+vk-rt-probe-spv.h
+guest-run.log

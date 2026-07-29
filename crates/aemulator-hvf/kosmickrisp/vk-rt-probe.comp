@@ -1,0 +1,84 @@
+#version 460
+#extension GL_EXT_ray_query : require
+
+/* One invocation = one ray. Ray i starts at (0.25 + i, 0.25, 0) and points down
+ * +Z. The BLAS holds the single triangle (0,0,1) (1,0,1) (0,1,1), so ray 0 must
+ * hit it at t = 1 with barycentrics (0.25, 0.25) and every other ray must miss.
+ * One dispatch therefore proves both the hit and the miss path, which matters:
+ * a driver that reports "hit" for everything and one that reports "miss" for
+ * everything are equally broken, and a hit-only test cannot tell them apart.
+ *
+ * Adapted from crates/aemulator-hvf/kosmickrisp/rq-smoke.comp so that the guest
+ * probe and the host smoke test ask the GPU exactly the same question. Keep the
+ * two in sync: a divergence between them is a transport bug, and that is only
+ * legible if the shader is identical. */
+layout(local_size_x = 8) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+
+struct Result {
+   uint  committed_type;   /* 0 none, 1 triangle, 2 generated */
+   float t;
+   uint  prim;
+   uint  geom;
+   uint  instance_id;
+   uint  custom_index;
+   float bary_x;
+   float bary_y;
+   uint  front_face;
+   uint  candidates_seen;
+   float ray_tmin;
+   uint  ray_flags;
+};
+
+layout(set = 0, binding = 1, std430) buffer Out {
+   Result r[];
+} outbuf;
+
+void main()
+{
+   uint idx = gl_GlobalInvocationID.x;
+
+   vec3  origin = vec3(0.25 + float(idx), 0.25, 0.0);
+   vec3  dir    = vec3(0.0, 0.0, 1.0);
+
+   rayQueryEXT rq;
+   rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT, 0xFF, origin, 0.001,
+                         dir, 100.0);
+
+   uint seen = 0u;
+   while (rayQueryProceedEXT(rq)) {
+      /* OpaqueEXT means Metal commits triangle candidates for us, but a driver
+       * is still allowed to surface them here, so handle both. */
+      if (rayQueryGetIntersectionTypeEXT(rq, false) ==
+          gl_RayQueryCandidateIntersectionTriangleEXT) {
+         rayQueryConfirmIntersectionEXT(rq);
+      }
+      seen += 1u;
+   }
+
+   Result res;
+   res.committed_type  = rayQueryGetIntersectionTypeEXT(rq, true);
+   res.t               = rayQueryGetIntersectionTEXT(rq, true);
+   res.prim            = uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, true));
+   res.geom            = uint(rayQueryGetIntersectionGeometryIndexEXT(rq, true));
+   res.instance_id     = uint(rayQueryGetIntersectionInstanceIdEXT(rq, true));
+   res.custom_index    = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true));
+   vec2 bary           = rayQueryGetIntersectionBarycentricsEXT(rq, true);
+   res.bary_x          = bary.x;
+   res.bary_y          = bary.y;
+   res.front_face      = uint(rayQueryGetIntersectionFrontFaceEXT(rq, true));
+   res.candidates_seen = seen;
+   res.ray_tmin        = rayQueryGetRayTMinEXT(rq);
+   res.ray_flags       = rayQueryGetRayFlagsEXT(rq);
+
+   /* A miss leaves the committed accessors undefined per spec, so zero them
+    * rather than reading garbage back into the comparison. */
+   if (res.committed_type == gl_RayQueryCommittedIntersectionNoneEXT) {
+      res.t = 0.0; res.prim = 0u; res.geom = 0u;
+      res.instance_id = 0u; res.custom_index = 0u;
+      res.bary_x = 0.0; res.bary_y = 0.0; res.front_face = 0u;
+   }
+
+   outbuf.r[idx] = res;
+}
