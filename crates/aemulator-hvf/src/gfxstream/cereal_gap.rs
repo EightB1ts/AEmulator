@@ -181,11 +181,7 @@ pub fn promotion_alias(extension: &str, structs: &[String]) -> Option<String> {
 ///
 /// Deterministic: `generate` and `verify` must produce byte-identical output for the drift guard to
 /// mean anything.
-pub fn render_inc(
-    gap: &[GapEntry],
-    gfxstream_sha: &str,
-    registry: &BTreeSet<String>,
-) -> String {
+pub fn render_inc(gap: &[GapEntry], gfxstream_sha: &str, registry: &BTreeSet<String>) -> String {
     // extension name -> comment lines (first trailing, rest continued). A promotion alias is
     // emitted as its own entry, in sorted position, so the C++ side needs no alias logic of its own.
     let mut entries: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -735,11 +731,22 @@ mod tests {
             extension: "VK_VALVE_mutable_descriptor_type".to_string(),
             structs: vec!["VK_STRUCTURE_TYPE_MUTABLE_DESCRIPTOR_TYPE_CREATE_INFO_EXT".to_string()],
         }];
-        let a = render_inc(&gap, "deadbeef");
+        // A minimal registry: the emitter whitelists against it, and an empty one would be
+        // indistinguishable from "the registry failed to parse".
+        let registry: BTreeSet<String> = ["VK_EXT_mutable_descriptor_type", "VK_KHR_swapchain"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let a = render_inc(&gap, "deadbeef", &registry);
         assert_eq!(
             a,
-            render_inc(&gap, "deadbeef"),
+            render_inc(&gap, "deadbeef", &registry),
             "verify mode depends on this"
+        );
+        assert!(
+            a.contains("kCerealRegistryExtensions"),
+            "the registry whitelist must be emitted; without it the host cannot hide extensions \
+             the cereal has never heard of"
         );
         assert!(a.contains("gfxstream pin : deadbeef"));
         assert!(a.contains("DO NOT EDIT"));
