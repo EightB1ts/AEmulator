@@ -38,6 +38,7 @@ Cargo.lock.bak
 !/third_party/paths.sh
 !/third_party/bootstrap.sh
 !/third_party/regen-cereal.sh
+!/third_party/downgrade-registry.py
 !/third_party/patches/
 
 # Editor / OS cruft

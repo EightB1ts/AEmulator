@@ -764,8 +764,16 @@ mod tests {
     /// Cheap, non-hermetic sanity check against the pinned tree, skipped on a fresh clone where
     /// `third_party/gfxstream` has not been bootstrapped yet. The hermetic tests above pin the
     /// parser's semantics; this one pins that those semantics still find the real gap.
+    ///
+    /// This test used to anchor on VK_EXT_extended_dynamic_state3 and
+    /// VK_VALVE_mutable_descriptor_type, on the grounds that eds3 was "the latent abort ANGLE would
+    /// trip". Both are now DECODED — the codegen learned REQUIRED_TYPES force-declaration and the
+    /// VALVE guard spelling — so asserting their presence would assert the bug is still there. The
+    /// anchor moved to VK_QCOM_fragment_density_map_offset, which is structurally identical for
+    /// this test's purposes (a guard name in the gap whose promoted EXT spelling is what a driver
+    /// would advertise), and the four fixed extensions are now asserted ABSENT instead.
     #[test]
-    fn the_real_pinned_tree_gap_contains_extended_dynamic_state3() {
+    fn the_real_pinned_tree_gap_is_found_and_the_fixed_extensions_stay_out() {
         let root =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/gfxstream");
         let (Ok(size), Ok(unmarshal)) = (
@@ -784,19 +792,32 @@ mod tests {
             "expected a large gap in the pinned tree, got {}",
             gap.len()
         );
-        assert!(
-            gap.iter()
-                .any(|e| e.extension == "VK_EXT_extended_dynamic_state3"),
-            "VK_EXT_extended_dynamic_state3 is the latent abort ANGLE would trip; it must be found"
-        );
-        // The guard whose promoted spelling is what the host driver actually advertises.
-        let valve = gap
+
+        // REGRESSION GUARD. Each of these was undecodable and is now decoded by a specific codegen
+        // capability (see SUPPORTED_FEATURES in the codegen patch series). If one reappears here,
+        // that capability was silently lost by a regeneration and the guest is being denied the
+        // extension again — which is exactly the drift this whole harness exists to catch.
+        for fixed in [
+            "VK_EXT_extended_dynamic_state3",
+            "VK_EXT_multi_draw",
+            "VK_EXT_mutable_descriptor_type",
+            "VK_VALVE_mutable_descriptor_type",
+            "VK_KHR_push_descriptor",
+        ] {
+            assert!(
+                !gap.iter().any(|e| e.extension == fixed),
+                "{fixed} is decodable and must NOT be back in the cereal gap"
+            );
+        }
+
+        // The guard whose promoted spelling is what a host driver actually advertises.
+        let guard = gap
             .iter()
-            .find(|e| e.extension == "VK_VALVE_mutable_descriptor_type")
-            .expect("VK_VALVE_mutable_descriptor_type is in the pinned tree's gap");
+            .find(|e| e.extension == "VK_QCOM_fragment_density_map_offset")
+            .expect("VK_QCOM_fragment_density_map_offset is in the pinned tree's gap");
         assert_eq!(
-            promotion_alias(&valve.extension, &valve.structs).as_deref(),
-            Some("VK_EXT_mutable_descriptor_type"),
+            promotion_alias(&guard.extension, &guard.structs).as_deref(),
+            Some("VK_EXT_fragment_density_map_offset"),
             "without this alias the strip list silently loses today's protection"
         );
     }

@@ -48,6 +48,24 @@ TP_GFXSTREAM_PATCHES="gfxstream"   # subdir of third_party/patches, applied in s
 TP_GFXSTREAM_CODEGEN_REF="838dd1d61"
 TP_GFXSTREAM_CODEGEN_PATCHES="gfxstream-codegen"
 
+# The Vulkan REGISTRY the codegen above is driven with, and the C headers the result is compiled
+# against. Both live inside the gfxstream checkout and are therefore carried by the patch series;
+# these two variables exist so the provenance is stated somewhere a human reads, not only inferable
+# from a 13 MB diff.
+#
+#   codegen/vulkan/vulkan-docs-next/xml/vk.xml      <- Vulkan-Docs at this tag, run through
+#                                                      third_party/downgrade-registry.py
+#   common/vulkan/include/{vulkan,vk_video}/*.h     <- Vulkan-Headers at this tag, verbatim
+#                                                      (*.hpp deliberately left at the vendored
+#                                                       version — see downgrade-registry.py)
+#
+# THEY MUST MOVE TOGETHER. The generated cereal names types by the registry's spelling, so a bumped
+# registry against stale headers fails to compile on every promoted name. gfxstream shipped v1.3.269
+# registry + v1.3.267 headers; AEmulator moved both to v1.4.348 so the 26 device extensions the host
+# driver advertises but the old registry had never heard of became decodable instead of hidden.
+TP_VULKAN_DOCS_TAG="v1.4.348"
+TP_VULKAN_HEADERS_TAG="v1.4.348"
+
 # Digest of the checkout's ENTIRE working-tree delta against the pinned SHA above: `git diff HEAD`
 # (spelled with every formatting knob pinned) plus one `?? <blob-sha> <path>` line per untracked file.
 #
@@ -61,7 +79,7 @@ TP_GFXSTREAM_CODEGEN_PATCHES="gfxstream-codegen"
 # RE-RECORD IT whenever the patch series legitimately changes — the digest is a function of the
 # series, so it goes stale on every regeneration:
 #     bash third_party/bootstrap.sh --record-digest      # recomputes and rewrites the line below
-TP_GFXSTREAM_TREE_DIGEST="5f8e497d64101a5ba2b6d25a7894c3ca35f25bd5"
+TP_GFXSTREAM_TREE_DIGEST="68cc39f837d1bf56bf1b816fdf4fadf0ebb883fa"
 
 # ---------------------------------------------------------------------------------------------
 # aemu — aemu-base / aemu-host-common. A build-time dependency of gfxstream's SYSTEM dependency

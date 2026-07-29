@@ -1,6 +1,14 @@
 --- a/scripts/cerealgenerator.py
 +++ b/scripts/cerealgenerator.py
-@@ -88,6 +88,89 @@
+@@ -22,6 +22,7 @@
+     "VK_VERSION_1_1",
+     "VK_VERSION_1_2",
+     "VK_VERSION_1_3",
++    "VK_VERSION_1_4",
+     # Instance extensions
+     "VK_KHR_get_physical_device_properties2",
+     "VK_KHR_external_semaphore_capabilities",
+@@ -88,9 +89,182 @@
      "VK_KHR_shader_terminate_invocation",
      "VK_KHR_synchronization2",
      "VK_KHR_zero_initialize_workgroup_memory",
@@ -15,29 +23,28 @@
 +    # serving them — so every name missing from this list is an extension the guest is denied.
 +    #
 +    # Contents: everything Mesa KosmicKrisp advertises, plus everything the guest encoder's own
-+    # SUPPORTED_FEATURES can emit, intersected with the vendored 1.3.269 registry, minus the
-+    # deny-list below. Each name was checked individually against this generator before landing.
++    # SUPPORTED_FEATURES can emit, intersected with the vendored registry (Vulkan-Docs
++    # $TP_VULKAN_DOCS_TAG; see third_party/MANIFEST.sh), minus the deny-list below. Each name was
++    # checked individually against this generator before landing.
 +    #
 +    # DELIBERATELY ABSENT — do NOT "fix" these by adding them:
-+    #   VK_KHR_push_descriptor          vkCmdPushDescriptorSetWithTemplateKHR passes an opaque
-+    #                                   const void* interpreted through a VkDescriptorUpdateTemplate.
-+    #                                   gfxstream handles templates via DescriptorSetVirtualization;
-+    #                                   the codegen cannot marshal it.
-+    #   VK_EXT_extended_dynamic_state3  vkCmdSetViewportSwizzleNV takes const VkViewportSwizzleNV*,
-+    #                                   and reg.py declares each type exactly once, under the FIRST
-+    #                                   feature that requires it. Without the NV extensions that type
-+    #                                   is never declared: a hard build break.
-+    #   VK_EXT_multi_draw               its commands take a stride-strided array, and the generator
-+    #                                   has no stride concept at all (grep -rn stride
-+    #                                   codegen/scripts/cereal/*.py is empty). It would marshal with
-+    #                                   sizeof() and silently corrupt the stream.
-+    #   VK_EXT_mutable_descriptor_type  EXT/VALVE registry aliases under the same declare-once rule.
 +    #   ray tracing / video / *AMDX* / provisional beta-guarded extensions — a beta guard compiles
 +    #                                   the bodies OUT while the size table still sizes them, which
 +    #                                   silently re-creates the exact gap this list exists to close.
 +    #
-+    # Those four remain in VkDecoderCerealGap.inc on purpose and stay hidden from the guest. That is
++    # Those remain in VkDecoderCerealGap.inc on purpose and stay hidden from the guest. That is
 +    # why gap ∩ host does not reach zero, and why kCerealGapExtensionsKeptAnyway cannot be emptied.
++    #
++    # The four extensions this comment used to deny-list are now DECODED, each by teaching the
++    # generator the thing it actually lacked rather than by hiding the extension:
++    #   VK_EXT_multi_draw               real stride support in the type model and every emitter
++    #                                   (VulkanType.getStrideExpression + emit_stride_normalization).
++    #   VK_EXT_extended_dynamic_state3  REQUIRED_TYPES force-declares VkViewportSwizzleNV, which
++    #                                   reg.py's declare-once rule otherwise leaves undeclared.
++    #   VK_EXT_mutable_descriptor_type  listed under its VALVE guard — see the note on that entry.
++    #   VK_KHR_push_descriptor          PARTIAL: the non-template entry point decodes; the
++    #                                   WithTemplate one is registry-undescribable and its decoder
++    #                                   refuses to dispatch rather than corrupting the stream.
 +    "VK_AMD_shader_image_load_store_lod",
 +    "VK_EXT_attachment_feedback_loop_dynamic_state",
 +    "VK_EXT_attachment_feedback_loop_layout",
@@ -51,6 +58,14 @@
 +    "VK_EXT_frame_boundary",
 +    "VK_EXT_image_2d_view_of_3d",
 +    "VK_EXT_memory_budget",
++    # Was on the deny-list above until this generator learned about STRIDE. vk.xml marks
++    # vkCmdDrawMultiEXT's pVertexInfo (and vkCmdDrawMultiIndexedEXT's pIndexInfo) with
++    # stride="stride": consecutive elements sit that many BYTES apart in the caller's memory, not
++    # sizeof(T), so every emitter that walked the array with `p + i` marshaled the wrong elements.
++    # See VulkanType.getStrideExpression / VulkanTypeIterator.arrayElementAccess for the model, and
++    # emit_stride_normalization in decoder.py / subdecode.py for why the host rewrites the stride
++    # argument it forwards to the driver (its copy of the array is packed).
++    "VK_EXT_multi_draw",
 +    "VK_EXT_nested_command_buffer",
 +    "VK_EXT_pipeline_protected_access",
 +    "VK_EXT_pipeline_robustness",
@@ -75,6 +90,27 @@
 +    "VK_KHR_multiview",
 +    "VK_KHR_present_id",
 +    "VK_KHR_present_wait",
++    # VK_KHR_push_descriptor. Its only pNext struct is VkPhysicalDevicePushDescriptorPropertiesKHR
++    # (sType + pNext + one uint32_t), which is why this name being absent kept the extension in the
++    # cereal gap and forced the kCerealGapExtensionsKeptAnyway exception in VkDecoderGlobalState.
++    #
++    # The extension's two COMMANDS are what made it look unaddable, and both are handled explicitly
++    # rather than by hoping:
++    #   vkCmdPushDescriptorSetKHR             a plain VkWriteDescriptorSet array. Decodes through
++    #                                         the generic path — but see NULLABLE_HANDLE_MEMBERS in
++    #                                         cereal/reservedmarshaling.py: for THIS command the
++    #                                         spec says VkWriteDescriptorSet::dstSet is ignored, so
++    #                                         guests legitimately send VK_NULL_HANDLE and the
++    #                                         unguarded unbox_VkDescriptorSet() would abort the VMM.
++    #   vkCmdPushDescriptorSetWithTemplateKHR opaque `const void* pData` described by a
++    #                                         VkDescriptorUpdateTemplate rather than by the
++    #                                         registry. STILL NOT MARSHALABLE — see
++    #                                         decode_vkCmdPushDescriptorSetWithTemplateKHR in
++    #                                         cereal/decoder.py, which consumes exactly the bytes
++    #                                         the guest encoder writes (one, and it is the guest
++    #                                         that is wrong) and then refuses to dispatch instead of
++    #                                         handing a 1-byte buffer to the host driver.
++    "VK_KHR_push_descriptor",
 +    "VK_KHR_relaxed_block_layout",
 +    "VK_KHR_sampler_mirror_clamp_to_edge",
 +    "VK_KHR_separate_depth_stencil_layouts",
@@ -87,6 +123,161 @@
 +    "VK_KHR_uniform_buffer_standard_layout",
 +    "VK_KHR_variable_pointers",
 +    "VK_KHR_workgroup_memory_explicit_layout",
++    # SPELL THE GUARD, NOT THE PROMOTED EXTENSION.
++    # -------------------------------------------
++    # The host driver (Mesa KosmicKrisp) advertises VK_EXT_mutable_descriptor_type, registry
++    # extension 495. Listing THAT name here does nothing at all, and the reason is reg.py's
++    # declare-once rule — the same rule that blocked VK_EXT_extended_dynamic_state3, seen from the
++    # other side.
++    #
++    # VK_VALVE_mutable_descriptor_type is registry extension 352 and is therefore processed FIRST.
++    # Its <require> block names VkPhysicalDeviceMutableDescriptorTypeFeaturesVALVE,
++    # VkMutableDescriptorTypeListVALVE and VkMutableDescriptorTypeCreateInfoVALVE, each of which is
++    # a bare `<type ... alias="...EXT"/>` in vk.xml. reg.py resolves those aliases to the EXT
++    # definitions and emits them under `#ifdef VK_VALVE_mutable_descriptor_type`. By the time
++    # extension 495 is reached the three types are already declared, so ITS guard block is empty:
++    # adding "VK_EXT_mutable_descriptor_type" would guard nothing and change no output. (That is
++    # visible in the unpatched tree too — the size-table cases for these two VkStructureTypes sit
++    # under the VALVE guard in goldfish_vk_extension_structs.cpp, not the EXT one.)
++    #
++    # So the VALVE spelling is what actually moves the types out of the size-table-only path into
++    # marshal / reservedunmarshal / deepcopy / transform. The emitted C++ is spelled EXT either way
++    # (vulkan_core.h defines both guards and typedefs VALVE -> EXT), and the generator additionally
++    # emits DEFINE_ALIAS_FUNCTION for the VALVE names. Host-side, cereal_gap.rs::promotion_alias()
++    # already maps this guard name back to the EXT extension name the driver advertises, so both
++    # spellings leave VkDecoderCerealGap.inc together.
++    "VK_VALVE_mutable_descriptor_type",
++    # ---------------------------------------------------------------------------------------
++    # AEMULATOR PHASE C: names that only became expressible when the vendored registry moved from
++    # Vulkan-Docs v1.3.269 to v1.4.348 (552 -> 682 extension names).
++    #
++    # A name absent from the REGISTRY cannot usefully be listed here at all: reg.py never emits a
++    # feature for it, so beginFeature() is never called with it and the entry is inert. That is why
++    # these 26 host extensions were not merely undecodable but INVISIBLE to this generator, and why
++    # the host had to hide every one of them from the guest even though the driver implements them.
++    #
++    # VK_VERSION_1_4 is the core feature the bump introduces; without it every 1.4-core type falls
++    # through UNSUPPORTED_FEATURE_MODULES into the size table alone, i.e. straight into the gap.
++    "VK_EXT_custom_resolve",
++    "VK_EXT_primitive_restart_index",
++    "VK_EXT_shader_replicated_composites",
++    "VK_EXT_vertex_attribute_robustness",
++    "VK_KHR_calibrated_timestamps",
++    "VK_KHR_dynamic_rendering_local_read",
++    "VK_KHR_index_type_uint8",
++    "VK_KHR_load_store_op_none",
++    "VK_KHR_maintenance10",
++    "VK_KHR_maintenance6",
++    "VK_KHR_maintenance7",
++    "VK_KHR_maintenance8",
++    "VK_KHR_maintenance9",
++    "VK_KHR_present_id2",
++    "VK_KHR_present_wait2",
++    "VK_KHR_robustness2",
++    "VK_KHR_shader_expect_assume",
++    "VK_KHR_shader_float_controls2",
++    "VK_KHR_shader_fma",
++    "VK_KHR_shader_maximal_reconvergence",
++    "VK_KHR_shader_relaxed_extended_instruction",
++    "VK_KHR_shader_subgroup_rotate",
++    "VK_KHR_shader_untyped_pointers",
++    "VK_KHR_swapchain_maintenance1",
++    "VK_KHR_unified_image_layouts",
++    "VK_KHR_vertex_attribute_divisor",
      "VK_EXT_4444_formats",
      "VK_EXT_extended_dynamic_state",
      "VK_EXT_extended_dynamic_state2",
++    "VK_EXT_extended_dynamic_state3",
+     "VK_EXT_image_robustness",
+     "VK_EXT_inline_uniform_block",
+     "VK_EXT_pipeline_creation_cache_control",
+@@ -175,6 +349,13 @@
+ }
+ 
+ 
++# Types that must be generated into EVERY module even though the feature that <require>s them FIRST
++# is not in SUPPORTED_FEATURES. See genType() for the mechanism and why it is needed.
++#
++# This is what took VK_EXT_extended_dynamic_state3 off the deny-list above: its
++# vkCmdSetViewportSwizzleNV takes a const VkViewportSwizzleNV*, a type reg.py declares exactly once
++# under VK_NV_viewport_swizzle (unlisted), so no serializer was ever emitted for it and the decoder
++# would not build. Fixed in the generator instead of by hiding the extension from the guest.
+ REQUIRED_TYPES = {
+     "int",
+     "uint16_t",
+@@ -182,6 +363,13 @@
+     "double",
+     "VkPresentScalingFlagsEXT",
+     "VkPresentGravityFlagsEXT",
++    # AEMULATOR: pulled in by VK_EXT_extended_dynamic_state3's vkCmdSetViewportSwizzleNV, but owned
++    # by VK_NV_viewport_swizzle (extension 99, processed long before extension 456). Everything else
++    # that extension's commands touch is either declared by the extension itself
++    # (VkColorBlendEquationEXT, VkColorBlendAdvancedEXT) or is a plain enum that needs no generated
++    # serializer (VkViewportCoordinateSwizzleNV, VkCoverageModulationModeNV, VkCoverageReductionModeNV,
++    # VkConservativeRasterizationModeEXT, VkProvokingVertexModeEXT, VkLineRasterizationModeEXT).
++    "VkViewportSwizzleNV",
+ }
+ 
+ copyrightHeader = """// Copyright (C) 2018 The Android Open Source Project
+@@ -276,6 +464,12 @@
+         self.codegen = cereal.CodeGen()
+         self.featureSupported = False
+         self.supportedModules = None
++        # True only while processing a feature that is actually NAMED in SUPPORTED_FEATURES.
++        # featureSupported cannot answer that question: beginFeature() force-sets it to True for
++        # every unlisted feature so the size-table module still sees the type (see
++        # UNSUPPORTED_FEATURE_MODULES), which is also why the `featureSupported == False` arms
++        # below are unreachable in practice. REQUIRED_TYPES keys off this instead.
++        self.featureListed = False
+ 
+         self.guestBaseLibDirPrefix = "aemu/base"
+         self.baseLibDirPrefix = "aemu/base"
+@@ -785,6 +979,8 @@
+             if self.featureName == supportedFeature:
+                 self.featureSupported = True
+ 
++        self.featureListed = self.featureSupported
++
+         if self.featureSupported == False and UNSUPPORTED_FEATURE_MODULES:
+             self.featureSupported = True
+             self.supportedModules = UNSUPPORTED_FEATURE_MODULES
+@@ -815,6 +1011,7 @@
+             return
+ 
+         self.featureSupported = False
++        self.featureListed = False
+ 
+         self.typeInfo.onEndFeature()
+ 
+@@ -837,8 +1034,30 @@
+             return
+ 
+         self.typeInfo.onGenType(typeinfo, name, alias)
+-        self.forEachWrapper(lambda w: w.onGenType(typeinfo, name, alias), self.supportedModules)
+ 
++        # reg.py declares every type EXACTLY ONCE, under the FIRST feature that <require>s it. A
++        # supported extension can therefore reference a type owned by an UNSUPPORTED one — e.g.
++        # VK_EXT_extended_dynamic_state3's vkCmdSetViewportSwizzleNV takes a
++        # const VkViewportSwizzleNV*, first required by VK_NV_viewport_swizzle. Left alone, that
++        # type reaches only UNSUPPORTED_FEATURE_MODULES (the size table), so VkDecoder.cpp emits a
++        # call to reservedunmarshal_VkViewportSwizzleNV / transform_tohost_VkViewportSwizzleNV that
++        # nothing ever defines: a link-stage break, which is exactly why the extension used to be
++        # undecodable.
++        #
++        # Naming the type in REQUIRED_TYPES routes it to EVERY module (supportedModules=None), i.e.
++        # generates it as if its owning feature were listed. Only the TYPE is force-fed; the owning
++        # feature's commands and its other types stay unsupported. The emission still lands inside
++        # that feature's own `#ifdef` (beginFeature guards every module unconditionally), and those
++        # macros are defined by vulkan_core.h for every extension, so the guard is satisfied.
++        #
++        # Enums/bitmask groups do NOT need this: they arrive via genGroup, marshal inline as scalars
++        # and are declared by vulkan_core.h, so no generated symbol is missing for them.
++        modules = self.supportedModules
++        if not self.featureListed and name in REQUIRED_TYPES:
++            modules = None
++
++        self.forEachWrapper(lambda w: w.onGenType(typeinfo, name, alias), modules)
++
+     def genStruct(self, typeinfo, typeName, alias):
+         OutputGenerator.genStruct(self, typeinfo, typeName, alias)
+         if self.featureSupported == False:

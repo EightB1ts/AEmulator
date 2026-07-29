@@ -1,6 +1,6 @@
 --- a/host/vulkan/cereal/common/goldfish_vk_deepcopy.h
 +++ b/host/vulkan/cereal/common/goldfish_vk_deepcopy.h
-@@ -2164,6 +2164,17 @@
+@@ -2588,6 +2588,17 @@
      VkPhysicalDeviceShaderAtomicFloatFeaturesEXT* to);
  
  #endif
@@ -16,11 +16,11 @@
 +
 +#endif
  #ifdef VK_EXT_index_type_uint8
- void deepcopy_VkPhysicalDeviceIndexTypeUint8FeaturesEXT(
-     Allocator* alloc, VkStructureType rootType,
+ DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceIndexTypeUint8Features,
+                       deepcopy_VkPhysicalDeviceIndexTypeUint8FeaturesEXT)
 --- a/host/vulkan/cereal/common/goldfish_vk_dispatch.cpp
 +++ b/host/vulkan/cereal/common/goldfish_vk_dispatch.cpp
-@@ -727,6 +727,10 @@
+@@ -808,6 +808,10 @@
  #ifdef VK_EXT_tooling_info
      out->vkGetPhysicalDeviceToolPropertiesEXT = (PFN_vkGetPhysicalDeviceToolPropertiesEXT)dlSymFunc(
          lib, "vkGetPhysicalDeviceToolPropertiesEXT");
@@ -31,7 +31,7 @@
  #endif
  #ifdef VK_EXT_extended_dynamic_state
      out->vkCmdSetCullModeEXT = (PFN_vkCmdSetCullModeEXT)dlSymFunc(lib, "vkCmdSetCullModeEXT");
-@@ -1764,6 +1768,10 @@
+@@ -2020,6 +2024,10 @@
      out->vkGetPhysicalDeviceToolPropertiesEXT =
          (PFN_vkGetPhysicalDeviceToolPropertiesEXT)vk->vkGetInstanceProcAddr(
              instance, "vkGetPhysicalDeviceToolPropertiesEXT");
@@ -42,7 +42,7 @@
  #endif
  #ifdef VK_EXT_extended_dynamic_state
      out->vkCmdSetCullModeEXT =
-@@ -2808,6 +2816,10 @@
+@@ -3258,6 +3266,10 @@
          (PFN_vkGetPhysicalDeviceToolPropertiesEXT)vk->vkGetDeviceProcAddr(
              device, "vkGetPhysicalDeviceToolPropertiesEXT");
  #endif
@@ -55,7 +55,7 @@
          (PFN_vkCmdSetCullModeEXT)vk->vkGetDeviceProcAddr(device, "vkCmdSetCullModeEXT");
 --- a/host/vulkan/cereal/common/goldfish_vk_dispatch.h
 +++ b/host/vulkan/cereal/common/goldfish_vk_dispatch.h
-@@ -519,6 +519,9 @@
+@@ -570,6 +570,9 @@
  #ifdef VK_EXT_tooling_info
      PFN_vkGetPhysicalDeviceToolPropertiesEXT vkGetPhysicalDeviceToolPropertiesEXT;
  #endif
@@ -67,7 +67,7 @@
      PFN_vkCmdSetFrontFaceEXT vkCmdSetFrontFaceEXT;
 --- a/host/vulkan/cereal/common/goldfish_vk_extension_structs.cpp
 +++ b/host/vulkan/cereal/common/goldfish_vk_extension_structs.cpp
-@@ -2143,7 +2143,7 @@
+@@ -2953,7 +2953,7 @@
              fprintf(stderr, "Unhandled Vulkan structure type %s [%d], aborting.\n",
                      string_VkStructureType(VkStructureType(structType)), structType);
              GFXSTREAM_ABORT(::emugl::FatalError(::emugl::ABORT_REASON_OTHER));
@@ -76,7 +76,7 @@
          }
      }
  }
-@@ -4257,7 +4257,7 @@
+@@ -5877,7 +5877,7 @@
              fprintf(stderr, "Unhandled Vulkan structure type %s [%d], aborting.\n",
                      string_VkStructureType(VkStructureType(structType)), structType);
              GFXSTREAM_ABORT(::emugl::FatalError(::emugl::ABORT_REASON_OTHER));
@@ -87,8 +87,8 @@
  }
 --- a/host/vulkan/cereal/common/goldfish_vk_marshaling.cpp
 +++ b/host/vulkan/cereal/common/goldfish_vk_marshaling.cpp
-@@ -25574,6 +25574,11 @@
-             return "OP_vkWaitSemaphoresKHR";
+@@ -29220,6 +29220,11 @@
+             return "OP_vkCmdSetTessellationDomainOriginEXT";
          }
  #endif
 +#ifdef VK_EXT_line_rasterization
@@ -101,7 +101,7 @@
              return "OP_vkCmdSetCullModeEXT";
 --- a/host/vulkan/cereal/common/goldfish_vk_marshaling.h
 +++ b/host/vulkan/cereal/common/goldfish_vk_marshaling.h
-@@ -4028,6 +4028,27 @@
+@@ -4808,6 +4808,27 @@
      VkPhysicalDeviceShaderAtomicFloatFeaturesEXT* forUnmarshaling);
  
  #endif
@@ -127,8 +127,8 @@
 +#define OP_vkCmdSetLineStippleEXT 263855692
 +#endif
  #ifdef VK_EXT_index_type_uint8
- void marshal_VkPhysicalDeviceIndexTypeUint8FeaturesEXT(
-     VulkanStream* vkStream, VkStructureType rootType,
+ DEFINE_ALIAS_FUNCTION(marshal_VkPhysicalDeviceIndexTypeUint8Features,
+                       marshal_VkPhysicalDeviceIndexTypeUint8FeaturesEXT)
 --- a/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.cpp
 +++ b/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.cpp
 @@ -38,6 +38,12 @@
@@ -144,7 +144,7 @@
  namespace gfxstream {
  namespace vk {
  
-@@ -2833,7 +2839,7 @@
+@@ -2320,7 +2326,7 @@
      uint64_t cgen_var_0;
      memcpy((uint64_t*)&cgen_var_0, *ptr, 1 * 8);
      *ptr += 1 * 8;
@@ -153,7 +153,7 @@
      memcpy((VkDeviceSize*)&forUnmarshaling->offset, *ptr, sizeof(VkDeviceSize));
      *ptr += sizeof(VkDeviceSize);
      memcpy((VkDeviceSize*)&forUnmarshaling->range, *ptr, sizeof(VkDeviceSize));
-@@ -18086,9 +18092,31 @@
+@@ -20625,9 +20631,31 @@
          }
  #endif
          default: {
@@ -190,7 +190,7 @@
      }
 --- a/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.h
 +++ b/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.h
-@@ -2137,6 +2137,17 @@
+@@ -2555,6 +2555,17 @@
      VkPhysicalDeviceShaderAtomicFloatFeaturesEXT* forUnmarshaling, uint8_t** ptr);
  
  #endif
@@ -206,11 +206,11 @@
 +
 +#endif
  #ifdef VK_EXT_index_type_uint8
- void reservedunmarshal_VkPhysicalDeviceIndexTypeUint8FeaturesEXT(
-     VulkanStream* vkStream, VkStructureType rootType,
+ DEFINE_ALIAS_FUNCTION(reservedunmarshal_VkPhysicalDeviceIndexTypeUint8Features,
+                       reservedunmarshal_VkPhysicalDeviceIndexTypeUint8FeaturesEXT)
 --- a/host/vulkan/cereal/common/goldfish_vk_transform.h
 +++ b/host/vulkan/cereal/common/goldfish_vk_transform.h
-@@ -3562,7 +3562,27 @@
+@@ -4256,7 +4256,27 @@
  void transform_fromhost_VkPipelineRasterizationProvokingVertexStateCreateInfoEXT(
      VkDecoderGlobalState* resourceTracker,
      VkPipelineRasterizationProvokingVertexStateCreateInfoEXT* toTransform);
@@ -268,7 +268,7 @@
                  vkStream->unsetHandleMapping();
                  // WARNING PTR CHECK
                  uint64_t cgen_var_3 = (uint64_t)(uintptr_t)pQueueFamilyPropertyCount;
-@@ -4360,14 +4357,22 @@
+@@ -5575,14 +5572,22 @@
                  VkPipelineCache pipelineCache;
                  size_t* pDataSize;
                  void* pData;
@@ -295,7 +295,7 @@
                  uint64_t cgen_var_1;
                  memcpy((uint64_t*)&cgen_var_1, *readStreamPtrPtr, 1 * 8);
                  *readStreamPtrPtr += 1 * 8;
-@@ -4403,8 +4408,8 @@
+@@ -5618,8 +5623,8 @@
                              (unsigned long long)pDataSize, (unsigned long long)pData);
                  }
                  VkResult vkGetPipelineCacheData_VkResult_return = (VkResult)0;
@@ -306,7 +306,7 @@
                  if ((vkGetPipelineCacheData_VkResult_return) == VK_ERROR_DEVICE_LOST)
                      m_state->on_DeviceLost();
                  m_state->on_CheckOutOfMemory(vkGetPipelineCacheData_VkResult_return, opcode,
-@@ -4621,14 +4626,11 @@
+@@ -5728,14 +5733,11 @@
                  const VkComputePipelineCreateInfo* pCreateInfos;
                  const VkAllocationCallbacks* pAllocator;
                  VkPipeline* pPipelines;
@@ -322,7 +322,7 @@
                  uint64_t cgen_var_1;
                  memcpy((uint64_t*)&cgen_var_1, *readStreamPtrPtr, 1 * 8);
                  *readStreamPtrPtr += 1 * 8;
-@@ -4686,17 +4688,16 @@
+@@ -5793,17 +5795,16 @@
                              (unsigned long long)pAllocator, (unsigned long long)pPipelines);
                  }
                  VkResult vkCreateComputePipelines_VkResult_return = (VkResult)0;
@@ -345,7 +345,7 @@
                  if (((createInfoCount))) {
                      uint64_t* cgen_var_4;
                      vkStream->alloc((void**)&cgen_var_4, ((createInfoCount)) * 8);
-@@ -4706,7 +4707,7 @@
+@@ -5813,7 +5814,7 @@
                                                                       ((createInfoCount)));
                      vkStream->write((VkPipeline*)pPipelines, 8 * ((createInfoCount)));
                  }
@@ -354,7 +354,7 @@
                  vkStream->setHandleMapping(&m_boxedHandleUnwrapMapping);
                  vkStream->write(&vkCreateComputePipelines_VkResult_return, sizeof(VkResult));
                  vkStream->commitWrite();
-@@ -9644,15 +9645,12 @@
+@@ -9588,15 +9589,12 @@
                  VkPhysicalDevice physicalDevice;
                  uint32_t* pQueueFamilyPropertyCount;
                  VkQueueFamilyProperties2* pQueueFamilyProperties;
@@ -371,7 +371,7 @@
                  // Begin manual dispatchable handle unboxing for pQueueFamilyPropertyCount;
                  vkReadStream->unsetHandleMapping();
                  // WARNING PTR CHECK
-@@ -9698,8 +9696,8 @@
+@@ -9642,8 +9640,8 @@
                              (unsigned long long)pQueueFamilyPropertyCount,
                              (unsigned long long)pQueueFamilyProperties);
                  }
@@ -382,7 +382,7 @@
                  vkStream->unsetHandleMapping();
                  // WARNING PTR CHECK
                  uint64_t cgen_var_3 = (uint64_t)(uintptr_t)pQueueFamilyPropertyCount;
-@@ -13482,14 +13480,11 @@
+@@ -14495,14 +14493,11 @@
                                        "VkDecoder vkQueuePresentKHR");
                  VkQueue queue;
                  const VkPresentInfoKHR* pPresentInfo;
@@ -398,7 +398,7 @@
                  vkReadStream->alloc((void**)&pPresentInfo, sizeof(const VkPresentInfoKHR));
                  reservedunmarshal_VkPresentInfoKHR(vkReadStream, VK_STRUCTURE_TYPE_MAX_ENUM,
                                                     (VkPresentInfoKHR*)(pPresentInfo),
-@@ -13503,7 +13498,7 @@
+@@ -14516,7 +14511,7 @@
                  }
                  VkResult vkQueuePresentKHR_VkResult_return = (VkResult)0;
                  vkQueuePresentKHR_VkResult_return =
@@ -407,7 +407,7 @@
                  if ((vkQueuePresentKHR_VkResult_return) == VK_ERROR_DEVICE_LOST)
                      m_state->on_DeviceLost();
                  m_state->on_CheckOutOfMemory(vkQueuePresentKHR_VkResult_return, opcode, context);
-@@ -20154,6 +20149,50 @@
+@@ -22016,6 +22011,50 @@
                  break;
              }
  #endif
@@ -458,7 +458,7 @@
  #ifdef VK_EXT_extended_dynamic_state
              case OP_vkCmdSetCullModeEXT: {
                  GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DECODER_CATEGORY,
-@@ -23689,6 +23728,7 @@
+@@ -27076,6 +27115,7 @@
              }
          }
          ptr += packetLen;
@@ -468,7 +468,167 @@
          m_state->clearCreatedHandlesForSnapshotLoad();
 --- a/host/vulkan/VkDecoderSnapshot.cpp
 +++ b/host/vulkan/VkDecoderSnapshot.cpp
-@@ -786,7 +786,29 @@
+@@ -560,7 +560,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkBeginCommandBuffer, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -574,7 +575,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkEndCommandBuffer, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -588,7 +590,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkResetCommandBuffer, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleClearModifyApi((const uint64_t*)(&boxed), 1);
+         }
+     }
+@@ -603,7 +606,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyBuffer, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -619,7 +623,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyImage, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -634,7 +639,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyBufferToImage, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -649,7 +655,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyImageToBuffer, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -664,7 +671,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdUpdateBuffer, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -679,7 +687,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdFillBuffer, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -699,7 +708,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdPipelineBarrier, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -713,7 +723,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginQuery, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -727,7 +738,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndQuery, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -741,7 +753,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdResetQueryPool, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -756,7 +769,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdWriteTimestamp, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -772,7 +786,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyQueryPoolResults, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -786,7 +801,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdExecuteCommands, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1053,7 +1069,29 @@
      void vkAllocateDescriptorSets(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                                    android::base::BumpPool* pool, VkResult input_result,
                                    VkDevice device, const VkDescriptorSetAllocateInfo* pAllocateInfo,
@@ -499,7 +659,7 @@
      void vkFreeDescriptorSets(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                                android::base::BumpPool* pool, VkResult input_result, VkDevice device,
                                VkDescriptorPool descriptorPool, uint32_t descriptorSetCount,
-@@ -801,7 +823,58 @@
+@@ -1068,7 +1106,58 @@
                                  uint32_t descriptorWriteCount,
                                  const VkWriteDescriptorSet* pDescriptorWrites,
                                  uint32_t descriptorCopyCount,
@@ -556,40 +716,10 @@
 +                                            VkReconstruction::CREATED);
 +        mReconstruction.setCreatedHandlesForApi(apiHandle, (const uint64_t*)(&handle), 1);
 +    }
-     void vkCreateFramebuffer(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
-                              android::base::BumpPool* pool, VkResult input_result, VkDevice device,
-                              const VkFramebufferCreateInfo* pCreateInfo,
-@@ -936,7 +1009,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkBeginCommandBuffer, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -950,7 +1024,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkEndCommandBuffer, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -964,7 +1039,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkResetCommandBuffer, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleClearModifyApi((const uint64_t*)(&boxed), 1);
-         }
-     }
-@@ -978,7 +1054,8 @@
+     void vkCmdBindPipeline(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
+                            android::base::BumpPool* pool, VkCommandBuffer commandBuffer,
+                            VkPipelineBindPoint pipelineBindPoint, VkPipeline pipeline) {
+@@ -1079,7 +1168,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindPipeline, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -599,97 +729,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -993,7 +1070,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetViewport, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1007,7 +1085,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetScissor, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1021,7 +1100,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetLineWidth, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1036,7 +1116,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthBias, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1050,7 +1131,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetBlendConstants, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1064,7 +1146,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthBounds, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1078,7 +1161,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilCompareMask, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1092,7 +1176,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilWriteMask, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1106,7 +1191,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilReference, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1123,7 +1209,8 @@
+@@ -1096,7 +1186,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindDescriptorSets, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -699,157 +739,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -1137,7 +1224,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindIndexBuffer, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1152,7 +1240,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindVertexBuffers, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1166,7 +1255,8 @@
-         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDraw, snapshotTraceBegin, snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1181,7 +1271,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDrawIndexed, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1196,7 +1287,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDrawIndirect, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1211,7 +1303,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDrawIndexedIndirect, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1225,7 +1318,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDispatch, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1239,7 +1333,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDispatchIndirect, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1254,7 +1349,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyBuffer, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1270,7 +1366,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyImage, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1286,7 +1383,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBlitImage, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1301,7 +1399,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyBufferToImage, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1316,7 +1415,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyImageToBuffer, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1331,7 +1431,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdUpdateBuffer, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1346,7 +1447,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdFillBuffer, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1362,7 +1464,8 @@
+@@ -1112,7 +1203,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdClearColorImage, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -859,8 +749,8 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -1378,7 +1481,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdClearDepthStencilImage, snapshotTraceBegin,
+@@ -1126,7 +1218,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDispatch, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
 -            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
@@ -869,8 +759,8 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -1393,7 +1497,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdClearAttachments, snapshotTraceBegin,
+@@ -1140,7 +1233,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDispatchIndirect, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
 -            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
@@ -879,17 +769,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -1409,7 +1514,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdResolveImage, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1423,7 +1529,8 @@
+@@ -1154,7 +1248,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetEvent, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -899,7 +779,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -1437,7 +1544,8 @@
+@@ -1168,7 +1263,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdResetEvent, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -909,7 +789,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -1457,7 +1565,8 @@
+@@ -1188,7 +1284,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdWaitEvents, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -919,67 +799,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -1477,7 +1586,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdPipelineBarrier, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1491,7 +1601,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginQuery, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1505,7 +1616,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndQuery, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1519,7 +1631,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdResetQueryPool, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1534,7 +1647,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdWriteTimestamp, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1550,7 +1664,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyQueryPoolResults, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -1565,7 +1680,8 @@
+@@ -1203,7 +1300,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdPushConstants, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -989,8 +809,188 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -1580,7 +1696,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginRenderPass, snapshotTraceBegin,
+@@ -1315,7 +1413,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetViewport, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1329,7 +1428,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetScissor, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1343,7 +1443,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetLineWidth, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1358,7 +1459,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthBias, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1372,7 +1474,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetBlendConstants, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1386,7 +1489,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthBounds, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1400,7 +1504,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilCompareMask, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1414,7 +1519,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilWriteMask, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1428,7 +1534,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilReference, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1442,7 +1549,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindIndexBuffer, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1457,7 +1565,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindVertexBuffers, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1471,7 +1580,8 @@
+         auto apiInfo = mReconstruction.getApiInfo(apiHandle);
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDraw, snapshotTraceBegin, snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1486,7 +1596,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDrawIndexed, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1501,7 +1612,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDrawIndirect, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1516,7 +1628,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdDrawIndexedIndirect, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1532,7 +1645,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBlitImage, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1548,7 +1662,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdClearDepthStencilImage, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1563,7 +1678,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdClearAttachments, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1579,7 +1695,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdResolveImage, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
 -            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
@@ -1000,6 +1000,16 @@
          }
      }
 @@ -1594,7 +1711,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginRenderPass, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -1608,7 +1726,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdNextSubpass, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1009,18 +1019,8 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -1607,7 +1725,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndRenderPass, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
 @@ -1621,7 +1740,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdExecuteCommands, snapshotTraceBegin,
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndRenderPass, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
 -            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
@@ -1039,7 +1039,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -1690,7 +1811,8 @@
+@@ -1758,7 +1879,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdDispatchBase, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1049,7 +1049,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -1844,7 +1966,8 @@
+@@ -1867,7 +1989,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdDrawIndirectCount, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1059,7 +1059,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -1860,7 +1983,8 @@
+@@ -1883,7 +2006,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdDrawIndexedIndirectCount, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1069,7 +1069,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -1893,7 +2017,8 @@
+@@ -1916,7 +2040,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginRenderPass2, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1079,7 +1079,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -1908,7 +2033,8 @@
+@@ -1931,7 +2056,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdNextSubpass2, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1089,7 +1089,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -1922,7 +2048,8 @@
+@@ -1945,7 +2071,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndRenderPass2, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1100,36 +1100,6 @@
          }
      }
 @@ -2001,7 +2128,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetEvent2, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -2015,7 +2143,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdResetEvent2, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -2030,7 +2159,8 @@
-         mReconstruction.setApiTrace(apiInfo, OP_vkCmdWaitEvents2, snapshotTraceBegin,
-                                     snapshotTraceBytes);
-         for (uint32_t i = 0; i < 1; ++i) {
--            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
-+            // commandBuffer is already boxed, no need to box again
-+            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
-             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
-         }
-     }
-@@ -2044,7 +2174,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdPipelineBarrier2, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1139,7 +1109,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2058,7 +2189,8 @@
+@@ -2015,7 +2143,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdWriteTimestamp2, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1149,7 +1119,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2075,7 +2207,8 @@
+@@ -2032,7 +2161,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyBuffer2, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1159,7 +1129,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2089,7 +2222,8 @@
+@@ -2046,7 +2176,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyImage2, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1169,7 +1139,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2103,7 +2237,8 @@
+@@ -2060,7 +2191,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyBufferToImage2, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1179,7 +1149,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2117,7 +2252,8 @@
+@@ -2074,7 +2206,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyImageToBuffer2, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1189,7 +1159,37 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2131,7 +2267,8 @@
+@@ -2103,7 +2236,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetEvent2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2117,7 +2251,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdResetEvent2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2132,7 +2267,8 @@
+         mReconstruction.setApiTrace(apiInfo, OP_vkCmdWaitEvents2, snapshotTraceBegin,
+                                     snapshotTraceBytes);
+         for (uint32_t i = 0; i < 1; ++i) {
+-            VkCommandBuffer boxed = unboxed_to_boxed_VkCommandBuffer((&commandBuffer)[i]);
++            // commandBuffer is already boxed, no need to box again
++            VkCommandBuffer boxed = VkCommandBuffer((&commandBuffer)[i]);
+             mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
+         }
+     }
+@@ -2146,7 +2282,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBlitImage2, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1199,7 +1199,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2145,7 +2282,8 @@
+@@ -2160,7 +2297,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdResolveImage2, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1209,7 +1209,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2159,7 +2297,8 @@
+@@ -2174,7 +2312,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginRendering, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1219,7 +1219,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2172,7 +2311,8 @@
+@@ -2187,7 +2326,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndRendering, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1229,7 +1229,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2186,7 +2326,8 @@
+@@ -2201,7 +2341,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetCullMode, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1239,7 +1239,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2200,7 +2341,8 @@
+@@ -2215,7 +2356,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetFrontFace, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1249,7 +1249,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2214,7 +2356,8 @@
+@@ -2229,7 +2371,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetPrimitiveTopology, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1259,7 +1259,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2228,7 +2371,8 @@
+@@ -2243,7 +2386,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetViewportWithCount, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1269,7 +1269,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2242,7 +2386,8 @@
+@@ -2257,7 +2401,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetScissorWithCount, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1279,7 +1279,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2258,7 +2403,8 @@
+@@ -2273,7 +2418,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindVertexBuffers2, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1289,7 +1289,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2272,7 +2418,8 @@
+@@ -2287,7 +2433,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthTestEnable, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1299,7 +1299,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2286,7 +2433,8 @@
+@@ -2301,7 +2448,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthWriteEnable, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1309,7 +1309,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2300,7 +2448,8 @@
+@@ -2315,7 +2463,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthCompareOp, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1319,7 +1319,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2314,7 +2463,8 @@
+@@ -2329,7 +2478,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthBoundsTestEnable, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1329,7 +1329,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2328,7 +2478,8 @@
+@@ -2343,7 +2493,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilTestEnable, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1339,7 +1339,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2343,7 +2494,8 @@
+@@ -2358,7 +2509,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilOp, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1349,7 +1349,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2358,7 +2510,8 @@
+@@ -2373,7 +2525,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetRasterizerDiscardEnable, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1359,7 +1359,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2372,7 +2525,8 @@
+@@ -2387,7 +2540,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthBiasEnable, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1369,7 +1369,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2387,7 +2541,8 @@
+@@ -2402,7 +2556,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetPrimitiveRestartEnable, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1379,7 +1379,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2474,7 +2629,8 @@
+@@ -2654,7 +2809,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginRenderingKHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1389,7 +1389,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2487,7 +2643,8 @@
+@@ -2667,7 +2823,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndRenderingKHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1399,7 +1399,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2657,7 +2814,8 @@
+@@ -2870,7 +3027,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginRenderPass2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1409,7 +1409,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2672,7 +2830,8 @@
+@@ -2885,7 +3043,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdNextSubpass2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1419,7 +1419,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2686,7 +2845,8 @@
+@@ -2899,7 +3058,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndRenderPass2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1429,7 +1429,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2885,7 +3045,8 @@
+@@ -3129,7 +3289,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetEvent2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1439,7 +1439,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2899,7 +3060,8 @@
+@@ -3143,7 +3304,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdResetEvent2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1449,7 +1449,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2914,7 +3076,8 @@
+@@ -3158,7 +3320,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdWaitEvents2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1459,7 +1459,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2928,7 +3091,8 @@
+@@ -3172,7 +3335,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdPipelineBarrier2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1469,7 +1469,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2943,7 +3107,8 @@
+@@ -3187,7 +3351,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdWriteTimestamp2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1479,7 +1479,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2961,7 +3126,8 @@
+@@ -3205,7 +3370,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdWriteBufferMarker2AMD, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1489,7 +1489,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2981,7 +3147,8 @@
+@@ -3225,7 +3391,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyBuffer2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1499,7 +1499,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -2995,7 +3162,8 @@
+@@ -3239,7 +3406,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyImage2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1509,7 +1509,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3009,7 +3177,8 @@
+@@ -3253,7 +3421,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyBufferToImage2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1519,7 +1519,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3023,7 +3192,8 @@
+@@ -3267,7 +3436,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyImageToBuffer2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1529,7 +1529,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3037,7 +3207,8 @@
+@@ -3281,7 +3451,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBlitImage2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1539,7 +1539,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3051,7 +3222,8 @@
+@@ -3295,7 +3466,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdResolveImage2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1549,7 +1549,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3085,7 +3257,8 @@
+@@ -3329,7 +3501,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindIndexBuffer2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1559,7 +1559,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3116,7 +3289,8 @@
+@@ -3372,7 +3545,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetLineStippleKHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1569,7 +1569,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3187,7 +3361,8 @@
+@@ -3560,7 +3734,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindTransformFeedbackBuffersEXT,
                                      snapshotTraceBegin, snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1579,7 +1579,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3204,7 +3379,8 @@
+@@ -3577,7 +3752,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginTransformFeedbackEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1589,7 +1589,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3220,7 +3396,8 @@
+@@ -3593,7 +3769,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndTransformFeedbackEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1599,7 +1599,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3235,7 +3412,8 @@
+@@ -3608,7 +3785,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginQueryIndexedEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1609,7 +1609,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3249,7 +3427,8 @@
+@@ -3622,7 +3800,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndQueryIndexedEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1619,7 +1619,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3265,7 +3444,8 @@
+@@ -3638,7 +3817,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdDrawIndirectByteCountEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1629,7 +1629,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3328,7 +3508,8 @@
+@@ -3701,7 +3881,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginDebugUtilsLabelEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1639,7 +1639,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3341,7 +3522,8 @@
+@@ -3714,7 +3895,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndDebugUtilsLabelEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1649,7 +1649,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3355,7 +3537,8 @@
+@@ -3728,7 +3910,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdInsertDebugUtilsLabelEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1659,7 +1659,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3446,6 +3629,23 @@
+@@ -3819,6 +4002,23 @@
                                                VkPhysicalDevice physicalDevice, uint32_t* pToolCount,
                                                VkPhysicalDeviceToolProperties* pToolProperties) {}
  #endif
@@ -1683,7 +1683,7 @@
  #ifdef VK_EXT_extended_dynamic_state
      void vkCmdSetCullModeEXT(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                               android::base::BumpPool* pool, VkCommandBuffer commandBuffer,
-@@ -3457,7 +3657,8 @@
+@@ -3830,7 +4030,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetCullModeEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1693,7 +1693,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3471,7 +3672,8 @@
+@@ -3844,7 +4045,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetFrontFaceEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1703,7 +1703,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3485,7 +3687,8 @@
+@@ -3858,7 +4060,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetPrimitiveTopologyEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1713,7 +1713,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3499,7 +3702,8 @@
+@@ -3872,7 +4075,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetViewportWithCountEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1723,7 +1723,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3513,7 +3717,8 @@
+@@ -3886,7 +4090,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetScissorWithCountEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1733,7 +1733,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3529,7 +3734,8 @@
+@@ -3902,7 +4107,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindVertexBuffers2EXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1743,7 +1743,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3543,7 +3749,8 @@
+@@ -3916,7 +4122,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthTestEnableEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1753,7 +1753,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3557,7 +3764,8 @@
+@@ -3930,7 +4137,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthWriteEnableEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1763,7 +1763,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3571,7 +3779,8 @@
+@@ -3944,7 +4152,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthCompareOpEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1773,7 +1773,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3586,7 +3795,8 @@
+@@ -3959,7 +4168,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthBoundsTestEnableEXT,
                                      snapshotTraceBegin, snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1783,7 +1783,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3600,7 +3810,8 @@
+@@ -3973,7 +4183,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilTestEnableEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1793,7 +1793,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3615,7 +3826,8 @@
+@@ -3988,7 +4199,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilOpEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1803,7 +1803,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3679,7 +3891,8 @@
+@@ -4052,7 +4264,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetPatchControlPointsEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1813,7 +1813,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3695,7 +3908,8 @@
+@@ -4068,7 +4281,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetRasterizerDiscardEnableEXT,
                                      snapshotTraceBegin, snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1823,7 +1823,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3709,7 +3923,8 @@
+@@ -4082,7 +4296,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthBiasEnableEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1833,7 +1833,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3723,7 +3938,8 @@
+@@ -4096,7 +4311,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetLogicOpEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1843,7 +1843,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3738,7 +3954,8 @@
+@@ -4111,7 +4327,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetPrimitiveRestartEnableEXT,
                                      snapshotTraceBegin, snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1853,7 +1853,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3754,7 +3971,8 @@
+@@ -4127,7 +4344,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetColorWriteEnableEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1863,7 +1863,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3963,7 +4181,8 @@
+@@ -4868,7 +5086,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdTraceRaysKHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1873,7 +1873,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3994,7 +4213,8 @@
+@@ -4899,7 +5118,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdTraceRaysIndirectKHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1883,7 +1883,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -4016,7 +4236,8 @@
+@@ -4921,7 +5141,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetRayTracingPipelineStackSizeKHR,
                                      snapshotTraceBegin, snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1893,7 +1893,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -7198,6 +7419,14 @@
+@@ -8417,6 +8638,14 @@
      mImpl->vkGetPhysicalDeviceToolPropertiesEXT(snapshotTraceBegin, snapshotTraceBytes, pool,
                                                  input_result, physicalDevice, pToolCount,
                                                  pToolProperties);
@@ -1910,7 +1910,7 @@
  #ifdef VK_EXT_extended_dynamic_state
 --- a/host/vulkan/VkDecoderSnapshot.h
 +++ b/host/vulkan/VkDecoderSnapshot.h
-@@ -1424,6 +1424,11 @@
+@@ -1566,6 +1566,11 @@
                                                VkPhysicalDevice physicalDevice, uint32_t* pToolCount,
                                                VkPhysicalDeviceToolProperties* pToolProperties);
  #endif
@@ -1924,7 +1924,7 @@
                               android::base::BumpPool* pool, VkCommandBuffer commandBuffer,
 --- a/host/vulkan/VkSubDecoder.cpp
 +++ b/host/vulkan/VkSubDecoder.cpp
-@@ -2848,6 +2848,21 @@
+@@ -3361,6 +3361,21 @@
                  break;
              }
  #endif

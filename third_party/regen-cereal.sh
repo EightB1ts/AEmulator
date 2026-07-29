@@ -147,6 +147,11 @@ ok "codegen at $CODEGEN_REF ($(find "$SCRATCH/codegen/scripts" -name '*.py' | wc
 # decoding") edited codegen/vulkan/vulkan-docs-next/xml/vk.xml by 69 lines AFTER the codegen blob,
 # and the in-tree copy is what the checkout's banner names. Using the blob's registry instead moves
 # an opcode (vkCmdSetLineStippleEXT -> KHR) and inflates the reproduce delta by ~90 lines.
+#
+# That in-tree copy is NO LONGER gfxstream's. It is Vulkan-Docs $TP_VULKAN_DOCS_TAG run through
+# third_party/downgrade-registry.py, which undoes six upstream registry refactors the era scripts
+# cannot parse. Read that file before touching the registry; a bump also requires bumping
+# common/vulkan/include/**/*.h to the matching Vulkan-Headers tag, or nothing compiles.
 REGISTRY="$TP_GFXSTREAM_SRC/codegen/vulkan/vulkan-docs-next/xml/vk.xml"
 [ -f "$REGISTRY" ] || die "no in-tree registry at $REGISTRY"
 ok "registry: in-tree vk.xml ($(wc -c < "$REGISTRY" | tr -d ' ') bytes)"

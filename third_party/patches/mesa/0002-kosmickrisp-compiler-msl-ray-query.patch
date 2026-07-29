@@ -1,0 +1,663 @@
+diff --git a/src/kosmickrisp/compiler/msl_private.h b/src/kosmickrisp/compiler/msl_private.h
+index 6d57f27..d36e10e 100644
+--- a/src/kosmickrisp/compiler/msl_private.h
++++ b/src/kosmickrisp/compiler/msl_private.h
+@@ -25,11 +25,41 @@ struct nir_to_msl_ctx {
+    struct _mesa_string_buffer *text;
+    uint64_t disabled_workarounds;
+    bool uses_per_draw_data;
++   bool uses_ray_query;
++   /* nir_variable* -> (ray query id + 1). Only populated for shaders that use
++    * VK_KHR_ray_query. */
++   struct hash_table *ray_query_ids;
+    unsigned short indentlevel;
+    struct io_slot_info inputs_info[NUM_TOTAL_VARYING_SLOTS];
+    struct io_slot_info outputs_info[NUM_TOTAL_VARYING_SLOTS];
+ };
+ 
++/* The single Metal intersection query flavour we emit. Metal requires the tag
++ * list to be spelled out at every use site (it is part of the type), so keep
++ * the string in one place.
++ *
++ * - raytracing::instancing   : Vulkan TLAS/BLAS is always a two level
++ *                              structure, so instancing is always on.
++ * - raytracing::triangle_data: required for
++ *                              get_*_triangle_barycentric_coord() and
++ *                              is_*_triangle_front_facing(), both of which
++ *                              ray_query shaders can ask for at any time.
++ */
++#define MSL_RAY_QUERY_TAGS "raytracing::instancing, raytracing::triangle_data"
++#define MSL_RAY_QUERY_TYPE "raytracing::intersection_query<" MSL_RAY_QUERY_TAGS ">"
++#define MSL_ACCELERATION_STRUCTURE_TYPE                                        \
++   "raytracing::acceleration_structure<raytracing::instancing>"
++
++/* True for a deref that names (part of) a ray query object. Ray query derefs
++ * survive into the backend: unlike every other deref they are not memory
++ * accesses, they name an opaque MSL object that we declare up front. */
++static inline bool
++msl_deref_is_ray_query(const nir_deref_instr *deref)
++{
++   const nir_variable *var = nir_deref_instr_get_variable(deref);
++   return var != NULL && var->data.ray_query;
++}
++
+ #define P_IND(ctx, ...)                                                        \
+    do {                                                                        \
+       for (unsigned i = 0; i < (ctx)->indentlevel; i++)                        \
+@@ -83,6 +113,7 @@ uint32_t msl_output_num_components(struct nir_to_msl_ctx *ctx,
+ bool msl_src_is_float(struct nir_to_msl_ctx *ctx, nir_src *src);
+ bool msl_def_is_sampler(struct nir_to_msl_ctx *ctx, nir_def *def);
+ bool msl_def_is_texture(struct nir_to_msl_ctx *ctx, nir_def *def);
++bool msl_def_is_ray_query(struct nir_to_msl_ctx *ctx, nir_def *def);
+ 
+ void msl_nir_lower_subgroups(nir_shader *nir);
+ 
+diff --git a/src/kosmickrisp/compiler/msl_type_inference.c b/src/kosmickrisp/compiler/msl_type_inference.c
+index 11b78d1..e408e47 100644
+--- a/src/kosmickrisp/compiler/msl_type_inference.c
++++ b/src/kosmickrisp/compiler/msl_type_inference.c
+@@ -24,6 +24,11 @@ typedef enum ti_type {
+    TYPE_FLOAT,
+    TYPE_SAMPLER,
+    TYPE_TEXTURE,
++   /* An opaque metal::raytracing::intersection_query object. Like
++    * TYPE_SAMPLER/TYPE_TEXTURE this never takes part in arithmetic; it only
++    * exists so the backend knows not to bitcast the value and so the object
++    * gets declared with the right MSL type. */
++   TYPE_RAY_QUERY,
+ } ti_type;
+ 
+ static ti_type
+@@ -270,9 +275,86 @@ infer_types_from_alu(struct hash_table *types, nir_alu_instr *alu)
+    }
+ }
+ 
++/* Result type of nir_intrinsic_rq_load, i.e. of the OpRayQueryGet* family. The
++ * widths/component counts come from the NIR intrinsic itself; we only need the
++ * base type here. */
++static ti_type
++ti_type_from_ray_query_value(nir_ray_query_value value)
++{
++   switch (value) {
++   case nir_ray_query_value_intersection_type:
++   case nir_ray_query_value_intersection_instance_sbt_index:
++   case nir_ray_query_value_flags:
++      return TYPE_UINT;
++   case nir_ray_query_value_intersection_instance_custom_index:
++   case nir_ray_query_value_intersection_instance_id:
++   case nir_ray_query_value_intersection_geometry_index:
++   case nir_ray_query_value_intersection_primitive_index:
++      return TYPE_INT;
++   case nir_ray_query_value_intersection_front_face:
++   case nir_ray_query_value_intersection_candidate_aabb_opaque:
++      return TYPE_BOOL;
++   case nir_ray_query_value_intersection_t:
++   case nir_ray_query_value_intersection_barycentrics:
++   case nir_ray_query_value_intersection_object_ray_direction:
++   case nir_ray_query_value_intersection_object_ray_origin:
++   case nir_ray_query_value_intersection_object_to_world:
++   case nir_ray_query_value_intersection_world_to_object:
++   case nir_ray_query_value_intersection_triangle_vertex_positions:
++   case nir_ray_query_value_tmin:
++   case nir_ray_query_value_world_ray_direction:
++   case nir_ray_query_value_world_ray_origin:
++      return TYPE_FLOAT;
++   default:
++      UNREACHABLE("Unknown ray query value");
++   }
++}
++
++static void
++infer_types_from_ray_query(struct hash_table *types,
++                           nir_intrinsic_instr *instr)
++{
++   /* src[0] is always the ray query object itself. */
++   set_type(types, &instr->src[0], TYPE_RAY_QUERY);
++
++   switch (instr->intrinsic) {
++   case nir_intrinsic_rq_initialize:
++      /* The acceleration structure arrives as a plain 64-bit handle. */
++      set_type(types, &instr->src[1], TYPE_UINT);
++      set_type(types, &instr->src[2], TYPE_UINT);  /* ray flags */
++      set_type(types, &instr->src[3], TYPE_UINT);  /* cull mask */
++      set_type(types, &instr->src[4], TYPE_FLOAT); /* origin */
++      set_type(types, &instr->src[5], TYPE_FLOAT); /* tmin */
++      set_type(types, &instr->src[6], TYPE_FLOAT); /* direction */
++      set_type(types, &instr->src[7], TYPE_FLOAT); /* tmax */
++      break;
++   case nir_intrinsic_rq_proceed:
++      set_type(types, &instr->def, TYPE_BOOL);
++      break;
++   case nir_intrinsic_rq_generate_intersection:
++      set_type(types, &instr->src[1], TYPE_FLOAT); /* hit t */
++      break;
++   case nir_intrinsic_rq_load:
++      set_type(types, &instr->def,
++               ti_type_from_ray_query_value(
++                  nir_intrinsic_ray_query_value(instr)));
++      break;
++   case nir_intrinsic_rq_terminate:
++   case nir_intrinsic_rq_confirm_intersection:
++      break;
++   default:
++      UNREACHABLE("Unknown ray query intrinsic");
++   }
++}
++
+ static void
+ infer_types_from_intrinsic(struct hash_table *types, nir_intrinsic_instr *instr)
+ {
++   if (nir_intrinsic_is_ray_query(instr->intrinsic)) {
++      infer_types_from_ray_query(types, instr);
++      return;
++   }
++
+    switch (instr->intrinsic) {
+    case nir_intrinsic_load_input:
+    case nir_intrinsic_load_interpolated_input:
+@@ -555,6 +637,21 @@ infer_types_from_tex(struct hash_table *types, nir_tex_instr *tex)
+    }
+ }
+ 
++/* Ray query derefs are the only derefs that survive into the backend. They name
++ * an opaque object rather than memory, so type them explicitly. */
++static void
++infer_types_from_deref(struct hash_table *types, nir_deref_instr *deref)
++{
++   if (!msl_deref_is_ray_query(deref))
++      return;
++
++   set_type(types, &deref->def, TYPE_RAY_QUERY);
++   if (deref->deref_type == nir_deref_type_array) {
++      set_type(types, &deref->parent, TYPE_RAY_QUERY);
++      set_type(types, &deref->arr.index, TYPE_UINT);
++   }
++}
++
+ static void
+ infer_types_from_instr(struct hash_table *types, nir_instr *instr)
+ {
+@@ -568,6 +665,9 @@ infer_types_from_instr(struct hash_table *types, nir_instr *instr)
+    case nir_instr_type_tex:
+       infer_types_from_tex(types, nir_instr_as_tex(instr));
+       break;
++   case nir_instr_type_deref:
++      infer_types_from_deref(types, nir_instr_as_deref(instr));
++      break;
+    default:
+       break;
+    }
+@@ -696,6 +796,8 @@ ti_type_to_msl_type(ti_type type, uint8_t bit_width, uint8_t num_components)
+       break;
+    case TYPE_SAMPLER:
+       return "sampler";
++   case TYPE_RAY_QUERY:
++      return MSL_RAY_QUERY_TYPE;
+    default:
+       return NULL;
+    }
+@@ -893,3 +995,9 @@ msl_def_is_texture(struct nir_to_msl_ctx *ctx, nir_def *def)
+ {
+    return get_type(ctx->types, def) == TYPE_TEXTURE;
+ }
++
++bool
++msl_def_is_ray_query(struct nir_to_msl_ctx *ctx, nir_def *def)
++{
++   return get_type(ctx->types, def) == TYPE_RAY_QUERY;
++}
+diff --git a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
+index e6f88f1..aebf7a5 100644
+--- a/src/kosmickrisp/compiler/nir_to_msl.c
++++ b/src/kosmickrisp/compiler/nir_to_msl.c
+@@ -1076,6 +1076,348 @@ global_access_qualifier(struct nir_to_msl_ctx *ctx,
+    return access & ACCESS_COHERENT ? "coherent device" : "device";
+ }
+ 
++/*
++ * VK_KHR_ray_query -> metal::raytracing::intersection_query
++ * =========================================================
++ *
++ * Metal exposes ray queries as an inline object with a small method surface,
++ * so the NIR rq_* intrinsics map one-to-one onto method calls. The mapping
++ * below follows SPIRV-Cross PR #2649 (SPIR-V -> MSL), which is CTS validated.
++ *
++ * Two things Metal does not give us and we have to shadow ourselves:
++ *
++ *  - The original ray flags. Vulkan's OpRayQueryGetRayFlagsKHR can read them
++ *    back; Metal folds them into an intersection_params object that is not
++ *    queryable. We keep a companion `uint` per ray query, written at reset().
++ *
++ *  - The instance SBT record offset and the triangle vertex positions. Both
++ *    need per-instance / per-primitive side data that the acceleration
++ *    structure builder has to author; see the TODOs below.
++ */
++
++/* Emit a reference to the ray query object named by a deref chain, with an
++ * optional suffix appended to the base name (used for the shadow flags). */
++static void
++ray_query_ref(struct nir_to_msl_ctx *ctx, nir_def *def, const char *suffix)
++{
++   nir_deref_instr *deref = nir_instr_as_deref(nir_def_instr(def));
++
++   switch (deref->deref_type) {
++   case nir_deref_type_var: {
++      struct hash_entry *entry =
++         _mesa_hash_table_search(ctx->ray_query_ids, deref->var);
++      assert(entry && "ray query variable was never declared");
++      P(ctx, "rq%u%s", (unsigned)((uintptr_t)entry->data - 1u), suffix);
++      break;
++   }
++   case nir_deref_type_array:
++      ray_query_ref(ctx, deref->parent.ssa, suffix);
++      P(ctx, "[");
++      src_to_msl(ctx, &deref->arr.index);
++      P(ctx, "]");
++      break;
++   default:
++      UNREACHABLE("Unsupported ray query deref");
++   }
++}
++
++static void
++rq_initialize_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
++{
++   /* Shadow the ray flags: Metal cannot read them back out of the query. */
++   P_INDENT(ctx);
++   ray_query_ref(ctx, instr->src[0].ssa, "_flags");
++   P(ctx, " = ");
++   src_to_msl(ctx, &instr->src[2]);
++   P(ctx, ";\n");
++
++   P_INDENT(ctx);
++   ray_query_ref(ctx, instr->src[0].ssa, "");
++   /* MSL argument order is (ray, structure, mask, params) and the ray is
++    * (origin, direction, min_distance, max_distance), so tmin/direction swap
++    * relative to NIR. */
++   P(ctx, ".reset(raytracing::ray(");
++   src_to_msl(ctx, &instr->src[4]);
++   P(ctx, ", ");
++   src_to_msl(ctx, &instr->src[6]);
++   P(ctx, ", ");
++   src_to_msl(ctx, &instr->src[5]);
++   P(ctx, ", ");
++   src_to_msl(ctx, &instr->src[7]);
++   P(ctx, "), kk_acceleration_structure(");
++   src_to_msl(ctx, &instr->src[1]);
++   P(ctx, "), (");
++   src_to_msl(ctx, &instr->src[3]);
++   /* Vulkan's cull mask is the low 8 bits; Metal asserts on wider values. */
++   P(ctx, ") & 255u, kk_ray_intersection_params(");
++   src_to_msl(ctx, &instr->src[2]);
++   P(ctx, "));\n");
++}
++
++/* "<query><method>", for the handful of accessors that do not care which hit
++ * is being asked about. */
++static void
++rq_method(struct nir_to_msl_ctx *ctx, nir_def *q, const char *method)
++{
++   ray_query_ref(ctx, q, "");
++   P(ctx, "%s", method);
++}
++
++/* "<query>.<verb>_{candidate,committed}_<noun>()". Metal spells the candidate
++ * and the committed hit as two disjoint method families rather than taking a
++ * flag, exactly as SPIRV-Cross's MSL_RAY_QUERY_OP_INNER2 does. */
++static void
++rq_hit_method(struct nir_to_msl_ctx *ctx, nir_def *q, const char *verb,
++              bool committed, const char *noun)
++{
++   ray_query_ref(ctx, q, "");
++   P(ctx, ".%s_%s_%s()", verb, committed ? "committed" : "candidate", noun);
++}
++
++static void
++rq_load_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
++{
++   const bool committed = nir_intrinsic_committed(instr);
++   nir_def *q = instr->src[0].ssa;
++
++   switch (nir_intrinsic_ray_query_value(instr)) {
++   case nir_ray_query_value_intersection_type:
++      /* Metal: none = 0, triangle = 1, bounding_box = 2.
++       * Vulkan committed: none = 0, triangle = 1, generated = 2. Identical.
++       * Vulkan candidate: triangle = 0, aabb = 1. Metal value minus one. */
++      P(ctx, "uint(");
++      rq_hit_method(ctx, q, "get", committed, "intersection_type");
++      P(ctx, ")");
++      if (!committed)
++         P(ctx, " - 1u");
++      break;
++   case nir_ray_query_value_intersection_t:
++      /* The one accessor whose two halves are not spelled symmetrically. */
++      rq_method(ctx, q, committed ? ".get_committed_distance()"
++                                  : ".get_candidate_triangle_distance()");
++      break;
++   case nir_ray_query_value_intersection_instance_custom_index:
++      rq_hit_method(ctx, q, "get", committed, "user_instance_id");
++      break;
++   case nir_ray_query_value_intersection_instance_id:
++      rq_hit_method(ctx, q, "get", committed, "instance_id");
++      break;
++   case nir_ray_query_value_intersection_geometry_index:
++      rq_hit_method(ctx, q, "get", committed, "geometry_id");
++      break;
++   case nir_ray_query_value_intersection_primitive_index:
++      rq_hit_method(ctx, q, "get", committed, "primitive_id");
++      break;
++   case nir_ray_query_value_intersection_barycentrics:
++      rq_hit_method(ctx, q, "get", committed, "triangle_barycentric_coord");
++      break;
++   case nir_ray_query_value_intersection_front_face:
++      rq_hit_method(ctx, q, "is", committed, "triangle_front_facing");
++      break;
++   case nir_ray_query_value_intersection_object_ray_origin:
++      rq_hit_method(ctx, q, "get", committed, "ray_origin");
++      break;
++   case nir_ray_query_value_intersection_object_ray_direction:
++      rq_hit_method(ctx, q, "get", committed, "ray_direction");
++      break;
++   case nir_ray_query_value_intersection_object_to_world:
++      /* Both sides agree on 4 columns of 3 rows (NIR mat4x3 / MSL float4x3),
++       * so the NIR column index is the MSL column index. */
++      rq_hit_method(ctx, q, "get", committed, "object_to_world_transform");
++      P(ctx, "[%u]", nir_intrinsic_column(instr));
++      break;
++   case nir_ray_query_value_intersection_world_to_object:
++      rq_hit_method(ctx, q, "get", committed, "world_to_object_transform");
++      P(ctx, "[%u]", nir_intrinsic_column(instr));
++      break;
++   case nir_ray_query_value_intersection_candidate_aabb_opaque:
++      /* Metal answers the opposite question. */
++      P(ctx, "!");
++      rq_method(ctx, q, ".is_candidate_non_opaque_bounding_box()");
++      break;
++   case nir_ray_query_value_tmin:
++      rq_method(ctx, q, ".get_ray_min_distance()");
++      break;
++   case nir_ray_query_value_world_ray_origin:
++      rq_method(ctx, q, ".get_world_space_ray_origin()");
++      break;
++   case nir_ray_query_value_world_ray_direction:
++      rq_method(ctx, q, ".get_world_space_ray_direction()");
++      break;
++   case nir_ray_query_value_flags:
++      /* Not queryable in Metal, read back the shadow copy. */
++      ray_query_ref(ctx, q, "_flags");
++      break;
++   case nir_ray_query_value_intersection_instance_sbt_index:
++      /* TODO_KOSMICKRISP Requires a per-instance side table authored by the
++       * acceleration structure builder (MoltenVK PR #2771 / SPIRV-Cross PR
++       * #2649 both keep one). Not wired up yet. */
++      P(ctx, "0u /* TODO instance SBT offset */");
++      break;
++   case nir_ray_query_value_intersection_triangle_vertex_positions:
++      /* TODO_KOSMICKRISP VK_KHR_ray_tracing_position_fetch needs per-primitive
++       * data stored in the acceleration structure; MSL cannot recover the
++       * original triangle positions. Not advertised, so unreachable in
++       * practice. */
++      P(ctx, "float3(0.0) /* TODO position fetch */");
++      break;
++   default:
++      UNREACHABLE("Unknown ray query value");
++   }
++
++   P(ctx, ";\n");
++}
++
++static void
++ray_query_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
++{
++   switch (instr->intrinsic) {
++   case nir_intrinsic_rq_initialize:
++      rq_initialize_to_msl(ctx, instr);
++      break;
++   case nir_intrinsic_rq_proceed:
++      /* Dest assignment ("tN = ") has already been emitted. */
++      ray_query_ref(ctx, instr->src[0].ssa, "");
++      P(ctx, ".next();\n");
++      break;
++   case nir_intrinsic_rq_terminate:
++      P_INDENT(ctx);
++      ray_query_ref(ctx, instr->src[0].ssa, "");
++      P(ctx, ".abort();\n");
++      break;
++   case nir_intrinsic_rq_confirm_intersection:
++      P_INDENT(ctx);
++      ray_query_ref(ctx, instr->src[0].ssa, "");
++      P(ctx, ".commit_triangle_intersection();\n");
++      break;
++   case nir_intrinsic_rq_generate_intersection:
++      P_INDENT(ctx);
++      ray_query_ref(ctx, instr->src[0].ssa, "");
++      P(ctx, ".commit_bounding_box_intersection(");
++      src_to_msl(ctx, &instr->src[1]);
++      P(ctx, ");\n");
++      break;
++   case nir_intrinsic_rq_load:
++      rq_load_to_msl(ctx, instr);
++      break;
++   default:
++      UNREACHABLE("Unknown ray query intrinsic");
++   }
++}
++
++/* Declare one ray query variable (plus its shadow flags) and record its id.
++ * Emission order follows NIR's variable order, so the generated MSL stays
++ * byte-for-byte reproducible. */
++static void
++declare_ray_query_var(struct nir_to_msl_ctx *ctx, nir_variable *var,
++                      unsigned *id)
++{
++   if (!var->data.ray_query)
++      return;
++   /* A variable can only be declared once, no matter which list we found it
++    * in. */
++   if (_mesa_hash_table_search(ctx->ray_query_ids, var))
++      return;
++
++   unsigned n = (*id)++;
++   _mesa_hash_table_insert(ctx->ray_query_ids, var,
++                           (void *)(uintptr_t)(n + 1u));
++
++   /* Ray queries are opaque in NIR; the only composite SPIR-V can build out of
++    * them is a (possibly nested) array. */
++   char dims[64] = {0};
++   unsigned pos = 0;
++   for (const struct glsl_type *type = var->type; glsl_type_is_array(type);
++        type = glsl_get_array_element(type)) {
++      int written =
++         snprintf(dims + pos, sizeof(dims) - pos, "[%u]", glsl_get_length(type));
++      if (written < 0 || (unsigned)written >= sizeof(dims) - pos) {
++         assert(!"ray query array nesting too deep");
++         break;
++      }
++      pos += written;
++   }
++
++   P_IND(ctx, MSL_RAY_QUERY_TYPE " rq%u%s;\n", n, dims);
++   /* Metal folds the ray flags into intersection_params and never gives them
++    * back, so shadow them for OpRayQueryGetRayFlagsKHR. */
++   P_IND(ctx, "uint rq%u_flags%s = {};\n", n, dims);
++}
++
++/* Assign an id to every ray query variable and declare the MSL objects. Must
++ * run before the function body is emitted. */
++static void
++emit_ray_query_vars(struct nir_to_msl_ctx *ctx, nir_function_impl *impl)
++{
++   if (!ctx->uses_ray_query)
++      return;
++
++   unsigned id = 0;
++   nir_foreach_variable_with_modes(var, ctx->shader,
++                                   nir_var_shader_temp | nir_var_function_temp)
++      declare_ray_query_var(ctx, var, &id);
++   nir_foreach_function_temp_variable(var, impl)
++      declare_ray_query_var(ctx, var, &id);
++}
++
++/* The <metal_raytracing> include, emitted alongside the other includes. */
++static void
++emit_ray_query_include(struct nir_to_msl_ctx *ctx)
++{
++   if (ctx->uses_ray_query)
++      P(ctx, "#include <metal_raytracing>\n");
++}
++
++/* File-scope helpers the ray query lowering leans on. Emitted after
++ * "using namespace metal;" so the raytracing:: prefix resolves. */
++static void
++emit_ray_query_prelude(struct nir_to_msl_ctx *ctx)
++{
++   if (!ctx->uses_ray_query)
++      return;
++
++   P(ctx, "\n");
++   /* Vulkan hands the acceleration structure to the shader as a 64-bit
++    * handle. Metal acceleration structures live in the resource-id space, so
++    * the driver publishes the MTLResourceID and we reinterpret it here, the
++    * same way the rest of KosmicKrisp resolves bindless resources. */
++   P(ctx,
++     "static inline " MSL_ACCELERATION_STRUCTURE_TYPE "\n"
++     "kk_acceleration_structure(ulong handle)\n"
++     "{\n"
++     "    return *(const device " MSL_ACCELERATION_STRUCTURE_TYPE " *)handle;\n"
++     "}\n"
++     "\n");
++   /* VkRayFlagBits -> raytracing::intersection_params. Mirrors
++    * spvMakeIntersectionParams() from SPIRV-Cross PR #2649. */
++   P(ctx,
++     "static inline raytracing::intersection_params\n"
++     "kk_ray_intersection_params(uint flags)\n"
++     "{\n"
++     "    raytracing::intersection_params ip;\n"
++     "    if (flags & 0x1u)\n"
++     "        ip.force_opacity(raytracing::forced_opacity::opaque);\n"
++     "    if (flags & 0x2u)\n"
++     "        ip.force_opacity(raytracing::forced_opacity::non_opaque);\n"
++     "    if (flags & 0x4u)\n"
++     "        ip.accept_any_intersection(true);\n"
++     "    if (flags & 0x10u)\n"
++     "        ip.set_triangle_cull_mode(raytracing::triangle_cull_mode::back);\n"
++     "    if (flags & 0x20u)\n"
++     "        ip.set_triangle_cull_mode(raytracing::triangle_cull_mode::front);\n"
++     "    if (flags & 0x40u)\n"
++     "        ip.set_opacity_cull_mode(raytracing::opacity_cull_mode::opaque);\n"
++     "    if (flags & 0x80u)\n"
++     "        ip.set_opacity_cull_mode(raytracing::opacity_cull_mode::non_opaque);\n"
++     "    if (flags & 0x100u)\n"
++     "        ip.set_geometry_cull_mode(raytracing::geometry_cull_mode::triangle);\n"
++     "    if (flags & 0x200u)\n"
++     "        ip.set_geometry_cull_mode(raytracing::geometry_cull_mode::bounding_box);\n"
++     "    return ip;\n"
++     "}\n"
++     "\n");
++}
++
+ static void
+ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
+ {
+@@ -1092,6 +1434,12 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
+    if (instrinsic_needs_dest_type(instr)) {
+       P_IND(ctx, "t%d = ", instr->def.index);
+    }
++
++   if (nir_intrinsic_is_ray_query(instr->intrinsic)) {
++      ray_query_to_msl(ctx, instr);
++      return;
++   }
++
+    switch (instr->intrinsic) {
+    case nir_intrinsic_decl_reg: {
+       const char *reg_type = msl_uint_type(nir_intrinsic_bit_size(instr),
+@@ -2062,7 +2410,11 @@ instr_to_msl(struct nir_to_msl_ctx *ctx, nir_instr *instr)
+       break;
+    }
+    case nir_instr_type_deref:
+-      assert(!"We should have lowered derefs by now");
++      /* Ray query derefs are not memory accesses: they name an opaque MSL
++       * object declared up front by emit_ray_query_vars(). They generate no
++       * code of their own; ray_query_ref() walks the chain at the use site. */
++      assert(msl_deref_is_ray_query(nir_instr_as_deref(instr)) &&
++             "We should have lowered derefs by now");
+       break;
+    case nir_instr_type_call:
+    case nir_instr_type_cmat_call:
+@@ -2338,12 +2690,30 @@ msl_preprocess_nir_workarounds(struct nir_shader *nir,
+    }
+ }
+ 
++static bool
++msl_gather_uses_ray_query(nir_shader *shader)
++{
++   nir_foreach_function_impl(impl, shader) {
++      nir_foreach_block(block, impl) {
++         nir_foreach_instr(instr, block) {
++            if (instr->type != nir_instr_type_intrinsic)
++               continue;
++            if (nir_intrinsic_is_ray_query(
++                   nir_instr_as_intrinsic(instr)->intrinsic))
++               return true;
++         }
++      }
++   }
++   return false;
++}
++
+ static void
+ msl_gather_info(struct nir_to_msl_ctx *ctx, struct nir_to_msl_options *options)
+ {
+    nir_function_impl *impl = nir_shader_get_entrypoint(ctx->shader);
+    ctx->types = msl_infer_types(ctx->shader);
+    ctx->uses_per_draw_data = msl_gather_uses_per_draw_data(ctx->shader);
++   ctx->uses_ray_query = msl_gather_uses_ray_query(ctx->shader);
+ 
+    /* TODO_KOSMICKRISP
+     * Reindex blocks and ssa. This allows us to optimize things we don't at the
+@@ -2415,6 +2785,10 @@ predeclare_ssa_values(struct nir_to_msl_ctx *ctx, nir_function_impl *impl)
+          default:
+             continue;
+          }
++         /* Ray queries are opaque objects declared by emit_ray_query_vars();
++          * they are named through their variable, never through an SSA temp. */
++         if (msl_def_is_ray_query(ctx, def))
++            continue;
+          if (msl_def_is_texture(ctx, def)) {
+             P_INDENT(ctx);
+             msl_emit_texture_type(ctx, nir_instr_as_intrinsic(instr));
+@@ -2444,6 +2818,7 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
+       .shader = shader,
+       .text = _mesa_string_buffer_create(options->mem_ctx, 1024),
+       .disabled_workarounds = options->disabled_workarounds,
++      .ray_query_ids = _mesa_pointer_hash_table_create(NULL),
+    };
+    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+    msl_gather_info(&ctx, options);
+@@ -2453,7 +2828,9 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
+        shader->info.stage == MESA_SHADER_TESS_CTRL)
+       P(&ctx, "#include <metal_compute>\n");
+    P(&ctx, "#include <metal_stdlib>\n");
++   emit_ray_query_include(&ctx);
+    P(&ctx, "using namespace metal;\n");
++   emit_ray_query_prelude(&ctx);
+ 
+    msl_emit_io_blocks(&ctx, shader);
+    if (shader->info.stage == MESA_SHADER_FRAGMENT &&
+@@ -2470,6 +2847,7 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
+    ctx.indentlevel++;
+    msl_emit_output_var(&ctx, shader);
+    emit_local_vars(&ctx, shader);
++   emit_ray_query_vars(&ctx, impl);
+    predeclare_ssa_values(&ctx, impl);
+    foreach_list_typed(nir_cf_node, node, node, &impl->body) {
+       cf_node_to_metal(&ctx, node);
+@@ -2478,6 +2856,7 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
+    ctx.indentlevel--;
+    P(&ctx, "}\n");
+    char *ret = ctx.text->buf;
++   _mesa_hash_table_destroy(ctx.ray_query_ids, NULL);
+    _mesa_hash_table_destroy(ctx.types, NULL);
+    ralloc_steal(options->mem_ctx, ctx.text->buf);
+    ralloc_free(ctx.text);

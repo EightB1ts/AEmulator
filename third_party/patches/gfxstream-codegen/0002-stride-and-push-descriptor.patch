@@ -1,0 +1,565 @@
+--- a/scripts/cereal/common/codegen.py
++++ b/scripts/cereal/common/codegen.py
+@@ -628,7 +628,33 @@
+ 
+     def generalLengthAccessGuard(self, vulkanType, parentVarName="parent"):
+         return self.makeLengthAccess(vulkanType, parentVarName)[1]
++
++    # The byte stride of a strided array, resolved the same way a length is: `stride` names
++    # another parameter of the same command, or another member of the same struct. Returns None
++    # for the packed case, which is everything but VK_EXT_multi_draw.
++    def makeStrideAccess(self, vulkanType, parentVarName="parent"):
++        strideExpr = vulkanType.getStrideExpression()
++
++        if strideExpr is None:
++            return None
++
++        if isinstance(vulkanType.parent, VulkanCompoundType):
++            if not vulkanType.parent.getMember(strideExpr):
++                return strideExpr
++            return "%s->%s" % (parentVarName, strideExpr)
++
++        if isinstance(vulkanType.parent, VulkanAPI):
++            strideExprInfo = vulkanType.parent.getParameter(strideExpr)
++            if not strideExprInfo:
++                return strideExpr
++            deref = "*" if strideExprInfo.pointerIndirectionLevels > 0 else ""
++            return "(%s(%s))" % (deref, strideExpr)
+ 
++        return strideExpr
++
++    def generalStrideAccess(self, vulkanType, parentVarName="parent"):
++        return self.makeStrideAccess(vulkanType, parentVarName)
++
+     def vkApiCall(self, api, customPrefix="", globalStatePrefix="", customParameters=None, checkForDeviceLost=False, checkForOutOfMemory=False):
+         callLhs = None
+ 
+--- a/scripts/cereal/common/vulkantypes.py
++++ b/scripts/cereal/common/vulkantypes.py
+@@ -304,6 +304,10 @@
+         self.paramName: Optional[str] = None
+ 
+         self.lenExpr: Optional[str] = None  # Value of the `len` attribute in the spec
++        # Value of the `stride` attribute in the spec. When set, this array's elements are NOT
++        # packed at sizeof(T) in the caller's memory: consecutive elements are `stride` BYTES
++        # apart. It names another parameter (or struct member) holding that byte distance.
++        self.strideExpr: Optional[str] = None
+         self.isOptional: bool = False
+         self.optionalStr: Optional[str] = None  # Value of the `optional` attribute in the spec
+ 
+@@ -355,12 +359,12 @@
+ 
+ 
+     def __str__(self,):
+-        return ("(vulkantype %s %s paramName %s len %s optional? %s "
++        return ("(vulkantype %s %s paramName %s len %s stride %s optional? %s "
+                 "staticArrExpr %s)") % (
+             self.typeName + ("*" * self.pointerIndirectionLevels) +
+             ("ptr2constptr" if self.isPointerToConstPointer else ""), "const"
+             if self.isConst else "nonconst", self.paramName, self.lenExpr,
+-            self.isOptional, self.staticArrExpr)
++            self.strideExpr, self.isOptional, self.staticArrExpr)
+ 
+     def isString(self):
+         return self.pointerIndirectionLevels == 1 and (self.typeName == "char")
+@@ -388,6 +392,27 @@
+                 return known_expressions[self.lenExpr]
+             return self.lenExpr
+         return None
++
++    # The BYTE distance between consecutive elements of this array, or None when the array is
++    # packed (which is every array in the registry except VK_EXT_multi_draw's).
++    #
++    # vk.xml spells this `stride="<name>"` on a <param>/<member> that also has `len`, and the name
++    # is another parameter of the same command (or member of the same struct). It exists because
++    # the caller is allowed to interleave the array elements with unrelated data — the elements are
++    # NOT sizeof(T) apart, so `p[i]` / `p + i` reads the wrong bytes and runs off the end of the
++    # buffer. Every emitter that walks an array in the CALLER's memory has to go through this.
++    #
++    # Returns None for static arrays and for pointers with no `len`: neither can be strided, and
++    # returning the raw attribute there would produce an element access with nothing to iterate.
++    def getStrideExpression(self):
++        if self.staticArrExpr != "":
++            return None
++        if self.lenExpr is None:
++            return None
++        return self.strideExpr
++
++    def isStridedArray(self):
++        return self.getStrideExpression() is not None
+ 
+     # Can we just pass this to functions expecting T*
+     def accessibleAsPointer(self):
+@@ -676,6 +701,10 @@
+     if tag.attrib.get("len") is not None:
+         lengths = tag.attrib.get("len").split(",")
+         res.lenExpr = lengths[0]
++
++    # Process the stride expression. Only ever set alongside `len`; see getStrideExpression().
++    if tag.attrib.get("stride") is not None:
++        res.strideExpr = tag.attrib.get("stride")
+ 
+     # Calculate static array expression
+ 
+@@ -1196,6 +1225,50 @@
+     def registerTypeInfo(self, typeInfo):
+         self.typeInfo = typeInfo
+ 
++    # The address of element `loopVar` of the array at `access`.
++    #
++    # Packed arrays index normally, which is every array but VK_EXT_multi_draw's. A STRIDED array
++    # (vk.xml `stride="<param>"`, see VulkanType.getStrideExpression) has its elements `stride`
++    # BYTES apart, so it has to be walked as bytes and cast back — indexing it with `+ i` steps
++    # sizeof(T) and silently reads the wrong elements.
++    #
++    # Callers pass `strided=False` for a buffer the generated code allocated ITSELF: those are
++    # always packed no matter what the registry says about the caller's layout. That is the whole
++    # asymmetry — the guest reads a strided array and puts the elements on the wire back to back;
++    # the host decodes them into a packed buffer of its own and rewrites the stride argument it
++    # forwards to the driver to match (emit_stride_normalization in decoder.py / subdecode.py).
++    def arrayElementAccess(self, vulkanType, access, loopVar, parentVarName=None, strided=True):
++        strideAccess = None
++        if strided:
++            strideAccess = self.cgen.generalStrideAccess(
++                vulkanType, parentVarName=parentVarName)
++        if strideAccess is None:
++            return "%s + %s" % (access, loopVar)
++        # Cast back to the element type here rather than leaning on the caller's own cast: some
++        # callers (deepcopy) pass this expression straight into a generated function call.
++        elemType = self.cgen.makeCTypeDecl(
++            vulkanType.getForValueAccess(), useParamName=False)
++        byteType = "const uint8_t" if vulkanType.isConst else "uint8_t"
++        return "(%s*)((%s*)(%s) + (%s) * (%s))" % (
++            elemType, byteType, access, loopVar, strideAccess)
++
++
++# Every (arrayParam, strideParam) pair this command's registry entry marks with `stride`.
++#
++# Both must be real parameters of the command: the decoders normalize the stride ARGUMENT after
++# unmarshaling, which is only meaningful when the stride is a decoded local of its own.
++def vulkanApiStridedArrayParams(api):
++    res = []
++    for param in api.parameters:
++        strideExpr = param.getStrideExpression()
++        if strideExpr is None:
++            continue
++        strideParam = api.getParameter(strideExpr)
++        if strideParam is None:
++            continue
++        res.append((param, strideParam))
++    return res
++
+ def vulkanTypeGetStructFieldLengthInfo(structInfo, vulkanType):
+     def getSpecialCaseVulkanStructFieldLength(structInfo, vulkanType):
+         cases = [
+--- a/scripts/cereal/counting.py
++++ b/scripts/cereal/counting.py
+@@ -334,7 +334,10 @@
+             if lenAccessGuard is not None:
+                 self.cgen.beginIf(lenAccessGuard)
+             loopVar = "i"
+-            access = "%s + %s" % (access, loopVar)
++            # Counting always reads the CALLER's array (it sizes the packet the encoder is about
++            # to write), so it honors the registry's `stride` the same way reservedmarshal does.
++            access = self.arrayElementAccess(
++                vulkanType, access, loopVar, parentVarName=self.toCountVar)
+             forInit = "uint32_t %s = 0" % loopVar
+             forCond = "%s < (uint32_t)%s" % (loopVar, lenAccess)
+             forIncr = "++%s" % loopVar
+--- a/scripts/cereal/decoder.py
++++ b/scripts/cereal/decoder.py
+@@ -3,7 +3,7 @@
+ 
+ from .common.codegen import CodeGen, VulkanWrapperGenerator
+ from .common.vulkantypes import VulkanAPI, makeVulkanTypeSimple, iterateVulkanType, VulkanTypeInfo,\
+-    VulkanType
++    VulkanType, vulkanApiStridedArrayParams
+ 
+ from .marshaling import VulkanMarshalingCodegen
+ from .reservedmarshaling import VulkanReservedMarshalingCodegen
+@@ -263,6 +263,31 @@
+             self.params.append(param)
+ 
+ 
++def emit_stride_normalization(api, cgen):
++    """Make the decoded stride argument describe the HOST's copy of a strided array.
++
++    vk.xml marks vkCmdDrawMultiEXT / vkCmdDrawMultiIndexedEXT's array parameter with
++    stride="stride": in the CALLER's memory the elements sit `stride` bytes apart, and the encoder
++    walks that stride and puts them on the wire back to back. The unmarshal above therefore
++    allocated a PACKED destination of len * sizeof(T) — the guest's stride does not describe it,
++    and forwarding it to the driver would make the driver read every element but the first from
++    the wrong offset.
++
++    This cannot be solved by having the decoder rebuild a strided buffer instead: `stride` is a
++    later parameter than the array, so it is not decoded yet when the array is allocated, and the
++    transform_tohost loop that follows indexes the buffer packed anyway.
++
++    Emitted after every parameter has been read, because the assignment has to survive the read of
++    the stride parameter itself.
++    """
++    for (arrayParam, strideParam) in vulkanApiStridedArrayParams(api):
++        cgen.line("// %s was decoded PACKED into host memory; the guest's %s described the"
++                  % (arrayParam.paramName, strideParam.paramName))
++        cgen.line("// guest's layout, not ours. Hand the driver the host element size.")
++        cgen.stmt("%s = (%s)sizeof(%s)"
++                  % (strideParam.paramName, strideParam.typeName, arrayParam.typeName))
++
++
+ def emit_call_log(api, cgen):
+     decodingParams = DecodingParameters(api)
+     paramsToRead = decodingParams.toRead
+@@ -311,6 +336,8 @@
+ 
+             emit_unmarshal(typeInfo, p, cgen, output = p.possiblyOutput(), destroy = destroy, noUnbox = noUnbox)
+ 
++    emit_stride_normalization(api, cgen)
++
+     for p in paramsToRead:
+         emit_transform(typeInfo, p, cgen, variant="tohost")
+ 
+@@ -601,6 +628,66 @@
+     emit_pool_free(cgen)
+     emit_seqno_incr(api, cgen)
+ 
++# AEMULATOR: VK_KHR_push_descriptor's template entrypoint.
++#
++# vkCmdPushDescriptorSetWithTemplateKHR carries `const void* pData` whose layout is described by a
++# VkDescriptorUpdateTemplate, not by the registry, so no registry-driven generator can marshal it.
++# gfxstream's answer for the non-command form is to sidestep it entirely: the GUEST expands pData
++# using its own copy of the template (guest/vulkan_enc/DescriptorSetVirtualization.cpp) and sends
++# vkUpdateDescriptorSetWithTemplateSizedGOOGLE, whose parameters are explicit typed arrays. There is
++# no equivalent GOOGLE command for the push-descriptor form, and — decisively — the guest encoder
++# does not send the payload at all: mesa's generated
++#     VkEncoder::vkCmdPushDescriptorSetWithTemplateKHR
++# counts `if (local_pData) { *countPtr += sizeof(uint8_t); }` and then memcpy's exactly one byte.
++#
++# So the wire carries ONE BYTE of a descriptor payload. Three behaviours were available:
++#   * generate nothing (status quo): the guest's OP_vkCmdPushDescriptorSetWithTemplateKHR reaches
++#     VkSubDecoder's `default:`, which is GFXSTREAM_ABORT("Unrecognized opcode"). VMM dies.
++#   * generate the default decoding: reads the one byte, then hands that 1-byte buffer to the real
++#     driver, which reads it as a full template payload. Out-of-bounds read, silent corruption.
++#   * this: read exactly what the guest wrote so the stream stays in sync, then decline to
++#     dispatch, loudly and once.
++#
++# The third is the only one that is neither a crash nor memory corruption. It is NOT correctness:
++# the descriptor push is dropped and subsequent draws use stale descriptors. Making this work
++# requires a wire change on BOTH sides (a sized GOOGLE variant plus a guest-side custom encode) and
++# is deliberately out of scope here.
++#
++# EVERY SPELLING MUST BE GUARDED, NOT JUST THE KHR ONE. This is the trap: since the registry moved
++# to Vulkan-Docs v1.4.348, push descriptors are CORE 1.4, so reg.py emits four separate commands
++# with four separate sha256-derived opcodes and four separate `case` arms:
++#     vkCmdPushDescriptorSetWithTemplate       229886695   <-- what the guest actually sends
++#     vkCmdPushDescriptorSetWithTemplateKHR     20221
++#     vkCmdPushDescriptorSetWithTemplate2      285015421
++#     vkCmdPushDescriptorSetWithTemplate2KHR   263717616
++# The guest ICD is built from a 1.4 registry and mesa's dispatch table unions the aliases, so the
++# entrypoint it generates — and therefore the opcode on the wire — is the CORE one. Registering
++# this custom decode for the KHR spelling alone would leave the only reachable arm as the generated
++# default, i.e. the out-of-bounds read above, while looking guarded. The `*2` forms carry pData
++# inside VkPushDescriptorSetWithTemplateInfo, whose reservedunmarshal has the identical one-byte
++# alloc, so they are hazardous for exactly the same reason.
++def decode_push_descriptor_set_with_template(typeInfo, api, cgen):
++    emit_decode_parameters(typeInfo, api, cgen)
++    cgen.line("""
++                // AEMULATOR: parameters above were consumed exactly as the guest encoder wrote
++                // them, so the packet boundary is correct and decoding continues normally. The
++                // call itself is dropped: `pData` on the wire is a single byte, not the template
++                // payload, and forwarding it would make the driver read out of bounds.
++                static std::atomic<bool> sPushDescriptorTemplateWarned{false};
++                if (!sPushDescriptorTemplateWarned.exchange(true)) {
++                    ERR("%s is decoded but NOT executed: the "
++                        "guest encoder marshals only 1 byte of the template payload. Descriptor "
++                        "pushes through a VkDescriptorUpdateTemplate are dropped. Use "
++                        "vkCmdPushDescriptorSet instead.");
++                }
++    """ % api.name)
++    emit_decode_parameters_writeback(typeInfo, api, cgen)
++    emit_decode_return_writeback(api, cgen)
++    emit_decode_finish(api, cgen)
++    emit_snapshot(typeInfo, api, cgen)
++    emit_pool_free(cgen)
++    emit_seqno_incr(api, cgen)
++
+ def decode_unsupported_api(typeInfo, api, cgen):
+     cgen.line(f"// Decoding {api.name} is not supported. This should not run.")
+     cgen.stmt(f"fprintf(stderr, \"stream %p: fatal: decoding unsupported API {api.name}\\n\", ioStream)");
+@@ -796,6 +883,12 @@
+     # VK_KHR_device_group_creation / VK_VERSION_1_1
+     "vkEnumeratePhysicalDeviceGroups" : emit_global_state_wrapped_decoding,
+     "vkEnumeratePhysicalDeviceGroupsKHR" : emit_global_state_wrapped_decoding,
++
++    # VK_KHR_push_descriptor
++    "vkCmdPushDescriptorSetWithTemplate": decode_push_descriptor_set_with_template,
++    "vkCmdPushDescriptorSetWithTemplateKHR": decode_push_descriptor_set_with_template,
++    "vkCmdPushDescriptorSetWithTemplate2": decode_push_descriptor_set_with_template,
++    "vkCmdPushDescriptorSetWithTemplate2KHR": decode_push_descriptor_set_with_template,
+ }
+ 
+ class VulkanDecoder(VulkanWrapperGenerator):
+--- a/scripts/cereal/deepcopy.py
++++ b/scripts/cereal/deepcopy.py
+@@ -56,9 +56,17 @@
+             casted = "%s(%s)" % (self.makeCastExpr(vulkanType.getForAddressAccess().getForNonConstAccess()), access)
+         return casted
+ 
+-    def makeAllocBytesExpr(self, lenAccess, vulkanType):
++    def makeAllocBytesExpr(self, lenAccess, vulkanType, parentVarName=None):
+         sizeof = self.cgen.sizeofExpr( \
+                      vulkanType.getForValueAccess())
++        # A strided array is copied LAYOUT-PRESERVING: the copy keeps the source's byte stride, so
++        # the `stride` the registry attached to this parameter still describes the copy and every
++        # emitter downstream of the deepcopy (counting, reservedmarshal) stays correct. Sizing the
++        # copy at sizeof(T) instead would silently truncate it.
++        strideAccess = self.cgen.generalStrideAccess(
++            vulkanType, parentVarName=parentVarName)
++        if strideAccess is not None:
++            sizeof = strideAccess
+         if lenAccess:
+             bytesExpr = "%s * %s" % (lenAccess, sizeof)
+         else:
+@@ -100,12 +108,17 @@
+             self.cgen.stmt( \
+                 "%s = %s%s->alloc(%s)" % \
+                 (accessRhs, self.makeCastExpr(vulkanType.getForNonConstAccess()),
+-                 self.poolVarName, self.makeAllocBytesExpr(lenAccessLhs, vulkanType)))
++                 self.poolVarName,
++                 self.makeAllocBytesExpr(lenAccessLhs, vulkanType,
++                                         parentVarName=self.inputVars[0])))
+ 
+         if lenAccessLhs is not None:
+ 
+             loopVar = "i"
+-            accessLhs = "%s + %s" % (accessLhs, loopVar)
++            # Both sides step by the source's stride: see makeAllocBytesExpr above for why the
++            # copy is layout-preserving rather than packed.
++            accessLhs = self.arrayElementAccess(
++                vulkanType, accessLhs, loopVar, parentVarName=self.inputVars[0])
+             forInit = "uint32_t %s = 0" % loopVar
+             forCond = "%s < (uint32_t)%s" % (loopVar, lenAccessLhs)
+             forIncr = "++%s" % loopVar
+@@ -115,7 +128,9 @@
+                 if lenAccessRhs != lenAccessLhs:
+                     self.cgen.stmt("%s = %s" % (lenAccessRhs, lenAccessLhs))
+ 
+-            accessRhs = "%s + %s" % (accessRhs, loopVar)
++            accessRhs = self.arrayElementAccess(
++                vulkanType.getForNonConstAccess(), accessRhs, loopVar,
++                parentVarName=self.inputVars[0])
+             self.cgen.beginFor(forInit, forCond, forIncr)
+ 
+ 
+--- a/scripts/cereal/encoder.py
++++ b/scripts/cereal/encoder.py
+@@ -197,9 +197,13 @@
+         cgen.stmt("(void)%s" % param.paramName)
+ 
+ def emit_transform(typeInfo, param, cgen, variant="tohost"):
++    # stridedInput: on the guest side this walks the caller's array (or the layout-preserving
++    # local copy of it), so a `stride`-annotated parameter really is strided here. The host
++    # decoder's copy of this call passes the default (packed) — see decoder.py.
+     res = \
+         iterateVulkanType(typeInfo, param, TransformCodegen( \
+-            cgen, param.paramName, "sResourceTracker", "transform_%s_" % variant, variant))
++            cgen, param.paramName, "sResourceTracker", "transform_%s_" % variant, variant,
++            stridedInput=True))
+     if not res:
+         cgen.stmt("(void)%s" % param.paramName)
+ 
+--- a/scripts/cereal/marshaling.py
++++ b/scripts/cereal/marshaling.py
+@@ -406,7 +406,12 @@
+             if lenAccessGuard is not None:
+                 self.cgen.beginIf(lenAccessGuard)
+             loopVar = "i"
+-            access = "%s + %s" % (access, loopVar)
++            # Only the write side walks the CALLER's array, so only it honors the registry's
++            # `stride`; the read side fills a buffer this code allocated packed. See
++            # VulkanTypeIterator.arrayElementAccess.
++            access = self.arrayElementAccess(
++                vulkanType, access, loopVar, parentVarName=self.inputVarName,
++                strided=self.direction == "write")
+             forInit = "uint32_t %s = 0" % loopVar
+             forCond = "%s < (uint32_t)%s" % (loopVar, lenAccess)
+             forIncr = "++%s" % loopVar
+--- a/scripts/cereal/reservedmarshaling.py
++++ b/scripts/cereal/reservedmarshaling.py
+@@ -20,6 +20,36 @@
+ from .wrapperdefs import API_PREFIX_RESERVEDUNMARSHAL
+ 
+ from .marshalingdefs import CUSTOM_MARSHAL_TYPES
++
++# AEMULATOR: (typeName, memberName) pairs whose SCALAR host-side unbox must tolerate
++# VK_NULL_HANDLE instead of aborting the VMM.
++#
++# WHY THIS IS NEEDED AT ALL. genHandleMappingCall() already emits a null guard for handle ARRAYS
++#     *(dst + k) = tmpval ? unbox_T((T)tmpval) : VK_NULL_HANDLE;
++# but for a scalar (lenAccess == "1") it emits the unguarded form. On the host, unbox_T() is not
++# a lookup that can fail softly: VkDecoderGlobalState.cpp's
++# DEFINE_BOXED_NON_DISPATCHABLE_HANDLE_API_IMPL does
++#     if (!elt) { GFXSTREAM_ABORT(...) << "Unbox " << boxed << " failed, not found."; }
++# for every type except VkFence. Handle 0 is never in the boxed-handle store, so a legitimately
++# null scalar handle takes down the whole emulator.
++#
++# WHY dstSet SPECIFICALLY. VkWriteDescriptorSet::dstSet is marked non-optional in vk.xml because
++# that is true for vkUpdateDescriptorSets. It is NOT true for vkCmdPushDescriptorSetKHR, where the
++# spec says dstSet "is ignored" — applications and ANGLE leave it VK_NULL_HANDLE, the guest encoder
++# faithfully marshals a 0, and the unguarded decode aborts. The registry cannot express "optional in
++# this command but not that one", so the exception lives here.
++#
++# BLAST RADIUS. Exactly the structs that carry these members: VkWriteDescriptorSet (dstSet) and
++# VkCopyDescriptorSet (srcSet, dstSet). For a non-null handle the emitted code is unchanged — the
++# ternary's true branch is the previous expression verbatim — so vkUpdateDescriptorSets and
++# vkQueueCommitDescriptorSetUpdatesGOOGLE behave identically. Only 0 changes meaning, from "abort"
++# to "VK_NULL_HANDLE", which is what the array path has always done.
++NULLABLE_HANDLE_MEMBERS = {
++    ("VkDescriptorSet", "dstSet"),
++    ("VkDescriptorSet", "srcSet"),
++}
++
++
+ class VulkanReservedMarshalingCodegen(VulkanTypeIterator):
+     def __init__(self,
+                  cgen,
+@@ -202,9 +232,17 @@
+         else:
+             if "1" == lenAccess:
+                 self.genStreamCall(handle64VarType, handle64VarAccess, handle64Bytes)
+-                self.cgen.stmt("*%s%s = (%s)%s((%s)(*%s))" % (
+-                    self.makeCastExpr(vulkanType.getForNonConstAccess()), access,
+-                    vulkanType.typeName, mapFunc, vulkanType.typeName, handle64VarAccess))
++                # AEMULATOR: see NULLABLE_HANDLE_MEMBERS above. Same shape as the array path's
++                # existing `tmpval ? unbox(...) : VK_NULL_HANDLE`, applied to a scalar member.
++                if (vulkanType.typeName, vulkanType.paramName) in NULLABLE_HANDLE_MEMBERS:
++                    self.cgen.stmt("*%s%s = (*%s) ? (%s)%s((%s)(*%s)) : VK_NULL_HANDLE" % (
++                        self.makeCastExpr(vulkanType.getForNonConstAccess()), access,
++                        handle64VarAccess,
++                        vulkanType.typeName, mapFunc, vulkanType.typeName, handle64VarAccess))
++                else:
++                    self.cgen.stmt("*%s%s = (%s)%s((%s)(*%s))" % (
++                        self.makeCastExpr(vulkanType.getForNonConstAccess()), access,
++                        vulkanType.typeName, mapFunc, vulkanType.typeName, handle64VarAccess))
+             else:
+                 self.genPtrIncr("8 * %s" % lenAccess)
+                 if lenAccessGuard is not None:
+@@ -488,7 +526,12 @@
+ 
+         if lenAccess is not None:
+             loopVar = "i"
+-            access = "%s + %s" % (access, loopVar)
++            # reservedmarshal walks the CALLER's array and so honors the registry's `stride`;
++            # reservedunmarshal fills the packed buffer doAllocSpace() just reserved above, so it
++            # indexes normally. See VulkanTypeIterator.arrayElementAccess.
++            access = self.arrayElementAccess(
++                vulkanType, access, loopVar, parentVarName=self.inputVarName,
++                strided=self.direction == "write")
+             forInit = "uint32_t %s = 0" % loopVar
+             forCond = "%s < (uint32_t)%s" % (loopVar, lenAccess)
+             forIncr = "++%s" % loopVar
+--- a/scripts/cereal/subdecode.py
++++ b/scripts/cereal/subdecode.py
+@@ -1,7 +1,8 @@
+ # Copyright 2018 Google LLC
+ # SPDX-License-Identifier: MIT
+ from .common.codegen import CodeGen, VulkanWrapperGenerator
+-from .common.vulkantypes import VulkanAPI, iterateVulkanType, VulkanType
++from .common.vulkantypes import VulkanAPI, iterateVulkanType, VulkanType, \
++    vulkanApiStridedArrayParams
+ 
+ from .reservedmarshaling import VulkanReservedMarshalingCodegen
+ from .transform import TransformCodegen
+@@ -181,6 +182,20 @@
+                 self.toWrite.append(param)
+ 
+             self.params.append(param)
++
++
++def emit_stride_normalization(api, cgen):
++    """Same fix-up as VkDecoder's; see emit_stride_normalization in decoder.py.
++
++    The subdecoder unmarshals into a packed buffer too (a MAX_STACK_ITEMS stack array when it
++    fits), so the guest's stride does not describe it either.
++    """
++    for (arrayParam, strideParam) in vulkanApiStridedArrayParams(api):
++        cgen.line("// %s was decoded PACKED into host memory; the guest's %s described the"
++                  % (arrayParam.paramName, strideParam.paramName))
++        cgen.line("// guest's layout, not ours. Hand the driver the host element size.")
++        cgen.stmt("%s = (%s)sizeof(%s)"
++                  % (strideParam.paramName, strideParam.typeName, arrayParam.typeName))
+ 
+ 
+ def emit_call_log(api, cgen):
+@@ -238,6 +253,8 @@
+             ), destroy=destroy, noUnbox=noUnbox)
+         i += 1
+ 
++    emit_stride_normalization(api, cgen)
++
+     for p in paramsToRead:
+         emit_transform(typeInfo, p, cgen, variant="tohost")
+ 
+@@ -290,7 +307,29 @@
+     emit_decode_parameters(typeInfo, api, cgen, globalWrapped=True)
+     emit_global_state_wrapped_call(api, cgen, context=True)
+ 
++# AEMULATOR: see the long note on decode_push_descriptor_set_with_template in decoder.py, including
++# why ALL FOUR spellings are registered and not just the KHR one. The subdecoder needs the same
++# treatment and needs it MORE: its `default:` arm is GFXSTREAM_ABORT("Unrecognized opcode"), and
++# vkCmd* traffic normally arrives here (through vkQueueFlushCommandsGOOGLE), not through VkDecoder.
++def subdecode_push_descriptor_set_with_template(typeInfo, api, cgen):
++    emit_decode_parameters(typeInfo, api, cgen)
++    cgen.line("""
++                // AEMULATOR: consumed exactly what the guest encoder wrote, then dropped. `pData`
++                // on the wire is one byte, not the VkDescriptorUpdateTemplate payload.
++                static std::atomic<bool> sPushDescriptorTemplateWarned{false};
++                if (!sPushDescriptorTemplateWarned.exchange(true)) {
++                    ERR("%s is decoded but NOT executed: the "
++                        "guest encoder marshals only 1 byte of the template payload. Descriptor "
++                        "pushes through a VkDescriptorUpdateTemplate are dropped. Use "
++                        "vkCmdPushDescriptorSet instead.");
++                }
++    """ % api.name)
++
+ custom_decodes = {
++    "vkCmdPushDescriptorSetWithTemplate": subdecode_push_descriptor_set_with_template,
++    "vkCmdPushDescriptorSetWithTemplateKHR": subdecode_push_descriptor_set_with_template,
++    "vkCmdPushDescriptorSetWithTemplate2": subdecode_push_descriptor_set_with_template,
++    "vkCmdPushDescriptorSetWithTemplate2KHR": subdecode_push_descriptor_set_with_template,
+     "vkCmdCopyBufferToImage": emit_global_state_wrapped_decoding_with_context,
+     "vkCmdCopyImage": emit_global_state_wrapped_decoding,
+     "vkCmdCopyImageToBuffer": emit_global_state_wrapped_decoding,
+--- a/scripts/cereal/transform.py
++++ b/scripts/cereal/transform.py
+@@ -90,10 +90,19 @@
+                 getExpr, getLen, cgen, variant=variant)
+ 
+ class TransformCodegen(VulkanTypeIterator):
+-    def __init__(self, cgen, inputVar, resourceTrackerVarName, prefix, variant):
++    # `stridedInput` says whose memory this walks. Unlike every other emitter, TransformCodegen
++    # runs on BOTH sides of the wire over the same VulkanType, and the two sides have different
++    # layouts for a strided array: the guest encoder transforms its local copy, which is
++    # layout-preserving (deepcopy keeps the caller's byte stride), while the host decoder
++    # transforms the buffer it unmarshaled, which is packed. The type cannot tell them apart, so
++    # the caller says. Struct bodies default to False, which is always right — no struct member in
++    # the registry carries a `stride`.
++    def __init__(self, cgen, inputVar, resourceTrackerVarName, prefix, variant,
++                 stridedInput=False):
+         self.cgen = cgen
+         self.inputVar = inputVar
+         self.prefix = prefix
++        self.stridedInput = stridedInput
+         self.resourceTrackerVarName = resourceTrackerVarName
+ 
+         def makeAccess(varName, asPtr = True):
+@@ -150,7 +159,9 @@
+         if lenAccess is not None:
+ 
+             loopVar = "i"
+-            access = "%s + %s" % (access, loopVar)
++            access = self.arrayElementAccess(
++                vulkanType, access, loopVar, parentVarName=self.inputVar,
++                strided=self.stridedInput)
+             forInit = "uint32_t %s = 0" % loopVar
+             forCond = "%s < (uint32_t)%s" % (loopVar, lenAccess)
+             forIncr = "++%s" % loopVar
