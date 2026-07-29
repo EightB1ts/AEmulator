@@ -1,0 +1,646 @@
+diff --git a/src/kosmickrisp/vulkan/kk_bo.c b/src/kosmickrisp/vulkan/kk_bo.c
+--- a/src/kosmickrisp/vulkan/kk_bo.c
++++ b/src/kosmickrisp/vulkan/kk_bo.c
+@@ -59,6 +59,7 @@
+    bo->cpu = mtl_get_contents(map);
+ 
+    kk_device_add_heap_to_residency_set(dev, handle);
++   kk_bo_publish_address(dev, bo, "kk_alloc_bo");
+ 
+    *bo_out = bo;
+    return result;
+@@ -72,8 +73,35 @@
+ }
+ 
+ void
++kk_bo_publish_address(struct kk_device *dev, struct kk_bo *bo, const char *tag)
++{
++   /* ->map is the whole-allocation MTLBuffer: the one placed at heap offset 0
++    * above, or the newBufferWithBytesNoCopy: of a host import. Either way it is
++    * what every address inside this allocation resolves to.
++    *
++    * Sized from ->map, not from ->size_B, because the two can differ: an
++    * imported MTLHeap sets ->size_B to the whole heap but only maps
++    * VkMemoryAllocateInfo::allocationSize of it (kk_AllocateMemory). What a
++    * resolution may hand out is the part ->map actually covers, since that is
++    * what Metal will bounds-check an offset against.
++    *
++    * The result is deliberately dropped. A publish only fails if the map is out
++    * of host memory, and the consequence is that addresses in this one
++    * allocation stop resolving — which the consumer sees as a clean false and
++    * refuses whatever it was about to do. Failing the allocation itself over
++    * that would turn a lost capability into a lost VkDeviceMemory. */
++   kk_addr_map_publish(&dev->addresses, bo->gpu,
++                       mtl_buffer_get_length(bo->map), bo->map, tag);
++}
++
++void
+ kk_destroy_bo(struct kk_device *dev, struct kk_bo *bo)
+ {
++   /* Withdraw before releasing anything: Metal hands the virtual address
++    * straight back out to the next allocation, so an entry that outlives its
++    * buffer can resolve to memory that now belongs to something else. */
++   kk_addr_map_withdraw(&dev->addresses, bo->gpu);
++
+    /* We may only have a mapped buffer, for example if the memory was imported
+     * from a host pointer */
+    if (bo->mtl_handle)
+diff --git a/src/kosmickrisp/vulkan/kk_bo.h b/src/kosmickrisp/vulkan/kk_bo.h
+--- a/src/kosmickrisp/vulkan/kk_bo.h
++++ b/src/kosmickrisp/vulkan/kk_bo.h
+@@ -38,4 +38,15 @@
+ 
+ void kk_destroy_bo(struct kk_device *dev, struct kk_bo *bo);
+ 
++/* Publish this bo's [gpu, gpu + size_B) in dev->addresses, so that a
++ * VkDeviceAddress pointing anywhere inside it can be turned back into ->map
++ * plus an offset — see kk_device_address.h.
++ *
++ * kk_alloc_bo() already does this. A hand-built kk_bo, which today means the
++ * import paths in kk_AllocateMemory(), must call it once ->map, ->gpu and
++ * ->size_B are all set. kk_destroy_bo() withdraws, before it releases anything,
++ * which is the ordering that matters. */
++void kk_bo_publish_address(struct kk_device *dev, struct kk_bo *bo,
++                           const char *tag);
++
+ #endif /* KK_BO_H */
+diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -327,11 +327,14 @@
+    if (dev->mtl_compiler_handle == NULL)
+       goto fail_init;
+ 
+-   /* We need to initialize the device residency set before any bo is created. */
++   /* Both of these have to exist before any bo is created: the residency set
++    * because Metal requires every resource be declared resident, and the
++    * address map because kk_alloc_bo() publishes into it. */
+    simple_mtx_init(&dev->residency_set.mutex, mtx_plain);
++   kk_addr_map_init(&dev->addresses);
+    dev->residency_set.handle = mtl_new_residency_set(dev->mtl_handle);
+    if (dev->residency_set.handle == NULL)
+-      goto fail_compiler;
++      goto fail_addresses;
+ 
+    if (pCreateInfo->queueCreateInfoCount > 0) {
+       result =
+@@ -375,8 +378,12 @@
+    }
+ fail_vab_memory:
+    mtl_release(dev->residency_set.handle);
++/* Was fail_compiler, and folded into it: the residency set is the only thing
++ * that used to jump straight past this point, and it now has the address map to
++ * unwind on its way. */
++fail_addresses:
++   kk_addr_map_finish(&dev->addresses);
+    simple_mtx_destroy(&dev->residency_set.mutex);
+-fail_compiler:
+    kk_release_compiler(dev);
+ fail_init:
+    vk_device_finish(&dev->vk);
+@@ -414,8 +421,11 @@
+       dev->has_queue = false;
+    }
+ 
+-   /* Release the residency set last once all BOs are released. */
++   /* Release the residency set last once all BOs are released, and tear the
++    * address map down alongside it for the same reason: every withdraw happens
++    * in kk_destroy_bo(), so this has to outlive the last one. */
+    mtl_release(dev->residency_set.handle);
++   kk_addr_map_finish(&dev->addresses);
+    simple_mtx_destroy(&dev->residency_set.mutex);
+ 
+    kk_release_compiler(dev);
+diff --git a/src/kosmickrisp/vulkan/kk_device.h b/src/kosmickrisp/vulkan/kk_device.h
+--- a/src/kosmickrisp/vulkan/kk_device.h
++++ b/src/kosmickrisp/vulkan/kk_device.h
+@@ -10,6 +10,7 @@
+ 
+ #include "kk_private.h"
+ 
++#include "kk_device_address.h"
+ #include "kk_query_table.h"
+ #include "kk_queue.h"
+ 
+@@ -92,6 +93,12 @@
+     * recording as required by Metal. */
+    struct kk_residency_set residency_set;
+ 
++   /* GPU address range -> owning MTLBuffer, for the Metal entry points that
++    * take an id<MTLBuffer> and an offset where Vulkan gave us only a
++    * VkDeviceAddress. Self-synchronising; see kk_device_address.h for what is
++    * in it and who is responsible for putting it there. */
++   struct kk_addr_map addresses;
++
+    struct kk_precompiled_cache precompiled_cache;
+ 
+    bool has_queue;
+@@ -124,6 +131,28 @@
+    return (struct kk_physical_device *)dev->vk.physical;
+ }
+ 
++/* VkDeviceAddress -> (id<MTLBuffer>, offset). `size_B` is how many bytes from
++ * `addr` the caller will touch, or 0 for "just resolve the address"; see
++ * kk_addr_map_lookup(). Safe to call from any thread, including while another
++ * thread is allocating or freeing memory. */
++static inline bool
++kk_device_resolve_address(struct kk_device *dev, uint64_t addr, uint64_t size_B,
++                          struct kk_addr_ref *out)
++{
++   return kk_addr_map_lookup(&dev->addresses, addr, size_B, out);
++}
++
++/* The same, for the {address, length} pair the Metal 4 acceleration-structure
++ * descriptors already carry — which is the shape the legacy descriptors need
++ * translated. MTL_BUFFER_RANGE_WHOLE resolves with no size constraint. */
++static inline bool
++kk_device_resolve_buffer_range(struct kk_device *dev,
++                               struct mtl_buffer_range range,
++                               struct kk_addr_ref *out)
++{
++   return kk_addr_map_lookup_range(&dev->addresses, range, out);
++}
++
+ VkResult kk_device_init_meta(struct kk_device *dev);
+ void kk_device_finish_meta(struct kk_device *dev);
+ VkResult kk_device_init_lib(struct kk_device *dev);
+diff --git a/src/kosmickrisp/vulkan/kk_device_address.c b/src/kosmickrisp/vulkan/kk_device_address.c
+new file mode 100644
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/kk_device_address.c
+@@ -0,0 +1,243 @@
++/*
++ * Copyright 2025 Google LLC
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "kk_device_address.h"
++
++#include <assert.h>
++#include <inttypes.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++/* This translation unit deliberately depends on nothing but its own header, so
++ * that crates/aemulator-hvf/kosmickrisp/addr-map-test.c can #include it and
++ * exercise the real code with one clang invocation. Keep it that way: no
++ * kk_device.h, no Metal calls, no logging through vk_error. */
++
++/* KK_ADDR_DEBUG=1 traces every publish, withdraw and failed lookup.
++ *
++ * Latched, because kk_alloc_bo() runs during command-buffer recording and a
++ * getenv() per publish would land on that path. The first-call race between
++ * threads is benign: every racer computes the same value and an int store is
++ * indivisible on every architecture mesa targets. */
++static int
++kk_addr_debug(void)
++{
++   static int enabled = -1;
++
++   if (enabled < 0)
++      enabled = getenv("KK_ADDR_DEBUG") != NULL;
++
++   return enabled;
++}
++
++void
++kk_addr_map_init(struct kk_addr_map *map)
++{
++   simple_mtx_init(&map->lock, mtx_plain);
++   map->entries = NULL;
++   map->count = 0u;
++   map->capacity = 0u;
++   map->peak_count = 0u;
++}
++
++void
++kk_addr_map_finish(struct kk_addr_map *map)
++{
++   if (kk_addr_debug()) {
++      fprintf(stderr,
++              "[kk addr] map finished with %u entries still published, peak %u\n",
++              map->count, map->peak_count);
++      for (uint32_t i = 0u; i < map->count; ++i) {
++         fprintf(stderr,
++                 "[kk addr]   leaked [0x%" PRIx64 ", 0x%" PRIx64 ") %s\n",
++                 map->entries[i].base,
++                 map->entries[i].base + map->entries[i].size_B,
++                 map->entries[i].tag ? map->entries[i].tag : "?");
++      }
++   }
++
++   free(map->entries);
++   map->entries = NULL;
++   map->count = 0u;
++   map->capacity = 0u;
++   simple_mtx_destroy(&map->lock);
++}
++
++/* Index of the first entry whose base is > addr. So the candidate containing
++ * addr, if any, is at index-1. Caller holds the lock. */
++static uint32_t
++kk_addr_map_upper_bound(const struct kk_addr_map *map, uint64_t addr)
++{
++   uint32_t lo = 0u, hi = map->count;
++
++   while (lo < hi) {
++      const uint32_t mid = lo + (hi - lo) / 2u;
++
++      if (map->entries[mid].base <= addr)
++         lo = mid + 1u;
++      else
++         hi = mid;
++   }
++
++   return lo;
++}
++
++bool
++kk_addr_map_publish(struct kk_addr_map *map, uint64_t base, uint64_t size_B,
++                    mtl_buffer *buffer, const char *tag)
++{
++   /* A zero-length mapping can never contain an address, and address 0 is what
++    * Vulkan uses for "no address" — neither is publishable. Nor is a range that
++    * wraps, which would break the sort order the search depends on. */
++   if (base == 0u || size_B == 0u || buffer == NULL ||
++       base + size_B < base)
++      return false;
++
++   simple_mtx_lock(&map->lock);
++
++   const uint32_t at = kk_addr_map_upper_bound(map, base);
++
++   /* Disjointness. `at` is the first entry strictly above base, so at-1 is the
++    * only entry that can start at or below base. */
++   bool overlaps = at < map->count && base + size_B > map->entries[at].base;
++   if (at > 0u) {
++      const struct kk_addr_mapping *prev = &map->entries[at - 1u];
++      overlaps = overlaps || prev->base + prev->size_B > base;
++   }
++
++   if (overlaps) {
++      simple_mtx_unlock(&map->lock);
++
++      if (kk_addr_debug()) {
++         fprintf(stderr,
++                 "[kk addr] REFUSED overlapping publish [0x%" PRIx64
++                 ", 0x%" PRIx64 ") %s\n",
++                 base, base + size_B, tag ? tag : "?");
++      }
++      /* The release driver refuses and carries on — nothing but address
++       * resolution depends on this entry. The assert (compiled out by NDEBUG in
++       * a release build) is here so a debug build stops at the publisher that
++       * got its withdraw ordering wrong, rather than at the mis-resolution it
++       * would have caused much later. */
++      assert(!"kk_addr_map: overlapping publish, some withdraw came too late");
++      return false;
++   }
++
++   if (map->count == map->capacity) {
++      const uint32_t capacity = map->capacity ? map->capacity * 2u : 16u;
++      struct kk_addr_mapping *entries =
++         realloc(map->entries, capacity * sizeof(*entries));
++
++      if (entries == NULL) {
++         simple_mtx_unlock(&map->lock);
++         return false;
++      }
++
++      map->entries = entries;
++      map->capacity = capacity;
++   }
++
++   memmove(&map->entries[at + 1u], &map->entries[at],
++           (map->count - at) * sizeof(*map->entries));
++
++   map->entries[at] = (struct kk_addr_mapping){
++      .base = base,
++      .size_B = size_B,
++      .buffer = buffer,
++      .tag = tag,
++   };
++   ++map->count;
++   if (map->count > map->peak_count)
++      map->peak_count = map->count;
++
++   if (kk_addr_debug()) {
++      fprintf(stderr,
++              "[kk addr] publish  [0x%" PRIx64 ", 0x%" PRIx64 ") buffer %p %s "
++              "(%u live)\n",
++              base, base + size_B, buffer, tag ? tag : "?", map->count);
++   }
++
++   simple_mtx_unlock(&map->lock);
++   return true;
++}
++
++void
++kk_addr_map_withdraw(struct kk_addr_map *map, uint64_t base)
++{
++   if (base == 0u)
++      return;
++
++   simple_mtx_lock(&map->lock);
++
++   const uint32_t at = kk_addr_map_upper_bound(map, base);
++
++   if (at > 0u && map->entries[at - 1u].base == base) {
++      const uint32_t i = at - 1u;
++
++      if (kk_addr_debug()) {
++         fprintf(stderr,
++                 "[kk addr] withdraw [0x%" PRIx64 ", 0x%" PRIx64 ") %s\n", base,
++                 base + map->entries[i].size_B,
++                 map->entries[i].tag ? map->entries[i].tag : "?");
++      }
++
++      memmove(&map->entries[i], &map->entries[i + 1u],
++              (map->count - i - 1u) * sizeof(*map->entries));
++      --map->count;
++   } else if (kk_addr_debug()) {
++      fprintf(stderr, "[kk addr] withdraw 0x%" PRIx64 " — not published\n",
++              base);
++   }
++
++   simple_mtx_unlock(&map->lock);
++}
++
++bool
++kk_addr_map_lookup(struct kk_addr_map *map, uint64_t addr, uint64_t size_B,
++                   struct kk_addr_ref *out)
++{
++   *out = (struct kk_addr_ref){0};
++
++   if (addr == 0u)
++      return false;
++
++   simple_mtx_lock(&map->lock);
++
++   const uint32_t at = kk_addr_map_upper_bound(map, addr);
++   const struct kk_addr_mapping *m = NULL;
++   uint64_t offset_B = 0u;
++   bool found = false;
++
++   if (at > 0u && addr - map->entries[at - 1u].base <
++                     map->entries[at - 1u].size_B) {
++      m = &map->entries[at - 1u];
++      offset_B = addr - m->base;
++
++      const uint64_t remaining_B = m->size_B - offset_B;
++
++      if (size_B <= remaining_B) {
++         *out = (struct kk_addr_ref){
++            .buffer = m->buffer,
++            .offset_B = offset_B,
++            .size_B = remaining_B,
++         };
++         found = true;
++      } else if (kk_addr_debug()) {
++         fprintf(stderr,
++                 "[kk addr] lookup 0x%" PRIx64 " +%" PRIu64 " overruns %s by "
++                 "%" PRIu64 " bytes\n",
++                 addr, size_B, m->tag ? m->tag : "?", size_B - remaining_B);
++      }
++   } else if (kk_addr_debug()) {
++      fprintf(stderr,
++              "[kk addr] lookup 0x%" PRIx64 " is in no published allocation "
++              "(%u live)\n",
++              addr, map->count);
++   }
++
++   simple_mtx_unlock(&map->lock);
++   return found;
++}
+diff --git a/src/kosmickrisp/vulkan/kk_device_address.h b/src/kosmickrisp/vulkan/kk_device_address.h
+new file mode 100644
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/kk_device_address.h
+@@ -0,0 +1,200 @@
++/*
++ * Copyright 2025 Google LLC
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef KK_DEVICE_ADDRESS_H
++#define KK_DEVICE_ADDRESS_H 1
++
++#include "kosmickrisp/bridge/mtl_acceleration_structure.h" /* mtl_buffer_range */
++#include "kosmickrisp/bridge/mtl_types.h"
++
++#include "util/simple_mtx.h"
++
++#include <stdbool.h>
++#include <stdint.h>
++
++/*
++ * VkDeviceAddress -> (id<MTLBuffer>, offset)
++ * ==========================================
++ *
++ * WHY THIS EXISTS. Metal has two acceleration-structure builders and they
++ * disagree about how a buffer is named. The Metal 4 one
++ * (MTL4ComputeCommandEncoder + MTL4*AccelerationStructureDescriptor) takes raw
++ * GPU addresses, which is why kk_acceleration_structure.c can hand a
++ * VkDeviceOrHostAddressConstKHR straight through. The legacy one
++ * (-[MTLCommandBuffer accelerationStructureCommandEncoder] +
++ * MTLAccelerationStructure*GeometryDescriptor) takes `id<MTLBuffer>` plus an
++ * offset. On an Apple8 GPU such as the M2 the legacy builder is the only one
++ * that produces a structure that intersects anything at all, so the legacy
++ * descriptors have to be filled — and nothing in kk's Vulkan-facing API carries
++ * an MTLBuffer for an address the application computed with
++ * vkGetBufferDeviceAddress. This turns one back into the other.
++ *
++ * HOW. Every VkDeviceMemory in kk is an MTLHeapTypePlacement heap that already
++ * owns one whole-heap MTLBuffer at offset 0 — kk_bo::map, with its GPU address
++ * in ::gpu and its length in ::size_B (kk_bo.c, and see the note in
++ * kk_metal_objects.c's VK_STRUCTURE_TYPE_EXPORT_METAL_BUFFER_INFO_EXT case).
++ * Every VkBuffer bound into that memory is placed inside the same heap at
++ * VkBindBufferMemoryInfo::memoryOffset, so its address is the heap buffer's
++ * address plus that offset. So resolution is: find the allocation whose address
++ * range contains the address, and answer with its whole-allocation MTLBuffer
++ * and the difference. No new per-VkBuffer bookkeeping is needed, and the answer
++ * covers addresses that are not any VkBuffer's base — scratch, an instance
++ * array in the middle of a buffer, a query-pool slot — which is exactly what an
++ * acceleration-structure build asks about.
++ *
++ * That "placed at base + offset" invariant is measured, not assumed:
++ * crates/aemulator-hvf/kosmickrisp/mtl-heap-addr-probe.m reads back the
++ * gpuAddress of heap-placed buffers at six offsets and checks each one, and
++ * also checks that coexisting allocations (two heaps, a device-level
++ * placement-sparse buffer, a newBufferWithBytesNoCopy host import) never share
++ * a virtual address range. That disjointness is what lets all of them live in
++ * one flat, non-overlapping interval map.
++ *
++ * WHAT IS IN THE MAP. One entry per *allocation*: every struct kk_bo, which is
++ * every VkDeviceMemory and every internal allocation (command-buffer upload
++ * pools, query pools, descriptor pools, the geometry heap). kk_alloc_bo()
++ * publishes; kk_destroy_bo() withdraws; a hand-built kk_bo calls
++ * kk_bo_publish_address() itself. Buffers suballocated out of a published heap
++ * are deliberately NOT entries of their own — the heap's entry covers them, and
++ * one entry per allocation is what makes an address that is nobody's buffer
++ * base (build scratch, an instance array partway into a buffer, a query-pool
++ * report slot) resolve just as well as a base.
++ *
++ * WHAT IS NOT. A sparse VkBuffer. Its Metal object is a placement-sparse
++ * MTLBuffer created on the *device*, not in a heap (kk_CreateBuffer, and
++ * mtl_sparse.h for why it must be Private storage), so it owns a virtual range
++ * that no kk_bo covers, and its pages may not be backed by anything at all
++ * until vkQueueBindSparse says so. Resolution therefore fails for an address
++ * inside one, and a caller must treat that failure as "cannot do this on this
++ * path" rather than substituting a guess. Sparse binding and ray tracing do not
++ * currently intersect in this driver — nothing is silently wrong today — but a
++ * consumer that starts to care has to add the entry at creation and withdraw it
++ * in kk_DestroyBuffer, with the same before-the-release ordering as everything
++ * else here.
++ *
++ * OWNERSHIP. The map holds a BORROWED mtl_buffer pointer and does not retain
++ * it. The publisher owns the lifetime and must withdraw the entry BEFORE
++ * mtl_release()ing the buffer. That ordering is load-bearing rather than
++ * cosmetic: Metal recycles virtual addresses immediately on release, so an
++ * entry left behind past the release can be handed out for an address that now
++ * belongs to a different, live allocation. mtl-heap-addr-probe.m demonstrates
++ * the recycling. Likewise, a struct kk_addr_ref handed back by a lookup is
++ * borrowed and only valid for as long as the caller keeps the owning object
++ * alive by other means — in practice the VkDeviceMemory or VkBuffer the
++ * application must keep alive across the command anyway.
++ *
++ * LOCKING. The map has its own simple_mtx_t and is fully self-synchronising:
++ * publish, withdraw and lookup may all be called concurrently from any thread,
++ * which they are — vkBindBufferMemory, vkAllocateMemory and
++ * vkCmdBuildAccelerationStructuresKHR are only externally synchronised
++ * per-object, and kk_alloc_bo() also runs during command-buffer recording. The
++ * lock is a LEAF: never take another kk lock (the residency-set mutex, the
++ * sampler-heap lock, a query table's mutex) while holding it, and never call
++ * into Metal under it. Nothing here calls out, so keeping that true is a matter
++ * of not adding a call. The lock is not recursive; do not call one of these
++ * functions from inside another.
++ *
++ * COST. Entries are kept in one array sorted by base address, so a lookup is a
++ * binary search and a publish/withdraw is a binary search plus a memmove of the
++ * tail. That memmove is the reason to state numbers rather than adjectives.
++ * Measured on an M2 by crates/aemulator-hvf/kosmickrisp/run-addr-map-test.sh, at
++ * 4096 live entries and forcing every insert and removal to index 0 so the whole
++ * tail moves every time:
++ *
++ *    publish  0.80 us    withdraw  0.77 us    lookup  0.017 us
++ *
++ * against 5.2 us for the -[MTLDevice newHeapWithDescriptor:] plus whole-heap
++ * -[MTLHeap newBufferWithLength:options:offset:] pair that each publish
++ * accompanies in kk_alloc_bo(). So even that worst case costs about a sixth of
++ * the allocation it rides along with.
++ *
++ * 4096 live entries is nowhere near real, though. A full Android boot through
++ * gfxstream, traced with KK_ADDR_DEBUG=1, does 363 publishes and 224 withdraws
++ * and peaks at 47 live entries — 296 from kk_alloc_bo and 67 from imported
++ * MTLHeaps — with no overlap refused and no withdraw of an address that was
++ * never published. At 47 entries the memmove is a cache line or two. If that
++ * ever stops being true the fix is a tree, not a lock change.
++ */
++
++/* A resolved address: where it lives, expressed the way a legacy Metal
++ * descriptor wants it. `buffer` is borrowed — see OWNERSHIP above. */
++struct kk_addr_ref {
++   mtl_buffer *buffer;
++   uint64_t offset_B;
++   /* Bytes from offset_B to the end of the owning allocation. A caller that
++    * passed a size to the lookup already knows this is at least that big; a
++    * caller that passed 0 can use this as the clamp for
++    * MTL_BUFFER_RANGE_WHOLE. */
++   uint64_t size_B;
++};
++
++struct kk_addr_mapping {
++   uint64_t base;
++   uint64_t size_B;
++   mtl_buffer *buffer; /* borrowed */
++   /* Static string naming the publisher, for KK_ADDR_DEBUG output only. */
++   const char *tag;
++};
++
++struct kk_addr_map {
++   simple_mtx_t lock;
++
++   /* Sorted ascending by .base, and non-overlapping. Guarded by ::lock. */
++   struct kk_addr_mapping *entries;
++   uint32_t count;
++   uint32_t capacity;
++
++   /* High-water mark of ::count, for KK_ADDR_DEBUG. Guarded by ::lock. */
++   uint32_t peak_count;
++};
++
++void kk_addr_map_init(struct kk_addr_map *map);
++void kk_addr_map_finish(struct kk_addr_map *map);
++
++/* Publish [base, base+size_B) as living in `buffer` at offset (addr - base).
++ *
++ * Returns false, and publishes nothing, if the range is empty or overlaps an
++ * entry that is already published. An overlap means some publisher withdrew
++ * late or a Metal address assumption broke; it is a driver bug, and refusing is
++ * how the map stays trustworthy for every other address rather than silently
++ * answering with the wrong buffer. A false return costs the caller only the
++ * ability to resolve addresses in that allocation.
++ */
++bool kk_addr_map_publish(struct kk_addr_map *map, uint64_t base, uint64_t size_B,
++                         mtl_buffer *buffer, const char *tag);
++
++/* Withdraw the entry published at exactly `base`. Idempotent, and a no-op for
++ * an address that was never published. MUST happen before the buffer is
++ * released. */
++void kk_addr_map_withdraw(struct kk_addr_map *map, uint64_t base);
++
++/* Resolve `addr`.
++ *
++ * `size_B` is how many bytes from `addr` the caller intends to touch, or 0 for
++ * "just resolve the address". A nonzero size that runs past the end of the
++ * owning allocation fails rather than being clamped: Metal bounds-checks
++ * offset+length against the MTLBuffer, so a caller that would have overrun
++ * needs to hear about it here, not from a validation assert later.
++ *
++ * Returns false for address 0, for an address in no published allocation, and
++ * for the overrun above. On false, *out is zeroed.
++ */
++bool kk_addr_map_lookup(struct kk_addr_map *map, uint64_t addr, uint64_t size_B,
++                        struct kk_addr_ref *out);
++
++/* Same, for the address+length pair the Metal 4 descriptors already carry.
++ * MTL_BUFFER_RANGE_WHOLE means "to the end of the allocation", so it resolves
++ * with no size constraint and reports the remaining bytes in out->size_B. */
++static inline bool
++kk_addr_map_lookup_range(struct kk_addr_map *map, struct mtl_buffer_range range,
++                         struct kk_addr_ref *out)
++{
++   const uint64_t size_B =
++      range.length_B == MTL_BUFFER_RANGE_WHOLE ? 0u : range.length_B;
++
++   return kk_addr_map_lookup(map, range.address, size_B, out);
++}
++
++#endif /* KK_DEVICE_ADDRESS_H */
+diff --git a/src/kosmickrisp/vulkan/kk_device_memory.c b/src/kosmickrisp/vulkan/kk_device_memory.c
+--- a/src/kosmickrisp/vulkan/kk_device_memory.c
++++ b/src/kosmickrisp/vulkan/kk_device_memory.c
+@@ -140,6 +140,11 @@
+ 
+       mem->bo->gpu = mtl_buffer_get_gpu_address(mem->bo->map);
+       mem->bo->cpu = mtl_get_contents(mem->bo->map);
++
++      /* kk_alloc_bo() publishes the allocation's address range itself; this bo
++       * was built by hand, so it has to. */
++      kk_bo_publish_address(dev, mem->bo,
++                            import_metal ? "import MTLHeap" : "import host ptr");
+    } else {
+       result =
+          kk_alloc_bo(dev, &dev->vk.base, aligned_size, alignment, &mem->bo);
+diff --git a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
+--- a/src/kosmickrisp/vulkan/meson.build
++++ b/src/kosmickrisp/vulkan/meson.build
+@@ -73,6 +73,8 @@
+   'kk_descriptor_set_layout.c',
+   'kk_descriptor_set.h',
+   'kk_descriptor_set.c',
++  'kk_device_address.h',
++  'kk_device_address.c',
+   'kk_device_lib.c',
+   'kk_device_memory.h',
+   'kk_device_memory.c',
