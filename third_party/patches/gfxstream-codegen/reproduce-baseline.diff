@@ -87,7 +87,7 @@
  }
 --- a/host/vulkan/cereal/common/goldfish_vk_marshaling.cpp
 +++ b/host/vulkan/cereal/common/goldfish_vk_marshaling.cpp
-@@ -30291,6 +30291,11 @@
+@@ -30378,6 +30378,11 @@
              return "OP_vkCmdSetTessellationDomainOriginEXT";
          }
  #endif
@@ -101,7 +101,7 @@
              return "OP_vkCmdSetCullModeEXT";
 --- a/host/vulkan/cereal/common/goldfish_vk_marshaling.h
 +++ b/host/vulkan/cereal/common/goldfish_vk_marshaling.h
-@@ -4815,6 +4815,27 @@
+@@ -4817,6 +4817,27 @@
      VkPhysicalDeviceShaderAtomicFloatFeaturesEXT* forUnmarshaling);
  
  #endif
@@ -153,7 +153,7 @@
      memcpy((VkDeviceSize*)&forUnmarshaling->offset, *ptr, sizeof(VkDeviceSize));
      *ptr += sizeof(VkDeviceSize);
      memcpy((VkDeviceSize*)&forUnmarshaling->range, *ptr, sizeof(VkDeviceSize));
-@@ -21360,9 +21366,31 @@
+@@ -21408,9 +21414,31 @@
          }
  #endif
          default: {
@@ -190,7 +190,7 @@
      }
 --- a/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.h
 +++ b/host/vulkan/cereal/common/goldfish_vk_reserved_marshaling.h
-@@ -2555,6 +2555,17 @@
+@@ -2556,6 +2556,17 @@
      VkPhysicalDeviceShaderAtomicFloatFeaturesEXT* forUnmarshaling, uint8_t** ptr);
  
  #endif

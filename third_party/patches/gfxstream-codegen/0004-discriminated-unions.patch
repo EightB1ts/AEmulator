@@ -1,0 +1,360 @@
+--- a/scripts/cereal/common/vulkantypes.py
++++ b/scripts/cereal/common/vulkantypes.py
+@@ -394,6 +394,16 @@
+         # variables to sub-structures
+         self.binds = {}
+ 
++        # Discriminated unions (vk.xml `selector` / `selection`).
++        #
++        # `selector` is set on a STRUCT MEMBER whose type is a union: it names the sibling member
++        # that says which arm is live (VkAccelerationStructureGeometryKHR::geometry has
++        # selector="geometryType").
++        # `selections` is set on a UNION MEMBER: the enum constants for which that arm is the live
++        # one. A union member with no `selection` is not selectable and is never streamed.
++        self.selector = None
++        self.selections = None
++
+         # Device memory annotations
+ 
+         # self.deviceMemoryAttrib/Val stores
+@@ -905,6 +915,13 @@
+         bindPairs = map(lambda x: x.strip(), tag.attrib.get("binds").split(","))
+         bindPairsSplit = map(lambda p: p.split(":"), bindPairs)
+         res.binds = dict(map(lambda sp: (sp[0].strip(), sp[1].strip()), bindPairsSplit))
++
++    # Annotations: discriminated unions. See VulkanType.selector / .selections.
++    if tag.attrib.get("selector") is not None:
++        res.selector = tag.attrib.get("selector").strip()
++
++    if tag.attrib.get("selection") is not None:
++        res.selections = [s.strip() for s in tag.attrib.get("selection").split(",") if s.strip()]
+ 
+     # Annotations: Filters
+     structMemberName = f"{parentName}.{res.paramName}"
+@@ -1088,8 +1105,72 @@
+         # Maps enum to their xml element
+         self.enumElem = {}
+ 
++        # unionName -> (selectorMemberName, selectorTypeName). Built once, lazily, from the merged
++        # registry tree; see initUnionSelectors().
++        self.unionSelectors = None
++
+         self.feature = None
+ 
++    # AEMULATOR: discriminated unions.
++    #
++    # A union is NOT self-describing: which arm is live is stated by a sibling member of the
++    # ENCLOSING struct, which vk.xml marks with `selector` (and each arm with `selection`). Without
++    # this, every emitter fell back to `members[0]` and streamed the union as its FIRST arm whatever
++    # it actually held. Because only field bytes are transmitted (never padding), most arms happened
++    # to round-trip; VkAccelerationStructureGeometryAabbsDataKHR did not — its `data` sits at offset
++    # 16..23 while the triangles layout has `vertexFormat` (4 bytes) there followed by 4 bytes of
++    # padding, so the HIGH DWORD of an AABB VkDeviceOrHostAddressConstKHR was silently dropped.
++    #
++    # The discriminant cannot be recovered inside the union's own serializer, so it is passed IN, by
++    # reusing the generator's existing "environment" machinery: the union gets a free parameter
++    # (env entry with binding=None) and the enclosing struct's member gets a `binds` entry that
++    # makes every call site forward the sibling's value. marshaling / reservedmarshaling / counting
++    # all already implement free params and binds, so nothing else has to learn about this.
++    #
++    # The map has to be built up front rather than while walking types: reg.py emits the union
++    # BEFORE the struct that selects on it, so by the time the selector is visible the union's
++    # serializer has already been written out.
++    def initUnionSelectors(self):
++        self.unionSelectors = {}
++
++        registry = getattr(self.generator, "registry", None)
++        tree = getattr(registry, "tree", None) if registry is not None else None
++        if tree is None:
++            return
++
++        for typeElem in tree.getroot().findall("types/type"):
++            if typeElem.get("category") != "struct":
++                continue
++
++            memberTypes = {}
++            selectingMembers = []
++            for m in typeElem.findall("member"):
++                nameElem = m.find("name")
++                typeElemInner = m.find("type")
++                if nameElem is None or typeElemInner is None:
++                    continue
++                memberTypes[nameElem.text] = typeElemInner.text
++                if m.get("selector") is not None:
++                    selectingMembers.append((typeElemInner.text, m.get("selector").strip()))
++
++            for (unionTypeName, selectorName) in selectingMembers:
++                selectorTypeName = memberTypes.get(selectorName)
++                if selectorTypeName is None:
++                    continue
++                previous = self.unionSelectors.get(unionTypeName)
++                if previous is not None and previous != (selectorName, selectorTypeName):
++                    # Two enclosing structs disagree on how to discriminate this union. Nothing in
++                    # the registry does that today; if it ever does, fall back to the old
++                    # single-arm behaviour rather than guessing.
++                    self.unionSelectors[unionTypeName] = None
++                    continue
++                self.unionSelectors[unionTypeName] = (selectorName, selectorTypeName)
++
++    def getUnionSelector(self, typeName):
++        if self.unionSelectors is None:
++            self.initUnionSelectors()
++        return self.unionSelectors.get(typeName)
++
+     def initType(self, name: str, category: str):
+         self.categories.add(category)
+         self.typeCategories[name] = category
+@@ -1203,6 +1284,19 @@
+                         "body" : parseLetBodyExpr(body)
+                     }
+ 
++            # AEMULATOR: a discriminated union takes its selector as a free parameter, so that its
++            # serializers can switch on it. See initUnionSelectors().
++            isUnion = self.categoryOf(typeName) == "union"
++            unionSelector = self.getUnionSelector(typeName) if isUnion else None
++            if unionSelector is not None:
++                (selectorName, selectorTypeName) = unionSelector
++                initialEnv[selectorName] = {
++                    "type": selectorTypeName,
++                    "binding": None,
++                    "structmember": False,
++                    "body": None,
++                }
++
+             for member in typeinfo.elem.findall(".//member"):
+                 if "api" in member.attrib.keys() and not "vulkan" == member.attrib["api"]:
+                     continue
+@@ -1213,6 +1307,15 @@
+                     "structmember": True,
+                     "body": None,
+                 }
++                # AEMULATOR: forward the discriminant at every call site. `binds` is the generator's
++                # pre-existing mechanism for passing an enclosing struct's member down into a
++                # sub-structure's serializer; nothing in either registry uses the XML `binds`
++                # attribute, so this is the only producer.
++                memberSelector = self.getUnionSelector(vulkanType.typeName)
++                if vulkanType.selector is not None and memberSelector is not None \
++                        and memberSelector[0] == vulkanType.selector:
++                    vulkanType.binds = dict(vulkanType.binds)
++                    vulkanType.binds[vulkanType.selector] = vulkanType.selector
+                 members.append(vulkanType)
+                 if vulkanType.typeName == "VkStructureType" and \
+                    member.get("values"):
+@@ -1222,7 +1325,7 @@
+                 VulkanCompoundType(
+                     typeName,
+                     members,
+-                    isUnion = self.categoryOf(typeName) == "union",
++                    isUnion = isUnion,
+                     structEnumExpr = structEnumExpr,
+                     structExtendsExpr = structExtendsExpr,
+                     feature = self.feature,
+@@ -1365,6 +1468,40 @@
+ 
+     return True
+ 
++# AEMULATOR: emit the body of a union serializer.
++#
++# With a discriminant, one arm is streamed, chosen by a switch on the selector the enclosing struct
++# forwarded. Without one (VkDeviceOrHostAddress{,Const}KHR, whose live arm is stated by the API
++# contract and not by any sibling field), the historical behaviour is kept: stream members[0].
++#
++# Shared by marshaling.py / reservedmarshaling.py / counting.py so the three cannot drift on which
++# bytes a union occupies — counting sizes the buffer that reservedmarshal then writes into, so a
++# disagreement there is a heap overflow, not a mismatch.
++def iterateVulkanUnion(typeInfo: VulkanTypeInfo, cgen, structInfo, forEachType):
++    selector = typeInfo.getUnionSelector(structInfo.name)
++    arms = [m for m in structInfo.members if m.selections] if selector is not None else []
++
++    if not arms:
++        iterateVulkanType(typeInfo, structInfo.members[0], forEachType)
++        return
++
++    cgen.beginSwitch(selector[0])
++    for member in arms:
++        for value in member.selections:
++            cgen.line("case %s:" % value)
++        cgen.beginBlock()
++        iterateVulkanType(typeInfo, member, forEachType)
++        cgen.stmt("break")
++        cgen.endBlock()
++    # Not every enumerant selects an arm (VkDescriptorType has far more values than
++    # VkDescriptorDataEXT has members), and a guest may send anything. Streaming nothing is the only
++    # safe answer, and it is symmetric: the reader takes the same arm the writer did.
++    cgen.line("default:")
++    cgen.beginBlock()
++    cgen.stmt("break")
++    cgen.endBlock()
++    cgen.endSwitch()
++
+ class VulkanTypeIterator(object):
+     def __init__(self,):
+         self.typeInfo = None
+--- a/scripts/cereal/marshaling.py
++++ b/scripts/cereal/marshaling.py
+@@ -6,7 +6,7 @@
+ 
+ from .common.codegen import CodeGen, VulkanAPIWrapper
+ from .common.vulkantypes import \
+-        VulkanAPI, makeVulkanTypeSimple, iterateVulkanType, VulkanTypeIterator, Atom, FuncExpr, FuncExprVal, FuncLambda
++        VulkanAPI, makeVulkanTypeSimple, iterateVulkanType, iterateVulkanUnion, VulkanTypeIterator, Atom, FuncExpr, FuncExprVal, FuncLambda
+ 
+ from .wrapperdefs import VulkanWrapperGenerator
+ from .wrapperdefs import VULKAN_STREAM_VAR_NAME
+@@ -817,7 +817,7 @@
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.writeCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.writeCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.writeCodegen)
+ 
+             def structMarshalingDefNoFilter(cgen):
+                 self.writeCodegen.cgen = cgen
+@@ -833,7 +833,7 @@
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.writeCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.writeCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.writeCodegen)
+                 self.writeCodegen.doFiltering = True
+ 
+             self.module.appendHeader(
+@@ -848,7 +848,7 @@
+                     self.cgenImpl.makeFuncImpl(
+                         marshalPrototype, structMarshalingDef))
+ 
+-            if freeParams != []:
++            if freeParams != [] and category != "union":
+                 self.module.appendHeader(
+                     self.cgenHeader.makeFuncDecl(marshalPrototypeNoFilter))
+                 self.module.appendImpl(
+@@ -893,7 +893,7 @@
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.readCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.readCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.readCodegen)
+ 
+             def structUnmarshalingDefNoFilter(cgen):
+                 self.readCodegen.cgen = cgen
+@@ -908,7 +908,7 @@
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.readCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.readCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.readCodegen)
+                 self.readCodegen.doFiltering = True
+ 
+             self.module.appendHeader(
+@@ -923,7 +923,7 @@
+                     self.cgenImpl.makeFuncImpl(
+                         unmarshalPrototype, structUnmarshalingDef))
+ 
+-            if freeParams != []:
++            if freeParams != [] and category != "union":
+                 self.module.appendHeader(
+                     self.cgenHeader.makeFuncDecl(unmarshalPrototypeNoFilter))
+                 self.module.appendImpl(
+--- a/scripts/cereal/reservedmarshaling.py
++++ b/scripts/cereal/reservedmarshaling.py
+@@ -4,7 +4,7 @@
+ 
+ from .common.codegen import CodeGen, VulkanAPIWrapper
+ from .common.vulkantypes import \
+-        VulkanAPI, makeVulkanTypeSimple, iterateVulkanType, VulkanTypeIterator, Atom, FuncExpr, FuncExprVal, FuncLambda
++        VulkanAPI, makeVulkanTypeSimple, iterateVulkanType, iterateVulkanUnion, VulkanTypeIterator, Atom, FuncExpr, FuncExprVal, FuncLambda
+ 
+ from .wrapperdefs import VulkanWrapperGenerator
+ from .wrapperdefs import VULKAN_STREAM_VAR_NAME
+@@ -978,7 +978,7 @@
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.writeCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.writeCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.writeCodegen)
+ 
+             def structMarshalingDefNoFilter(cgen):
+                 self.writeCodegen.cgen = cgen
+@@ -995,7 +995,7 @@
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.writeCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.writeCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.writeCodegen)
+                 self.writeCodegen.doFiltering = True
+ 
+             if self.variant != "host":
+@@ -1011,7 +1011,7 @@
+                         self.cgenImpl.makeFuncImpl(
+                             marshalPrototype, structMarshalingDef))
+ 
+-                if freeParams != []:
++                if freeParams != [] and category != "union":
+                     self.module.appendHeader(
+                         self.cgenHeader.makeFuncDecl(marshalPrototypeNoFilter))
+                     self.module.appendImpl(
+@@ -1052,7 +1052,7 @@
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.readCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.readCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.readCodegen)
+ 
+             def structUnmarshalingDefNoFilter(cgen):
+                 self.readCodegen.cgen = cgen
+@@ -1065,7 +1065,7 @@
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.readCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.readCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.readCodegen)
+                 self.readCodegen.doFiltering = True
+ 
+             if self.variant != "guest":
+@@ -1081,7 +1081,7 @@
+                         self.cgenImpl.makeFuncImpl(
+                             unmarshalPrototype, structUnmarshalingDef))
+ 
+-                if freeParams != []:
++                if freeParams != [] and category != "union":
+                     self.module.appendHeader(
+                         self.cgenHeader.makeFuncDecl(unmarshalPrototypeNoFilter))
+                     self.module.appendImpl(
+--- a/scripts/cereal/counting.py
++++ b/scripts/cereal/counting.py
+@@ -5,7 +5,7 @@
+ 
+ from .common.codegen import CodeGen
+ from .common.vulkantypes import \
+-        VulkanAPI, makeVulkanTypeSimple, iterateVulkanType, VulkanTypeIterator, Atom, FuncExpr, FuncExprVal, FuncLambda
++        VulkanAPI, makeVulkanTypeSimple, iterateVulkanType, iterateVulkanUnion, VulkanTypeIterator, Atom, FuncExpr, FuncExprVal, FuncLambda
+ 
+ from .wrapperdefs import VulkanWrapperGenerator
+ from .wrapperdefs import ROOT_TYPE_VAR_NAME, ROOT_TYPE_PARAM
+@@ -632,7 +632,7 @@
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.countingCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.countingCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.countingCodegen)
+ 
+             def structCountingDefNoFilter(cgen):
+                 self.countingCodegen.cgen = cgen
+@@ -651,7 +651,7 @@
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.countingCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.countingCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.countingCodegen)
+ 
+                 self.countingCodegen.doFiltering = True
+ 
+@@ -660,7 +660,7 @@
+             self.module.appendImpl(
+                 self.codegen.makeFuncImpl(countingPrototype, structCountingDef))
+ 
+-            if freeParams != []:
++            if freeParams != [] and category != "union":
+                 self.module.appendHeader(
+                     self.cgenHeader.makeFuncDecl(countingPrototypeNoFilter))
+                 self.module.appendImpl(

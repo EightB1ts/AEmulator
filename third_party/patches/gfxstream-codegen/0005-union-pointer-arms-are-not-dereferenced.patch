@@ -1,0 +1,54 @@
+--- a/scripts/cereal/deepcopy.py
++++ b/scripts/cereal/deepcopy.py
+@@ -406,6 +406,8 @@
+                 VulkanAPI(self.deepcopyPrefix + name,
+                           self.voidType,
+                           deepcopyParams)
++
++            isUnion = category == "union"
+ 
+             def structDeepcopyDef(cgen):
+                 self.deepcopyCodegen.cgen = cgen
+@@ -420,7 +422,42 @@
+                 if canSimplyAssign:
+                     pass
+                 else:
++                    emittedUnionPointerNote = False
+                     for member in structInfo.members:
++                        # AEMULATOR: a UNION's arms OVERLAP, so every arm but the live one reads
++                        # bytes that belong to a different arm. Deepcopy is the only emitter that
++                        # DEREFERENCES what it reads, and it has no discriminant (the selector is
++                        # plumbed into counting/marshaling as a free parameter, but deepcopy's
++                        # signature is fixed by every call site in VkEncoder). Following a pointer
++                        # out of a non-live arm therefore dereferences whatever the live arm
++                        # happens to have at that offset.
++                        #
++                        # Measured, not theorised: for VkAccelerationStructureGeometryDataKHR
++                        # holding `triangles`, the `aabbs` arm's VkDeviceOrHostAddressConstKHR
++                        # `data` lands on triangles::vertexFormat + padding, i.e. the small integer
++                        # 106 (VK_FORMAT_R32G32B32_SFLOAT), and the generated
++                        # deepcopy_VkDeviceOrHostAddressConstKHR did
++                        # `alloc->dupArray(from->hostAddress, 1)` on it. That is a SIGSEGV in the
++                        # guest ICD inside vkGetAccelerationStructureBuildSizesKHR, reproduced by
++                        # vk-rt-probe and by a real ray-query app at the same instruction.
++                        #
++                        # The bytes themselves are already copied by `*to = *from` above, and no
++                        # emitter transmits a union's pointer arm (count_/marshal_ send the live
++                        # arm's value only, and VK_ACCELERATION_STRUCTURE_BUILD_TYPE_HOST_KHR is not
++                        # supported here — accelerationStructureHostCommands is VK_FALSE), so
++                        # skipping the dereference is both necessary and sufficient.
++                        if isUnion and member.pointerIndirectionLevels > 0:
++                            if not emittedUnionPointerNote:
++                                cgen.line(
++                                    "// A union arm that is a pointer is NOT dereferenced: "
++                                    "without the")
++                                cgen.line(
++                                    "// discriminant, a non-live arm reads another arm's bytes. "
++                                    "The value is")
++                                cgen.line(
++                                    "// already carried by the assignment above.")
++                                emittedUnionPointerNote = True
++                            continue
+                         iterateVulkanType(self.typeInfo, member,
+                                           self.deepcopyCodegen)
+ 

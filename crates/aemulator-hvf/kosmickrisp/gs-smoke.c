@@ -29,13 +29,18 @@
  * regression there breaks every ordinary draw while leaving the geometry checks
  * green. Read case 0 first.
  *
- * Cases 1-3 must pass. Case 4 must be REFUSED: its output vertex count is data
- * dependent, so libpoly emits an index buffer of strips separated by a restart
- * index and Metal has no primitive restart. Until that unroll lands, refusing
- * the pipeline is the correct behaviour and rendering anything is a bug.
+ * Cases 4 and 5 are the two shapes where libpoly emits an index buffer of strips
+ * separated by a RESTART INDEX, which Metal does not have. Both used to be
+ * refused. They now render because the driver unrolls that index buffer into
+ * independent primitives first — on the CPU at compile time for the static one
+ * (case 4) and on the GPU with libkk_unroll_geometry for the dynamic one (case
+ * 5). Each has a check that fails specifically if the restart was DROPPED rather
+ * than unrolled, since dropping it stitches primitives together that should be
+ * separate.
  *
- * REQUIRES MESA_KK_DEBUG=gs. The geometryShader feature bit is opt-in precisely
- * because cases like #4 are not implemented; run-gs-smoke.sh sets it.
+ * REQUIRES MESA_KK_DEBUG=gs. The geometryShader feature bit is opt-in because
+ * transform feedback, multiple streams, geometry-after-tessellation and indirect
+ * draws are still refused; run-gs-smoke.sh sets it.
  */
 #include <vulkan/vulkan.h>
 
@@ -187,6 +192,12 @@ target_fini(struct target *t)
    vkFreeMemory(dev, t->readback_mem, NULL);
 }
 
+/* The cache make_pipeline() builds against. A file-scope variable rather than a
+ * parameter so that the cache case reads as a two-line change to one case
+ * instead of an extra argument on every call. VK_NULL_HANDLE everywhere except
+ * inside the pipeline-cache case. */
+static VkPipelineCache pipeline_cache = VK_NULL_HANDLE;
+
 /* Build a VS+GS+FS pipeline for dynamic rendering. Returns VK_SUCCESS or the
  * driver's error; the caller decides whether an error is a failure. */
 static VkResult
@@ -275,7 +286,7 @@ make_pipeline(VkShaderModule vs, VkShaderModule gs, VkShaderModule fs,
    };
    (void)view_layers;
 
-   return vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gpci, NULL,
+   return vkCreateGraphicsPipelines(dev, pipeline_cache, 1, &gpci, NULL,
                                     pipeline_out);
 }
 
@@ -397,6 +408,70 @@ point_centre(int i, int *cx, int *cy)
    *cy = H / 2;
 }
 
+/* Render gs-smoke-dyn.geom with `pipeline` and check every semantic the unroll
+ * could have broken. Shared by the plain build of that pipeline and the one
+ * rebuilt from a serialized pipeline cache, so that both are held to the same
+ * standard. */
+static void
+check_dyn_render(VkPipeline pipeline)
+{
+   struct target t;
+   target_init(&t, 1);
+   render(&t, pipeline, NPOINTS);
+
+   void *map;
+   CHECK(vkMapMemory(dev, t.readback_mem, 0, VK_WHOLE_SIZE, 0, &map));
+   const uint8_t *img = map;
+
+   printf("     coverage: %d px\n", coverage(img, 0));
+
+   /* Every point grows a quad spanning +-7.7 px. Odd points additionally grow a
+    * second quad below it, 7.7..23 px down; 15 px down is inside that extension
+    * and outside the first quad. */
+   int expanded = 0, tinted = 0, primided = 0;
+   int extended = 0, not_extended = 0;
+   for (int i = 0; i < NPOINTS; ++i) {
+      int cx, cy;
+      point_centre(i, &cx, &cy);
+      const uint8_t *p0 = px(img, 0, cx, cy);
+      if (p0[1] != 0)
+         expanded++;
+
+      uint8_t want = (uint8_t)((i + 1) * 255 / NPOINTS);
+      if (abs((int)p0[0] - (int)want) <= 2)
+         tinted++;
+      if (abs((int)p0[2] - (int)want) <= 2)
+         primided++;
+
+      /* The count really was per-primitive data: odd input primitives emitted 6
+       * vertices and even ones 4. Both directions are checked, because emitting
+       * a constant 6 (or a constant 4) for every primitive would otherwise look
+       * like a pass. */
+      bool ext = px(img, 0, cx, cy + 15)[1] != 0;
+      if ((i & 1) && ext)
+         extended++;
+      if (!(i & 1) && !ext)
+         not_extended++;
+   }
+   check(expanded == NPOINTS, "all %d points expanded to geometry (%d)", NPOINTS,
+         expanded);
+   check(tinted == NPOINTS, "per-input-vertex value survived VS->GS (%d/%d)",
+         tinted, NPOINTS);
+   check(primided == NPOINTS, "gl_PrimitiveIDIn survived the unroll (%d/%d)",
+         primided, NPOINTS);
+   check(extended == NPOINTS / 2, "odd primitives emitted the longer strip "
+                                  "(%d/%d)", extended, NPOINTS / 2);
+   check(not_extended == NPOINTS / 2, "even primitives did not (%d/%d)",
+         not_extended, NPOINTS / 2);
+
+   const uint8_t *corner = px(img, 0, 1, 1);
+   check(corner[0] == 0 && corner[1] == 0 && corner[2] == 0,
+         "background outside the quads is untouched");
+
+   vkUnmapMemory(dev, t.readback_mem);
+   target_fini(&t);
+}
+
 int
 main(void)
 {
@@ -489,6 +564,8 @@ main(void)
       module_from(gs_smoke_list_geom, sizeof(gs_smoke_list_geom));
    VkShaderModule gs_layer =
       module_from(gs_smoke_layer_geom, sizeof(gs_smoke_layer_geom));
+   VkShaderModule gs_multistrip =
+      module_from(gs_smoke_multistrip_geom, sizeof(gs_smoke_multistrip_geom));
    VkShaderModule gs_dyn =
       module_from(gs_smoke_dyn_geom, sizeof(gs_smoke_dyn_geom));
 
@@ -666,15 +743,130 @@ main(void)
       }
    }
 
-   /* ========================================= 4. dynamic topology: refuse === */
-   printf("\n4. data-dependent vertex count  (expect a REFUSAL, not a render)\n");
+   /* ================================== 4. two static strips (STATIC_INDEXED) === */
+   printf("\n4. two disjoint static strips  (expect POLY_GS_SHAPE_STATIC_INDEXED,"
+          " index buffer unrolled on the CPU)\n");
    {
-      VkPipeline p = VK_NULL_HANDLE;
-      VkResult r = make_pipeline(vs, gs_dyn, fs, 1, layout, &p);
-      check(r != VK_SUCCESS,
-            "pipeline refused, since Metal has no primitive restart (%d)", r);
-      if (r == VK_SUCCESS)
+      VkPipeline p;
+      VkResult r = make_pipeline(vs, gs_multistrip, fs, 1, layout, &p);
+      check(r == VK_SUCCESS, "pipeline created (%d)", r);
+      if (r == VK_SUCCESS) {
+         struct target t;
+         target_init(&t, 1);
+         render(&t, p, NPOINTS);
+
+         void *map;
+         CHECK(vkMapMemory(dev, t.readback_mem, 0, VK_WHOLE_SIZE, 0, &map));
+         const uint8_t *img = map;
+
+         printf("     coverage: %d px\n", coverage(img, 0));
+
+         /* h is 0.14 NDC = 4.5 px, so the upper quad spans 13..27 px above the
+          * centre row and the lower one 4..13 px below it. +-9 px is inside
+          * both, and the centre row is inside neither. */
+         int upper = 0, lower = 0, gap_clean = 0, tinted = 0, primided = 0;
+         for (int i = 0; i < NPOINTS; ++i) {
+            int cx, cy;
+            point_centre(i, &cx, &cy);
+            const uint8_t *up = px(img, 0, cx, cy - 9);
+            if (up[1] != 0)
+               upper++;
+            if (px(img, 0, cx, cy + 9)[1] != 0)
+               lower++;
+            /* THE discriminator: the band between the two quads. libpoly emits
+             * 0,1,2,3,-1,4,5,6,7 for this shader. A driver that dropped the
+             * restart index would draw one continuous strip 0..7 and the
+             * stitching triangles would fill this band. */
+            if (px(img, 0, cx, cy)[1] == 0)
+               gap_clean++;
+
+            uint8_t want = (uint8_t)((i + 1) * 255 / NPOINTS);
+            if (abs((int)up[0] - (int)want) <= 2)
+               tinted++;
+            if (abs((int)up[2] - (int)want) <= 2)
+               primided++;
+         }
+         check(upper == NPOINTS, "first strip drawn (%d/%d)", upper, NPOINTS);
+         check(lower == NPOINTS, "second strip drawn (%d/%d)", lower, NPOINTS);
+         check(gap_clean == NPOINTS,
+               "the two strips were not stitched together, so the restart index "
+               "was unrolled and not dropped (%d/%d)",
+               gap_clean, NPOINTS);
+         check(tinted == NPOINTS,
+               "per-input-vertex value survived VS->GS (%d/%d)", tinted,
+               NPOINTS);
+         check(primided == NPOINTS, "gl_PrimitiveIDIn correct (%d/%d)",
+               primided, NPOINTS);
+
+         vkUnmapMemory(dev, t.readback_mem);
+         target_fini(&t);
          vkDestroyPipeline(dev, p, NULL);
+      }
+   }
+
+   /* ================================ 5. dynamic topology (DYNAMIC_INDEXED) === */
+   printf("\n5. data-dependent vertex count  (expect POLY_GS_SHAPE_DYNAMIC_INDEXED,"
+          " index buffer unrolled on the GPU)\n");
+   {
+      VkPipeline p;
+      VkResult r = make_pipeline(vs, gs_dyn, fs, 1, layout, &p);
+      check(r == VK_SUCCESS, "pipeline created (%d)", r);
+      if (r == VK_SUCCESS) {
+         check_dyn_render(p);
+         vkDestroyPipeline(dev, p, NULL);
+      }
+   }
+
+   /* ====================================== 6. the same, from a cache blob === */
+   printf("\n6. the dynamic-topology pipeline rebuilt from serialized pipeline "
+          "cache data\n");
+   {
+      /* The geometry shader's MAIN compute program does not live in
+       * kk_shader::msl_data[], so it is not covered by the driver's stage loops
+       * and needs its own serialization. If that were missed, this case would be
+       * the only one to notice: everything else builds its pipeline from NIR in
+       * this process and never round-trips a blob. */
+      VkPipelineCacheCreateInfo cci = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+      };
+      VkPipelineCache first;
+      CHECK(vkCreatePipelineCache(dev, &cci, NULL, &first));
+
+      pipeline_cache = first;
+      VkPipeline p0;
+      VkResult r = make_pipeline(vs, gs_dyn, fs, 1, layout, &p0);
+      check(r == VK_SUCCESS, "populating pipeline created (%d)", r);
+
+      size_t size = 0;
+      void *blob = NULL;
+      if (r == VK_SUCCESS) {
+         CHECK(vkGetPipelineCacheData(dev, first, &size, NULL));
+         blob = malloc(size);
+         CHECK(vkGetPipelineCacheData(dev, first, &size, blob));
+         vkDestroyPipeline(dev, p0, NULL);
+      }
+      vkDestroyPipelineCache(dev, first, NULL);
+      pipeline_cache = VK_NULL_HANDLE;
+      check(size > 0, "cache serialized %zu bytes", size);
+
+      if (blob && size > 0) {
+         cci.initialDataSize = size;
+         cci.pInitialData = blob;
+         VkPipelineCache second;
+         CHECK(vkCreatePipelineCache(dev, &cci, NULL, &second));
+
+         pipeline_cache = second;
+         VkPipeline p1;
+         r = make_pipeline(vs, gs_dyn, fs, 1, layout, &p1);
+         pipeline_cache = VK_NULL_HANDLE;
+         check(r == VK_SUCCESS, "pipeline rebuilt from the blob (%d)", r);
+         if (r == VK_SUCCESS) {
+            check_dyn_render(p1);
+            vkDestroyPipeline(dev, p1, NULL);
+         }
+         vkDestroyPipelineCache(dev, second, NULL);
+      }
+      free(blob);
    }
 
    printf("\n%d/%d\n", passed, passed + failed);

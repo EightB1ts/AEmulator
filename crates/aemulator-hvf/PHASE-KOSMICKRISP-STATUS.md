@@ -233,10 +233,18 @@ table was written* — the first two rows have since changed and are annotated):
 | `VK_KHR_incremental_present` | Damage-region presents unavailable; our present is a full-surface blit, so no current cost. |
 | `VK_GOOGLE_display_timing` | **Worth watching.** Android sometimes uses it for frame pacing. Not observed to be requested in these runs, but this is the one loss with a plausible path to a user-visible symptom (jitter, not a failure). |
 
-**The ceiling that is hardware, not a porting gap.** `geometryShader = false` on KosmicKrisp — Apple
-GPUs have no geometry-shader stage. GLES 3.2 requires geometry + tessellation, so
-`androidboot.opengles.version=196609` (3.1) remains the honest ceiling, exactly as it was under
-MoltenVK. No driver work on our side will move that one at all.
+**PARTLY RETRACTED — "no geometry shaders" was called a hardware ceiling, and it is not one.** This
+section used to read: *"`geometryShader = false` on KosmicKrisp — Apple GPUs have no geometry-shader
+stage. GLES 3.2 requires geometry + tessellation, so `androidboot.opengles.version=196609` (3.1)
+remains the honest ceiling, exactly as it was under MoltenVK. No driver work on our side will move
+that one at all."* The hardware half is true and the conclusion was wrong: Metal has no geometry
+stage, but a geometry shader is emulable on the compute pipe, and patch 0009 does emulate it — every
+output topology renders, measured against real pixels (`run-gs-smoke.sh`, 37/37). The bit is still
+**not advertised** by default (`MESA_KK_DEBUG=gs` to turn it on) because transform feedback,
+multiple vertex streams, geometry-after-tessellation and indirect draws are refused rather than
+emulated, and GLES 3.2 through ANGLE would need transform feedback on day one. So
+`androidboot.opengles.version=196609` (3.1) is still where the guest sits — but as a *remaining work
+item*, not a hardware ceiling. See the geometry-shader entry under "known gaps" below.
 
 **RETRACTED — "no Vulkan ray tracing" was a ceiling, and it moved.** This section used to read:
 *"Likewise **no Vulkan ray tracing**: `ray_tracing` / `ray_query` / `acceleration_structure` grep
@@ -637,7 +645,7 @@ originally recorded and is kept for the delta:
 | `tessellationShader`, ASTC/ETC2, `shaderInt64`, `multiViewport` | ✅ | ✅ | ✅ |
 | `VK_KHR_acceleration_structure` / `ray_query` / `deferred_host_operations` | ❌ | ❌ | ❌ — implemented, then **withheld by the runtime gate** because this M2 cannot intersect an MTL4-built structure (`MESA_KK_FORCE_RAY_TRACING=1` to see them) |
 | `VK_KHR_ray_tracing_pipeline` | ❌ | ❌ | ❌ (negative control — deliberately not advertised) |
-| `geometryShader` | ❌ | ❌ | ❌ (structural to Apple GPUs — unchanged) |
+| `geometryShader` | ❌ | ❌ | ❌ — emulated and rendering on the host driver, but deliberately withheld behind `MESA_KK_DEBUG=gs` until transform feedback lands |
 
 The guest device ID is an independent driver fingerprint: `0x1B000208` → `0x00000064`. The guest's
 renderer string now names the driver outright:
@@ -822,6 +830,106 @@ now settle before touching ColorBuffer pixels.
 
 ---
 
+## Integration verification, 2026-07-29 — four changes landed together, and one of them broke ray tracing
+
+Four workstreams landed on this branch at once (discriminated-union codegen, GS primitive-restart
+unroll, the arm64 build of the original app, an ANGLE/GLES root-cause investigation). Each reported
+its own gates green. **Verifying them together found a regression none of them could have seen**, and
+that is the durable lesson of this section: *a green gate on your own change is not evidence about the
+tree.*
+
+### The regression: deepcopy dereferenced a non-live union arm
+
+**Symptom.** `vk-rt-probe` in the guest: `VK_RT_PROBE: FAIL at build-sizes (SIGSEGV)`, in
+`vkGetAccelerationStructureBuildSizesKHR`, on the very first call. Every host gate was green at the
+time — `run-rq-smoke.sh` 16/16, four `vk-rt-probe` host modes PASS — because the host decoder is not
+where the fault is.
+
+**Root cause.** `deepcopy_VkDeviceOrHostAddress{,Const}KHR` in the generated **guest** encoder did
+
+```c
+*to = *from;
+to->hostAddress = nullptr;
+if (from->hostAddress) to->hostAddress = (void*)alloc->dupArray(from->hostAddress, 1);
+```
+
+Two upstream generator behaviours compose into a crash here:
+
+1. `deepcopy` recurses into **every** member of a union, not the live one — it has no discriminant.
+2. For a union member that is a pointer it **dereferences** it.
+
+So for a `VkAccelerationStructureGeometryDataKHR` holding `triangles`, the generator also deep-copies
+the `aabbs` arm; `aabbs::data` overlaps `triangles::vertexFormat` + 4 bytes of padding, i.e. the
+small integer 106 (`VK_FORMAT_R32G32B32_SFLOAT`), and `dupArray` reads address `0x6a`. This had been
+patched out **by hand in the generated file**, and re-exporting `patches/mesa/0007` after the union
+work regenerated that file and silently dropped the hand-edit. A hand-edit inside generated code is a
+fix with a half-life.
+
+**Fix — in the generator, both copies, so it cannot be regenerated away.** `cereal/deepcopy.py` now
+skips union members with `pointerIndirectionLevels > 0` and emits a comment saying why:
+
+- guest: carried by `third_party/patches/mesa/0007-gfxstream-guest-codegen-ray-tracing.patch`
+- host: new `third_party/patches/gfxstream-codegen/0005-union-pointer-arms-are-not-dereferenced.patch`
+
+The generated delta is exactly two functions per side, and `regen-guest-encoder.sh --reproduce` — an
+exact-match gate — is byte-clean again, which it provably was **not** while the hand-edit existed.
+Nothing transmits a union's pointer arm (`count_`/`marshal_` send the live arm's value only, and
+`accelerationStructureHostCommands` is `VK_FALSE` here), so the flat assignment is sufficient.
+
+### What was verified, on two boots
+
+| Claim | How it was measured | Result |
+|---|---|---|
+| GS-off draw path unregressed (task #30) | launcher + SurfaceFlinger screencap vs the pre-GS-work known-good, clock rect masked | **0 differing pixels of 781,632, max ∆ = 0** — bit-identical, on both boots |
+| Ray tracing end to end | `vk-rt-probe` in the guest, four modes: default, `--fragment`, `--indexed`, `--primitives 53583 --indexed --fragment --flags 4` | **PASS ×4** (was SIGSEGV before the fix) |
+| Ray-traced shadows in a real app | `de.saschawillems.vulkanRayQuery`, shadow signature on the floor band | **5.06–5.66 % shadowed floor** vs the known-good **5.10 % / 5.33 %**; 86 fps |
+| Geometry shaders | `run-gs-smoke.sh` | **37/37** |
+| Sparse binding | `run-sparse-smoke.sh` | **32/35**, the same three unbind-reads-zero failures as before — not a regression |
+| Host ray query | `run-rq-smoke.sh` | **16/16** + 4 `vk-rt-probe` host modes |
+| The original app | `tech.incr.vulkanandroid` 1.0.17 arm64-v8a | **renders** (see below) |
+
+**On A/B-ing the ray-query app by pixels: don't.** Its light orbits. Two captures **four seconds
+apart in the same run** differ by **33.8 %** of pixels — indistinguishable from the 32.8 % against the
+stored reference. The stable, falsifiable quantity is the fraction of the floor band that is
+shadowed; `scratchpad/final/shadowstat.py` computes it, and an all-miss frame has a flat, unimodal
+floor.
+
+### The original app finally runs
+
+`tech.incr.vulkanandroid` ("Vulkan Android Test" 1.0.17) is what this whole line of work started
+from, and it had never been installable: the supplied XAPK shipped only `lib/armeabi-v7a`, which a
+64-bit-only guest refuses with `INSTALL_FAILED_NO_MATCHING_ABIS`. With the genuine arm64-v8a split
+installed (`primaryCpuAbi=arm64-v8a`, `versionName=1.0.17`), it loads
+`lib/arm64-v8a/libminimal-example.so` and **renders its yellow cog with the grinning-face texture**,
+animating (3.7 % of pixels change between consecutive frames = the gear turning), with **0 `Fatal
+signal` and 0 `Internal Vulkan error`**.
+
+### GLES: the guest is capped at OpenGL ES **2.0**, and the blocker is named
+
+`ro.opengles.version = 196609` advertises 3.1, but that property only feeds
+`ConfigurationInfo.reqGlEsVersion`. Measured on-device with `scratchpad/final/gles_probe`:
+
+- **45 EGLConfigs: 45 with `ES1_BIT`, 45 with `ES2_BIT`, 0 with `ES3_BIT`.**
+- `eglCreateContext(CLIENT_VERSION=3)` → **`EGL_BAD_MATCH`**. The cap is real, not a version string.
+- `GL_VERSION` = `OpenGL ES 2.0 (ANGLE 2.1 …)`, `GL_SL_VERSION` = `GLSL ES 1.00`.
+- ANGLE's own feature list (307 features, read by `dlopen`ing `libEGL_angle.so`, since the Android
+  libEGL wrapper does not forward `EGL_ANGLE_feature_control`): **`provokingVertex` disabled**.
+  Every other ES-3.0 gate in `Renderer::getMaxSupportedESVersion()` is already satisfied —
+  `standardSampleLocations`, `independentBlend`, uniform-block counts, vertex output components, and
+  transform feedback via `emulateTransformFeedback` (enabled).
+
+So the single remaining blocker to ES 3.0 is that KosmicKrisp does not advertise
+`VK_EXT_provoking_vertex`. The transport for it is already open (cereal codegen, no strip-list entry,
+guest ICD allow-list); only the host driver has to implement last-vertex provoking on Metal. **3DMark
+was not re-run** — its verdicts are a function of the ES/Vulkan capability set, and that set did not
+move this pass.
+
+This also corrects a claim elsewhere in this document. The `geometryShader` notes say *"so
+`androidboot.opengles.version` stays at GLES 3.1"* as though 3.1 were what apps get. It is not: apps
+get **2.0**, and geometry shaders are not what is standing in the way of 3.0.
+
+---
+
 ## Known, still open
 
 - **The Studio live view costs a readback per guest frame** — but it is **not** blank. An earlier
@@ -893,27 +1001,44 @@ now settle before touching ColorBuffer pixels.
   shader becomes a compute kernel writing its outputs to a buffer, and libpoly
   (`third_party/mesa/src/poly/nir/poly_nir_lower_gs.c`, shared with Honeykrisp and already linked
   into this driver for tessellation) rewrites the geometry shader into a **vertex** shader that
-  re-runs the geometry body once per output vertex. `run-gs-smoke.sh` is **16/16** on this M2: both
-  static output shapes render with the correct per-input-vertex data and the correct
+  re-runs the geometry body once per output vertex. `run-gs-smoke.sh` is **37/37** on this M2: all
+  four output shapes render with the correct per-input-vertex data and the correct
   `gl_PrimitiveIDIn`, per-primitive `gl_Layer` routes to the right array layer of a 2-layer image,
-  and a plain VS+FS control draw still works. What is measured is a **subset**, and the feature bit
-  is behind `MESA_KK_DEBUG=gs` for exactly that reason:
-  - **Metal has no primitive restart.** libpoly's general path emits an index buffer of strips
-    separated by a restart index, which Metal cannot consume. Only the two shapes libpoly
-    pattern-matches into restart-free draws (`POLY_GS_SHAPE_STATIC_PER_PRIM`, i.e. output indices
-    `0..n-1` drawn with hardware instancing over input primitives, and
-    `POLY_GS_SHAPE_STATIC_PER_INSTANCE`, i.e. a declared strip rewritten to a primitive **list**) are
-    implemented. A data-dependent output vertex count, or any static topology that matches neither
-    pattern, is **refused at pipeline creation** with a named `mesa_loge`. Closing this is the single
-    highest-value next step and the pieces already exist: dispatch
-    `pipeline.gfx.gs[KK_GS_VARIANT_MAIN]` over a (primitives, instances) grid to fill the index
-    buffer, then push it through the existing `libkk_unroll_geometry` kernel — which is already the
-    driver's answer to "Metal has no primitive restart" for `TRIANGLE_FAN` and `uint8` indices.
-  - **Transform feedback and GS pipeline-statistics queries are refused**, not emulated. They are the
-    only consumers of libpoly's COUNT and PRE programs, which is why neither is compiled today; with
-    both gone the geometry MAIN program is *provably* empty for a static shape (libpoly strips every
-    store and atomic out of MAIN and only emits index writes for the dynamic shape), so a
-    static-topology geometry shader costs exactly one extra compute dispatch — the vertex prepass.
+  a dynamic-topology pipeline survives a round trip through serialized pipeline-cache data, and a
+  plain VS+FS control draw still works. What is measured is a **subset**, and the feature bit is
+  behind `MESA_KK_DEBUG=gs` for exactly that reason:
+  - **Metal has no primitive restart, and both shapes that need it are now unrolled instead of
+    refused.** libpoly's general path emits an index buffer of strips separated by a restart index,
+    which Metal cannot consume. Two of the four shapes never needed it — `POLY_GS_SHAPE_STATIC_PER_
+    PRIM` (output indices `0..n-1` drawn with hardware instancing over input primitives) and
+    `POLY_GS_SHAPE_STATIC_PER_INSTANCE` (a declared strip that pattern-matched a primitive **list**).
+    The other two are rewritten into independent primitives before anything draws them:
+    - `POLY_GS_SHAPE_STATIC_INDEXED` — the index buffer is a compile-time constant, so
+      `kk_gs_unroll_static_topology()` expands it on the **CPU** and the draw uploads the result
+      (≤ 192 indices, ≤ 768 B) per draw call. No extra dispatch.
+    - `POLY_GS_SHAPE_DYNAMIC_INDEXED` — the indices only exist at draw time, so `kk_launch_gs()`
+      dispatches libpoly's MAIN geometry program (`pipeline.gfx.gs[KK_GS_VARIANT_MAIN]`) over a
+      (primitives, instances) grid to write them, then `libkk_unroll_geometry` — the same kernel
+      that answers "Metal has no primitive restart" for `TRIANGLE_FAN` and `uint8` indices — to
+      unroll them and to write the indexed indirect draw descriptor.
+
+    **The cost is real.** The unrolled buffer is up to `verts_per_prim` times the restart-separated
+    one (3× for the triangle strips almost every geometry shader emits), it comes out of the 128 MiB
+    device heap that is only reclaimed when the command buffer completes, and the dynamic path
+    serialises two extra compute dispatches ahead of the draw (three total with the vertex prepass).
+    A geometry shader emitting 1 M indices' worth of strips therefore burns ~12 MiB of heap on the
+    unrolled copy plus ~4 MiB of command-pool memory for MAIN's output — and a big enough draw will
+    hit libpoly's `FATAL: GPU heap overflow` abort rather than degrade.
+  - **Transform feedback, multiple vertex streams and GS pipeline-statistics queries are refused**,
+    not emulated. They are the only consumers of libpoly's COUNT and PRE programs, which is why
+    neither is compiled. MAIN *is* compiled now, but only for the dynamic shape: for the other three
+    libpoly strips every store and atomic out of it and emits no index writes, so it is provably
+    empty and a static-topology geometry shader still costs exactly one extra compute dispatch — the
+    vertex prepass.
+  - **MAIN's MSL is serialized into the pipeline cache** (`kk_gs_data_serialize`, a presence byte per
+    variant) because it lives outside `kk_shader::msl_data[]` and the driver's stage loops do not
+    reach it. Deleting that serialization makes `run-gs-smoke.sh` case 6 crash on the rebuilt
+    pipeline — measured, as the control for the check.
   - **A geometry shader after tessellation is refused.** It needs the tessellation evaluation shader
     lowered to compute (`poly_nir_lower_tes(.., to_hw_vs=false)`) rather than to a hardware vertex
     shader, plus a fourth pre-render compute slot.
@@ -936,7 +1061,25 @@ now settle before touching ColorBuffer pixels.
   - **Not tried at all:** the dEQP/CTS geometry-shader groups, any guest workload, and adjacency input
     topologies (libpoly's software input assembly handles them, and nothing has exercised them here).
     So `androidboot.opengles.version` stays at GLES 3.1 (196609): GLES 3.2 needs geometry shaders
-    *plus* the refused cases, and ANGLE would find them immediately.
+    *plus* transform feedback, and ANGLE would find that immediately.
+- **An app on this guest gets OpenGL ES 2.0, and the one blocker is `VK_EXT_provoking_vertex`.**
+  Measured, not inferred: 0 of 45 EGLConfigs carry `EGL_OPENGL_ES3_BIT` and
+  `eglCreateContext(CLIENT_VERSION=3)` returns `EGL_BAD_MATCH`. ANGLE's
+  `Renderer::getMaxSupportedESVersion()` limits to 2.0 when `provokingVertex` is disabled, and that
+  is the only one of its ES-3.0 gates this driver fails. Fixing it means emulating last-vertex
+  provoking on Metal (Metal is first-vertex only), which for `TRIANGLE_STRIP`/`FAN` means rotating
+  indices in the same index-rewrite path `kk_unroll_geometry` already owns — and note that
+  `kk_nir_lower_poly` currently **hardcodes** provoking vertex to FIRST, so that lowering has to
+  learn dynamic state at the same time. Nothing above the driver needs changing.
+- **`geometryShader` is emulated and unadvertised; that is not what caps GLES.** Corrected here
+  because the geometry-shader notes above imply otherwise. GLES 3.2 would need geometry shaders plus
+  transform feedback, but the guest is not at 3.1 to begin with — see the previous bullet.
+- **There is no automated guard that a generated file has not been hand-edited on the GUEST side
+  beyond `regen-guest-encoder.sh --reproduce`, and nothing runs it in `ci/check.sh`.** The
+  ray-tracing regression this pass shipped precisely because a hand-edit lived in a generated file
+  and `--reproduce` was never run against it. It is green now and the fix is in the generator, but
+  `--reproduce` (both scripts) belongs in the merge gate; it is not there yet because it needs the
+  mesa/gfxstream checkouts, which the hosted CI runner does not have.
 - **`VK_GOOGLE_display_timing` is gone** and Android sometimes uses it for frame pacing. Not
   observed to be requested; the plausible symptom is jitter, not failure. Worth watching, not worth
   pre-emptively working around.
@@ -1018,8 +1161,10 @@ bash crates/aemulator-hvf/kosmickrisp/run-rq-smoke.sh --matrix   # both pure-Met
 # 5c. geometryShader on the HOST driver — a stage Metal does not have, emulated with a compute
 #     prepass + libpoly. Renders and reads back real pixels; check 0 is the no-GS control.
 bash crates/aemulator-hvf/kosmickrisp/run-gs-smoke.sh
-#   expect: "16/16". Read check 0 first — it is a plain VS+FS draw, and if it fails the geometry
-#   work broke every ordinary draw in the driver. Check 4 must be a REFUSAL, not a render.
+#   expect: "37/37". Read check 0 first — it is a plain VS+FS draw, and if it fails the geometry
+#   work broke every ordinary draw in the driver. Checks 4 and 5 are the shapes whose index buffer
+#   needs primitive restart, which Metal does not have; each has one check that fails specifically
+#   if the restart was dropped rather than unrolled.
 
 # 6. Android on KosmicKrisp, windowed, in-Vulkan present:
 rm -f crates/aemulator-hvf/testdata/cf64/img/userdata.img

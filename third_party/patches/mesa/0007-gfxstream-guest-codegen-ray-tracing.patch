@@ -1,5 +1,4 @@
 diff --git a/src/gfxstream/codegen/scripts/cereal/common/codegen.py b/src/gfxstream/codegen/scripts/cereal/common/codegen.py
-index 294490e..6ea4e4c 100644
 --- a/src/gfxstream/codegen/scripts/cereal/common/codegen.py
 +++ b/src/gfxstream/codegen/scripts/cereal/common/codegen.py
 @@ -634,6 +634,41 @@ class CodeGen(object):
@@ -45,7 +44,6 @@ index 294490e..6ea4e4c 100644
                    customParameters=None, checkForDeviceLost=False,
                    checkDispatcher=None):
 diff --git a/src/gfxstream/codegen/scripts/cereal/common/vulkantypes.py b/src/gfxstream/codegen/scripts/cereal/common/vulkantypes.py
-index e582e82..f64c36e 100644
 --- a/src/gfxstream/codegen/scripts/cereal/common/vulkantypes.py
 +++ b/src/gfxstream/codegen/scripts/cereal/common/vulkantypes.py
 @@ -286,6 +286,64 @@ STRUCT_MEMBER_IGNORE_OPTIONAL = {
@@ -124,7 +122,24 @@ index e582e82..f64c36e 100644
          self.isOptional: bool = False
          self.optionalStr: Optional[str] = None  # Value of the `optional` attribute in the spec
  
-@@ -368,6 +430,67 @@ class VulkanType(object):
+@@ -328,6 +390,16 @@ class VulkanType(object):
+         # variables to sub-structures
+         self.binds = {}
+ 
++        # Discriminated unions (vk.xml `selector` / `selection`).
++        #
++        # `selector` is set on a STRUCT MEMBER whose type is a union: it names the sibling member
++        # that says which arm is live (VkAccelerationStructureGeometryKHR::geometry has
++        # selector="geometryType").
++        # `selections` is set on a UNION MEMBER: the enum constants for which that arm is the live
++        # one. A union member with no `selection` is not selectable and is never streamed.
++        self.selector = None
++        self.selections = None
++
+         # Device memory annotations
+ 
+         # self.deviceMemoryAttrib/Val stores
+@@ -368,6 +440,67 @@ class VulkanType(object):
      def isArrayOfStrings(self):
          return self.isPointerToConstPointer and (self.typeName == "char")
  
@@ -192,7 +207,7 @@ index e582e82..f64c36e 100644
      def primEncodingSize(self):
          return self.primitiveEncodingSize
  
-@@ -676,6 +799,11 @@ def makeVulkanTypeFromXMLTag(typeInfo, parentName: str, tag: Element) -> VulkanT
+@@ -676,6 +809,11 @@ def makeVulkanTypeFromXMLTag(typeInfo, parentName: str, tag: Element) -> VulkanT
      if tag.attrib.get("len") is not None:
          lengths = tag.attrib.get("len").split(",")
          res.lenExpr = lengths[0]
@@ -204,7 +219,139 @@ index e582e82..f64c36e 100644
  
      # Calculate static array expression
  
-@@ -1128,13 +1256,36 @@ def hasNullOptionalStringFeature(forEachType):
+@@ -753,6 +891,13 @@ def makeVulkanTypeFromXMLTag(typeInfo, parentName: str, tag: Element) -> VulkanT
+         bindPairsSplit = map(lambda p: p.split(":"), bindPairs)
+         res.binds = dict(map(lambda sp: (sp[0].strip(), sp[1].strip()), bindPairsSplit))
+ 
++    # Annotations: discriminated unions. See VulkanType.selector / .selections.
++    if tag.attrib.get("selector") is not None:
++        res.selector = tag.attrib.get("selector").strip()
++
++    if tag.attrib.get("selection") is not None:
++        res.selections = [s.strip() for s in tag.attrib.get("selection").split(",") if s.strip()]
++
+     # Annotations: Filters
+     structMemberName = f"{parentName}.{res.paramName}"
+     if structMemberName in STRUCT_MEMBER_FILTER_VAR.keys():
+@@ -935,8 +1080,72 @@ class VulkanTypeInfo(object):
+         # Maps enum to their xml element
+         self.enumElem = {}
+ 
++        # unionName -> (selectorMemberName, selectorTypeName). Built once, lazily, from the merged
++        # registry tree; see initUnionSelectors().
++        self.unionSelectors = None
++
+         self.feature = None
+ 
++    # AEMULATOR: discriminated unions.
++    #
++    # A union is NOT self-describing: which arm is live is stated by a sibling member of the
++    # ENCLOSING struct, which vk.xml marks with `selector` (and each arm with `selection`). Without
++    # this, every emitter fell back to `members[0]` and streamed the union as its FIRST arm whatever
++    # it actually held. Because only field bytes are transmitted (never padding), most arms happened
++    # to round-trip; VkAccelerationStructureGeometryAabbsDataKHR did not — its `data` sits at offset
++    # 16..23 while the triangles layout has `vertexFormat` (4 bytes) there followed by 4 bytes of
++    # padding, so the HIGH DWORD of an AABB VkDeviceOrHostAddressConstKHR was silently dropped.
++    #
++    # The discriminant cannot be recovered inside the union's own serializer, so it is passed IN, by
++    # reusing the generator's existing "environment" machinery: the union gets a free parameter
++    # (env entry with binding=None) and the enclosing struct's member gets a `binds` entry that
++    # makes every call site forward the sibling's value. marshaling / reservedmarshaling / counting
++    # all already implement free params and binds, so nothing else has to learn about this.
++    #
++    # The map has to be built up front rather than while walking types: reg.py emits the union
++    # BEFORE the struct that selects on it, so by the time the selector is visible the union's
++    # serializer has already been written out.
++    def initUnionSelectors(self):
++        self.unionSelectors = {}
++
++        registry = getattr(self.generator, "registry", None)
++        tree = getattr(registry, "tree", None) if registry is not None else None
++        if tree is None:
++            return
++
++        for typeElem in tree.getroot().findall("types/type"):
++            if typeElem.get("category") != "struct":
++                continue
++
++            memberTypes = {}
++            selectingMembers = []
++            for m in typeElem.findall("member"):
++                nameElem = m.find("name")
++                typeElemInner = m.find("type")
++                if nameElem is None or typeElemInner is None:
++                    continue
++                memberTypes[nameElem.text] = typeElemInner.text
++                if m.get("selector") is not None:
++                    selectingMembers.append((typeElemInner.text, m.get("selector").strip()))
++
++            for (unionTypeName, selectorName) in selectingMembers:
++                selectorTypeName = memberTypes.get(selectorName)
++                if selectorTypeName is None:
++                    continue
++                previous = self.unionSelectors.get(unionTypeName)
++                if previous is not None and previous != (selectorName, selectorTypeName):
++                    # Two enclosing structs disagree on how to discriminate this union. Nothing in
++                    # the registry does that today; if it ever does, fall back to the old
++                    # single-arm behaviour rather than guessing.
++                    self.unionSelectors[unionTypeName] = None
++                    continue
++                self.unionSelectors[unionTypeName] = (selectorName, selectorTypeName)
++
++    def getUnionSelector(self, typeName):
++        if self.unionSelectors is None:
++            self.initUnionSelectors()
++        return self.unionSelectors.get(typeName)
++
+     def initType(self, name: str, category: str):
+         self.categories.add(category)
+         self.typeCategories[name] = category
+@@ -1050,6 +1259,19 @@ class VulkanTypeInfo(object):
+                         "body" : parseLetBodyExpr(body)
+                     }
+ 
++            # AEMULATOR: a discriminated union takes its selector as a free parameter, so that its
++            # serializers can switch on it. See initUnionSelectors().
++            isUnion = self.categoryOf(typeName) == "union"
++            unionSelector = self.getUnionSelector(typeName) if isUnion else None
++            if unionSelector is not None:
++                (selectorName, selectorTypeName) = unionSelector
++                initialEnv[selectorName] = {
++                    "type": selectorTypeName,
++                    "binding": None,
++                    "structmember": False,
++                    "body": None,
++                }
++
+             for member in typeinfo.elem.findall(".//member"):
+                 if "api" in member.attrib and "vulkan" not in member.attrib["api"].split(','):
+                     continue
+@@ -1060,6 +1282,15 @@ class VulkanTypeInfo(object):
+                     "structmember": True,
+                     "body": None,
+                 }
++                # AEMULATOR: forward the discriminant at every call site. `binds` is the generator's
++                # pre-existing mechanism for passing an enclosing struct's member down into a
++                # sub-structure's serializer; nothing in either registry uses the XML `binds`
++                # attribute, so this is the only producer.
++                memberSelector = self.getUnionSelector(vulkanType.typeName)
++                if vulkanType.selector is not None and memberSelector is not None \
++                        and memberSelector[0] == vulkanType.selector:
++                    vulkanType.binds = dict(vulkanType.binds)
++                    vulkanType.binds[vulkanType.selector] = vulkanType.selector
+                 members.append(vulkanType)
+                 if vulkanType.typeName == "VkStructureType" and \
+                    member.get("values"):
+@@ -1069,7 +1300,7 @@ class VulkanTypeInfo(object):
+                 VulkanCompoundType(
+                     typeName,
+                     members,
+-                    isUnion = self.categoryOf(typeName) == "union",
++                    isUnion = isUnion,
+                     structEnumExpr = structEnumExpr,
+                     structExtendsExpr = structExtendsExpr,
+                     feature = self.feature,
+@@ -1128,13 +1359,36 @@ def hasNullOptionalStringFeature(forEachType):
  # General function to iterate over a vulkan type and call code that processes
  # each of its sub-components, if any.
  def iterateVulkanType(typeInfo: VulkanTypeInfo, vulkanType: VulkanType, forEachType):
@@ -245,7 +392,48 @@ index e582e82..f64c36e 100644
      forEachType.registerTypeInfo(typeInfo)
  
      needCheck = vulkanType.isOptionalPointer()
-@@ -1196,6 +1347,32 @@ class VulkanTypeIterator(object):
+@@ -1189,6 +1443,40 @@ def iterateVulkanType(typeInfo: VulkanTypeInfo, vulkanType: VulkanType, forEachT
+ 
+     return True
+ 
++# AEMULATOR: emit the body of a union serializer.
++#
++# With a discriminant, one arm is streamed, chosen by a switch on the selector the enclosing struct
++# forwarded. Without one (VkDeviceOrHostAddress{,Const}KHR, whose live arm is stated by the API
++# contract and not by any sibling field), the historical behaviour is kept: stream members[0].
++#
++# Shared by marshaling.py / reservedmarshaling.py / counting.py so the three cannot drift on which
++# bytes a union occupies — counting sizes the buffer that reservedmarshal then writes into, so a
++# disagreement there is a heap overflow, not a mismatch.
++def iterateVulkanUnion(typeInfo: VulkanTypeInfo, cgen, structInfo, forEachType):
++    selector = typeInfo.getUnionSelector(structInfo.name)
++    arms = [m for m in structInfo.members if m.selections] if selector is not None else []
++
++    if not arms:
++        iterateVulkanType(typeInfo, structInfo.members[0], forEachType)
++        return
++
++    cgen.beginSwitch(selector[0])
++    for member in arms:
++        for value in member.selections:
++            cgen.line("case %s:" % value)
++        cgen.beginBlock()
++        iterateVulkanType(typeInfo, member, forEachType)
++        cgen.stmt("break")
++        cgen.endBlock()
++    # Not every enumerant selects an arm (VkDescriptorType has far more values than
++    # VkDescriptorDataEXT has members), and a guest may send anything. Streaming nothing is the only
++    # safe answer, and it is symmetric: the reader takes the same arm the writer did.
++    cgen.line("default:")
++    cgen.beginBlock()
++    cgen.stmt("break")
++    cgen.endBlock()
++    cgen.endSwitch()
++
+ class VulkanTypeIterator(object):
+     def __init__(self,):
+         self.typeInfo = None
+@@ -1196,6 +1484,32 @@ class VulkanTypeIterator(object):
      def registerTypeInfo(self, typeInfo):
          self.typeInfo = typeInfo
  
@@ -278,7 +466,7 @@ index e582e82..f64c36e 100644
  def vulkanTypeGetStructFieldLengthInfo(structInfo, vulkanType):
      def getSpecialCaseVulkanStructFieldLength(structInfo, vulkanType):
          cases = [
-@@ -1243,6 +1420,7 @@ class VulkanTypeProtobufInfo(object):
+@@ -1243,6 +1557,7 @@ class VulkanTypeProtobufInfo(object):
          self.isString = vulkanType.isString() or (
              vulkanType.typeName == "char" and (vulkanType.staticArrExpr != ""))
  
@@ -287,9 +475,17 @@ index e582e82..f64c36e 100644
              self.lengthInfo = vulkanTypeGetStructFieldLengthInfo(
                  structInfo, vulkanType)
 diff --git a/src/gfxstream/codegen/scripts/cereal/counting.py b/src/gfxstream/codegen/scripts/cereal/counting.py
-index ef31347..94205fa 100644
 --- a/src/gfxstream/codegen/scripts/cereal/counting.py
 +++ b/src/gfxstream/codegen/scripts/cereal/counting.py
+@@ -5,7 +5,7 @@ from copy import copy
+ 
+ from .common.codegen import CodeGen
+ from .common.vulkantypes import \
+-        VulkanAPI, makeVulkanTypeSimple, iterateVulkanType, VulkanTypeIterator, Atom, FuncExpr, FuncExprVal, FuncLambda
++        VulkanAPI, makeVulkanTypeSimple, iterateVulkanType, iterateVulkanUnion, VulkanTypeIterator, Atom, FuncExpr, FuncExprVal, FuncLambda
+ 
+ from .wrapperdefs import VulkanWrapperGenerator
+ from .wrapperdefs import ROOT_TYPE_VAR_NAME, ROOT_TYPE_PARAM
 @@ -379,6 +379,54 @@ class VulkanCountingCodegen(VulkanTypeIterator):
              if lenAccessGuard is not None:
                  self.cgen.endIf()
@@ -345,8 +541,34 @@ index ef31347..94205fa 100644
      def onStaticArr(self, vulkanType):
          access = self.exprValueAccessor(vulkanType)
          lenAccess = self.lenAccessor(vulkanType)
+@@ -583,7 +631,7 @@ class VulkanCounting(VulkanWrapperGenerator):
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.countingCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.countingCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.countingCodegen)
+ 
+             def structCountingDefNoFilter(cgen):
+                 self.countingCodegen.cgen = cgen
+@@ -602,7 +650,7 @@ class VulkanCounting(VulkanWrapperGenerator):
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.countingCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.countingCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.countingCodegen)
+ 
+                 self.countingCodegen.doFiltering = True
+ 
+@@ -611,7 +659,7 @@ class VulkanCounting(VulkanWrapperGenerator):
+             self.module.appendImpl(
+                 self.codegen.makeFuncImpl(countingPrototype, structCountingDef))
+ 
+-            if freeParams != []:
++            if freeParams != [] and category != "union":
+                 self.module.appendHeader(
+                     self.cgenHeader.makeFuncDecl(countingPrototypeNoFilter))
+                 self.module.appendImpl(
 diff --git a/src/gfxstream/codegen/scripts/cereal/deepcopy.py b/src/gfxstream/codegen/scripts/cereal/deepcopy.py
-index 81583aa..7471bd3 100644
 --- a/src/gfxstream/codegen/scripts/cereal/deepcopy.py
 +++ b/src/gfxstream/codegen/scripts/cereal/deepcopy.py
 @@ -172,6 +172,77 @@ class DeepcopyCodegen(VulkanTypeIterator):
@@ -427,8 +649,59 @@ index 81583aa..7471bd3 100644
      def onStaticArr(self, vulkanType):
          accessLhs = self.exprAccessorValueLhs(vulkanType)
          accessRhs = self.exprAccessorValueRhs(vulkanType)
+@@ -327,6 +398,8 @@ class VulkanDeepcopy(VulkanWrapperGenerator):
+                           self.voidType,
+                           deepcopyParams)
+ 
++            isUnion = category == "union"
++
+             def structDeepcopyDef(cgen):
+                 self.deepcopyCodegen.cgen = cgen
+                 canSimplyAssign = True
+@@ -340,7 +413,42 @@ class VulkanDeepcopy(VulkanWrapperGenerator):
+                 if canSimplyAssign:
+                     pass
+                 else:
++                    emittedUnionPointerNote = False
+                     for member in structInfo.members:
++                        # AEMULATOR: a UNION's arms OVERLAP, so every arm but the live one reads
++                        # bytes that belong to a different arm. Deepcopy is the only emitter that
++                        # DEREFERENCES what it reads, and it has no discriminant (the selector is
++                        # plumbed into counting/marshaling as a free parameter, but deepcopy's
++                        # signature is fixed by every call site in VkEncoder). Following a pointer
++                        # out of a non-live arm therefore dereferences whatever the live arm
++                        # happens to have at that offset.
++                        #
++                        # Measured, not theorised: for VkAccelerationStructureGeometryDataKHR
++                        # holding `triangles`, the `aabbs` arm's VkDeviceOrHostAddressConstKHR
++                        # `data` lands on triangles::vertexFormat + padding, i.e. the small integer
++                        # 106 (VK_FORMAT_R32G32B32_SFLOAT), and the generated
++                        # deepcopy_VkDeviceOrHostAddressConstKHR did
++                        # `alloc->dupArray(from->hostAddress, 1)` on it. That is a SIGSEGV in the
++                        # guest ICD inside vkGetAccelerationStructureBuildSizesKHR, reproduced by
++                        # vk-rt-probe and by a real ray-query app at the same instruction.
++                        #
++                        # The bytes themselves are already copied by `*to = *from` above, and no
++                        # emitter transmits a union's pointer arm (count_/marshal_ send the live
++                        # arm's value only, and VK_ACCELERATION_STRUCTURE_BUILD_TYPE_HOST_KHR is not
++                        # supported here — accelerationStructureHostCommands is VK_FALSE), so
++                        # skipping the dereference is both necessary and sufficient.
++                        if isUnion and member.pointerIndirectionLevels > 0:
++                            if not emittedUnionPointerNote:
++                                cgen.line(
++                                    "// A union arm that is a pointer is NOT dereferenced: "
++                                    "without the")
++                                cgen.line(
++                                    "// discriminant, a non-live arm reads another arm's bytes. "
++                                    "The value is")
++                                cgen.line(
++                                    "// already carried by the assignment above.")
++                                emittedUnionPointerNote = True
++                            continue
+                         iterateVulkanType(self.typeInfo, member,
+                                           self.deepcopyCodegen)
+ 
 diff --git a/src/gfxstream/codegen/scripts/cereal/handlemap.py b/src/gfxstream/codegen/scripts/cereal/handlemap.py
-index a188804..9fcacc4 100644
 --- a/src/gfxstream/codegen/scripts/cereal/handlemap.py
 +++ b/src/gfxstream/codegen/scripts/cereal/handlemap.py
 @@ -101,6 +101,11 @@ class HandleMapCodegen(VulkanTypeIterator):
@@ -444,9 +717,17 @@ index a188804..9fcacc4 100644
          if not self.isHandleFunc(vulkanType):
              return
 diff --git a/src/gfxstream/codegen/scripts/cereal/marshaling.py b/src/gfxstream/codegen/scripts/cereal/marshaling.py
-index 9972f4c..46374c7 100644
 --- a/src/gfxstream/codegen/scripts/cereal/marshaling.py
 +++ b/src/gfxstream/codegen/scripts/cereal/marshaling.py
+@@ -6,7 +6,7 @@ import hashlib, sys
+ 
+ from .common.codegen import CodeGen, VulkanAPIWrapper
+ from .common.vulkantypes import \
+-        VulkanAPI, makeVulkanTypeSimple, iterateVulkanType, VulkanTypeIterator, Atom, FuncExpr, FuncExprVal, FuncLambda
++        VulkanAPI, makeVulkanTypeSimple, iterateVulkanType, iterateVulkanUnion, VulkanTypeIterator, Atom, FuncExpr, FuncExprVal, FuncLambda
+ 
+ from .wrapperdefs import VulkanWrapperGenerator
+ from .wrapperdefs import VULKAN_STREAM_VAR_NAME
 @@ -465,6 +465,77 @@ class VulkanMarshalingCodegen(VulkanTypeIterator):
  
              self.cgen.stmt("%s->loadStringArrayInPlace(%s&%s)" % (self.streamVarName, castExpr, access))
@@ -525,10 +806,72 @@ index 9972f4c..46374c7 100644
      def onStaticArr(self, vulkanType):
          access = self.exprValueAccessor(vulkanType)
          lenAccess = self.lenAccessor(vulkanType)
+@@ -743,7 +814,7 @@ class VulkanMarshaling(VulkanWrapperGenerator):
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.writeCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.writeCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.writeCodegen)
+ 
+             def structMarshalingDefNoFilter(cgen):
+                 self.writeCodegen.cgen = cgen
+@@ -759,7 +830,7 @@ class VulkanMarshaling(VulkanWrapperGenerator):
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.writeCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.writeCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.writeCodegen)
+                 self.writeCodegen.doFiltering = True
+ 
+             self.module.appendHeader(
+@@ -774,7 +845,7 @@ class VulkanMarshaling(VulkanWrapperGenerator):
+                     self.cgenImpl.makeFuncImpl(
+                         marshalPrototype, structMarshalingDef))
+ 
+-            if freeParams != []:
++            if freeParams != [] and category != "union":
+                 self.module.appendHeader(
+                     self.cgenHeader.makeFuncDecl(marshalPrototypeNoFilter))
+                 self.module.appendImpl(
+@@ -819,7 +890,7 @@ class VulkanMarshaling(VulkanWrapperGenerator):
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.readCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.readCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.readCodegen)
+ 
+             def structUnmarshalingDefNoFilter(cgen):
+                 self.readCodegen.cgen = cgen
+@@ -834,7 +905,7 @@ class VulkanMarshaling(VulkanWrapperGenerator):
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.readCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.readCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.readCodegen)
+                 self.readCodegen.doFiltering = True
+ 
+             self.module.appendHeader(
+@@ -849,7 +920,7 @@ class VulkanMarshaling(VulkanWrapperGenerator):
+                     self.cgenImpl.makeFuncImpl(
+                         unmarshalPrototype, structUnmarshalingDef))
+ 
+-            if freeParams != []:
++            if freeParams != [] and category != "union":
+                 self.module.appendHeader(
+                     self.cgenHeader.makeFuncDecl(unmarshalPrototypeNoFilter))
+                 self.module.appendImpl(
 diff --git a/src/gfxstream/codegen/scripts/cereal/reservedmarshaling.py b/src/gfxstream/codegen/scripts/cereal/reservedmarshaling.py
-index 5ed1008..33dbf59 100644
 --- a/src/gfxstream/codegen/scripts/cereal/reservedmarshaling.py
 +++ b/src/gfxstream/codegen/scripts/cereal/reservedmarshaling.py
+@@ -4,7 +4,7 @@ from copy import copy
+ 
+ from .common.codegen import CodeGen, VulkanAPIWrapper
+ from .common.vulkantypes import \
+-        VulkanAPI, makeVulkanTypeSimple, iterateVulkanType, VulkanTypeIterator, Atom, FuncExpr, FuncExprVal, FuncLambda
++        VulkanAPI, makeVulkanTypeSimple, iterateVulkanType, iterateVulkanUnion, VulkanTypeIterator, Atom, FuncExpr, FuncExprVal, FuncLambda
+ 
+ from .wrapperdefs import VulkanWrapperGenerator
+ from .wrapperdefs import VULKAN_STREAM_VAR_NAME
 @@ -574,6 +574,101 @@ class VulkanReservedMarshalingCodegen(VulkanTypeIterator):
  
              self.cgen.stmt("%s->loadStringArrayInPlaceWithStreamPtr(%s&%s, %s)" % (self.streamVarName, castExpr, access, self.ptrVar))
@@ -631,8 +974,61 @@ index 5ed1008..33dbf59 100644
      def onStaticArr(self, vulkanType):
          access = self.exprValueAccessor(vulkanType)
          lenAccess = self.lenAccessor(vulkanType)
+@@ -852,7 +947,7 @@ class VulkanReservedMarshaling(VulkanWrapperGenerator):
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.writeCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.writeCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.writeCodegen)
+ 
+             def structMarshalingDefNoFilter(cgen):
+                 self.writeCodegen.cgen = cgen
+@@ -869,7 +964,7 @@ class VulkanReservedMarshaling(VulkanWrapperGenerator):
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.writeCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.writeCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.writeCodegen)
+                 self.writeCodegen.doFiltering = True
+ 
+             if self.variant != "host":
+@@ -885,7 +980,7 @@ class VulkanReservedMarshaling(VulkanWrapperGenerator):
+                         self.cgenImpl.makeFuncImpl(
+                             marshalPrototype, structMarshalingDef))
+ 
+-                if freeParams != []:
++                if freeParams != [] and category != "union":
+                     self.module.appendHeader(
+                         self.cgenHeader.makeFuncDecl(marshalPrototypeNoFilter))
+                     self.module.appendImpl(
+@@ -926,7 +1021,7 @@ class VulkanReservedMarshaling(VulkanWrapperGenerator):
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.readCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.readCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.readCodegen)
+ 
+             def structUnmarshalingDefNoFilter(cgen):
+                 self.readCodegen.cgen = cgen
+@@ -939,7 +1034,7 @@ class VulkanReservedMarshaling(VulkanWrapperGenerator):
+                     for member in structInfo.members:
+                         iterateVulkanType(self.typeInfo, member, self.readCodegen)
+                 if category == "union":
+-                    iterateVulkanType(self.typeInfo, structInfo.members[0], self.readCodegen)
++                    iterateVulkanUnion(self.typeInfo, cgen, structInfo, self.readCodegen)
+                 self.readCodegen.doFiltering = True
+ 
+             if self.variant != "guest":
+@@ -955,7 +1050,7 @@ class VulkanReservedMarshaling(VulkanWrapperGenerator):
+                         self.cgenImpl.makeFuncImpl(
+                             unmarshalPrototype, structUnmarshalingDef))
+ 
+-                if freeParams != []:
++                if freeParams != [] and category != "union":
+                     self.module.appendHeader(
+                         self.cgenHeader.makeFuncDecl(unmarshalPrototypeNoFilter))
+                     self.module.appendImpl(
 diff --git a/src/gfxstream/codegen/scripts/cereal/testing.py b/src/gfxstream/codegen/scripts/cereal/testing.py
-index 68925aa..0585fd0 100644
 --- a/src/gfxstream/codegen/scripts/cereal/testing.py
 +++ b/src/gfxstream/codegen/scripts/cereal/testing.py
 @@ -186,6 +186,11 @@ class VulkanEqualityCodegen(VulkanTypeIterator):
@@ -648,7 +1044,6 @@ index 68925aa..0585fd0 100644
          accessLhs = self.exprAccessorLhs(vulkanType)
          accessRhs = self.exprAccessorRhs(vulkanType)
 diff --git a/src/gfxstream/codegen/scripts/cereal/transform.py b/src/gfxstream/codegen/scripts/cereal/transform.py
-index 0dc4e58..3092e9a 100644
 --- a/src/gfxstream/codegen/scripts/cereal/transform.py
 +++ b/src/gfxstream/codegen/scripts/cereal/transform.py
 @@ -180,6 +180,44 @@ class TransformCodegen(VulkanTypeIterator):
@@ -697,7 +1092,6 @@ index 0dc4e58..3092e9a 100644
          pass
  
 diff --git a/src/gfxstream/codegen/scripts/cerealgenerator.py b/src/gfxstream/codegen/scripts/cerealgenerator.py
-index e037f56..fa8646e 100644
 --- a/src/gfxstream/codegen/scripts/cerealgenerator.py
 +++ b/src/gfxstream/codegen/scripts/cerealgenerator.py
 @@ -136,6 +136,24 @@ SUPPORTED_FEATURES = [
@@ -726,7 +1120,6 @@ index e037f56..fa8646e 100644
      "VK_KHR_pipeline_library",
      "VK_MVK_macos_surface",
 diff --git a/src/gfxstream/guest/vulkan_enc/autogenerated/VkEncoder.cpp b/src/gfxstream/guest/vulkan_enc/autogenerated/VkEncoder.cpp
-index 72424fe..1321c35 100644
 --- a/src/gfxstream/guest/vulkan_enc/autogenerated/VkEncoder.cpp
 +++ b/src/gfxstream/guest/vulkan_enc/autogenerated/VkEncoder.cpp
 @@ -20755,10 +20755,11 @@ uint64_t VkEncoder::vkGetDeviceMemoryOpaqueCaptureAddressKHR(
@@ -10478,7 +10871,6 @@ index 72424fe..1321c35 100644
      if (0 == encodeCount % POOL_CLEAR_INTERVAL) {
          pool->freeAll();
 diff --git a/src/gfxstream/guest/vulkan_enc/autogenerated/VkEncoder.h b/src/gfxstream/guest/vulkan_enc/autogenerated/VkEncoder.h
-index ebc06a4..9df6946 100644
 --- a/src/gfxstream/guest/vulkan_enc/autogenerated/VkEncoder.h
 +++ b/src/gfxstream/guest/vulkan_enc/autogenerated/VkEncoder.h
 @@ -824,6 +824,20 @@ class VkEncoder {
@@ -10570,7 +10962,6 @@ index ebc06a4..9df6946 100644
     private:
      class Impl;
 diff --git a/src/gfxstream/guest/vulkan_enc/autogenerated/func_table.cpp b/src/gfxstream/guest/vulkan_enc/autogenerated/func_table.cpp
-index e9e987e..1be327b 100644
 --- a/src/gfxstream/guest/vulkan_enc/autogenerated/func_table.cpp
 +++ b/src/gfxstream/guest/vulkan_enc/autogenerated/func_table.cpp
 @@ -3715,6 +3715,67 @@ uint64_t gfxstream_vk_GetDeviceMemoryOpaqueCaptureAddressKHR(
@@ -10870,10 +11261,55 @@ index e9e987e..1be327b 100644
 +}
 +#endif
 diff --git a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_counting_guest.cpp b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_counting_guest.cpp
-index 00dd3e9..8b2c475 100644
 --- a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_counting_guest.cpp
 +++ b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_counting_guest.cpp
-@@ -8436,6 +8436,436 @@ void count_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
+@@ -6981,12 +6981,33 @@ void count_VkPipelineExecutableInfoKHR(uint32_t featureBits, VkStructureType roo
+ 
+ void count_VkPipelineExecutableStatisticValueKHR(
+     uint32_t featureBits, VkStructureType rootType,
+-    const VkPipelineExecutableStatisticValueKHR* toCount, size_t* count) {
++    const VkPipelineExecutableStatisticValueKHR* toCount, size_t* count,
++    const VkPipelineExecutableStatisticFormatKHR format) {
+     (void)featureBits;
+     (void)rootType;
+     (void)toCount;
+     (void)count;
+-    *count += sizeof(VkBool32);
++    switch (format) {
++        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR: {
++            *count += sizeof(VkBool32);
++            break;
++        }
++        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR: {
++            *count += sizeof(int64_t);
++            break;
++        }
++        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR: {
++            *count += sizeof(uint64_t);
++            break;
++        }
++        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR: {
++            *count += sizeof(double);
++            break;
++        }
++        default: {
++            break;
++        }
++    }
+ }
+ 
+ void count_VkPipelineExecutableStatisticKHR(uint32_t featureBits, VkStructureType rootType,
+@@ -7005,7 +7026,8 @@ void count_VkPipelineExecutableStatisticKHR(uint32_t featureBits, VkStructureTyp
+     *count += VK_MAX_DESCRIPTION_SIZE * sizeof(char);
+     *count += sizeof(VkPipelineExecutableStatisticFormatKHR);
+     count_VkPipelineExecutableStatisticValueKHR(
+-        featureBits, rootType, (VkPipelineExecutableStatisticValueKHR*)(&toCount->value), count);
++        featureBits, rootType, (VkPipelineExecutableStatisticValueKHR*)(&toCount->value), count,
++        toCount->format);
+ }
+ 
+ void count_VkPipelineExecutableInternalRepresentationKHR(
+@@ -8436,6 +8458,457 @@ void count_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
      *count += sizeof(VkBool32);
  }
  
@@ -10994,14 +11430,35 @@ index 00dd3e9..8b2c475 100644
 +
 +void count_VkAccelerationStructureGeometryDataKHR(
 +    uint32_t featureBits, VkStructureType rootType,
-+    const VkAccelerationStructureGeometryDataKHR* toCount, size_t* count) {
++    const VkAccelerationStructureGeometryDataKHR* toCount, size_t* count,
++    const VkGeometryTypeKHR geometryType) {
 +    (void)featureBits;
 +    (void)rootType;
 +    (void)toCount;
 +    (void)count;
-+    count_VkAccelerationStructureGeometryTrianglesDataKHR(
-+        featureBits, rootType,
-+        (VkAccelerationStructureGeometryTrianglesDataKHR*)(&toCount->triangles), count);
++    switch (geometryType) {
++        case VK_GEOMETRY_TYPE_TRIANGLES_KHR: {
++            count_VkAccelerationStructureGeometryTrianglesDataKHR(
++                featureBits, rootType,
++                (VkAccelerationStructureGeometryTrianglesDataKHR*)(&toCount->triangles), count);
++            break;
++        }
++        case VK_GEOMETRY_TYPE_AABBS_KHR: {
++            count_VkAccelerationStructureGeometryAabbsDataKHR(
++                featureBits, rootType,
++                (VkAccelerationStructureGeometryAabbsDataKHR*)(&toCount->aabbs), count);
++            break;
++        }
++        case VK_GEOMETRY_TYPE_INSTANCES_KHR: {
++            count_VkAccelerationStructureGeometryInstancesDataKHR(
++                featureBits, rootType,
++                (VkAccelerationStructureGeometryInstancesDataKHR*)(&toCount->instances), count);
++            break;
++        }
++        default: {
++            break;
++        }
++    }
 +}
 +
 +void count_VkAccelerationStructureGeometryKHR(uint32_t featureBits, VkStructureType rootType,
@@ -11018,8 +11475,8 @@ index 00dd3e9..8b2c475 100644
 +    count_extension_struct(featureBits, rootType, toCount->pNext, count);
 +    *count += sizeof(VkGeometryTypeKHR);
 +    count_VkAccelerationStructureGeometryDataKHR(
-+        featureBits, rootType, (VkAccelerationStructureGeometryDataKHR*)(&toCount->geometry),
-+        count);
++        featureBits, rootType, (VkAccelerationStructureGeometryDataKHR*)(&toCount->geometry), count,
++        toCount->geometryType);
 +    *count += sizeof(VkGeometryFlagsKHR);
 +}
 +
@@ -11310,7 +11767,7 @@ index 00dd3e9..8b2c475 100644
  #endif
  void count_extension_struct(uint32_t featureBits, VkStructureType rootType,
                              const void* structExtension, size_t* count) {
-@@ -10132,6 +10562,41 @@ void count_extension_struct(uint32_t featureBits, VkStructureType rootType,
+@@ -10132,6 +10605,41 @@ void count_extension_struct(uint32_t featureBits, VkStructureType rootType,
                  count);
              break;
          }
@@ -11353,10 +11810,19 @@ index 00dd3e9..8b2c475 100644
          default: {
              // fatal; the switch is only taken if the extension struct is known
 diff --git a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_counting_guest.h b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_counting_guest.h
-index b9a181d..e289f16 100644
 --- a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_counting_guest.h
 +++ b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_counting_guest.h
-@@ -2174,6 +2174,99 @@ void count_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
+@@ -1542,7 +1542,8 @@ void count_VkPipelineExecutableInfoKHR(uint32_t featureBits, VkStructureType roo
+ 
+ void count_VkPipelineExecutableStatisticValueKHR(
+     uint32_t featureBits, VkStructureType rootType,
+-    const VkPipelineExecutableStatisticValueKHR* toCount, size_t* count);
++    const VkPipelineExecutableStatisticValueKHR* toCount, size_t* count,
++    const VkPipelineExecutableStatisticFormatKHR format);
+ 
+ void count_VkPipelineExecutableStatisticKHR(uint32_t featureBits, VkStructureType rootType,
+                                             const VkPipelineExecutableStatisticKHR* toCount,
+@@ -2174,6 +2175,100 @@ void count_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
  DEFINE_ALIAS_FUNCTION(count_VkPhysicalDevicePipelineProtectedAccessFeatures,
                        count_VkPhysicalDevicePipelineProtectedAccessFeaturesEXT)
  
@@ -11393,7 +11859,8 @@ index b9a181d..e289f16 100644
 +
 +void count_VkAccelerationStructureGeometryDataKHR(
 +    uint32_t featureBits, VkStructureType rootType,
-+    const VkAccelerationStructureGeometryDataKHR* toCount, size_t* count);
++    const VkAccelerationStructureGeometryDataKHR* toCount, size_t* count,
++    const VkGeometryTypeKHR geometryType);
 +
 +void count_VkAccelerationStructureGeometryKHR(uint32_t featureBits, VkStructureType rootType,
 +                                              const VkAccelerationStructureGeometryKHR* toCount,
@@ -11457,10 +11924,9 @@ index b9a181d..e289f16 100644
  }  // namespace vk
  }  // namespace gfxstream
 diff --git a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_deepcopy_guest.cpp b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_deepcopy_guest.cpp
-index 8b65a1b..24e7bad 100644
 --- a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_deepcopy_guest.cpp
 +++ b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_deepcopy_guest.cpp
-@@ -9996,6 +9996,520 @@ void deepcopy_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
+@@ -9996,6 +9996,512 @@ void deepcopy_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
      }
  }
  
@@ -11471,14 +11937,10 @@ index 8b65a1b..24e7bad 100644
 +                                       VkDeviceOrHostAddressKHR* to) {
 +    (void)alloc;
 +    (void)rootType;
-+    /* AEMULATOR RT FIX: this is a UNION of { VkDeviceAddress deviceAddress;
-+     * const void* hostAddress; }. For VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR
-+     * the app supplies a *device* address, which aliases hostAddress and is NOT a valid
-+     * CPU pointer -- dereferencing it faults. Reproduced as a SIGSEGV in the guest ICD by
-+     * both vk_rt_probe and a real ray-query app, at the same instruction. count_ and
-+     * reservedmarshal_ only ever transmit the 8-byte deviceAddress, so no host-side
-+     * payload is expected and a plain copy is both sufficient and correct. */
 +    *to = *from;
++    // A union arm that is a pointer is NOT dereferenced: without the
++    // discriminant, a non-live arm reads another arm's bytes. The value is
++    // already carried by the assignment above.
 +}
 +
 +void deepcopy_VkDeviceOrHostAddressConstKHR(Allocator* alloc, VkStructureType rootType,
@@ -11486,14 +11948,10 @@ index 8b65a1b..24e7bad 100644
 +                                            VkDeviceOrHostAddressConstKHR* to) {
 +    (void)alloc;
 +    (void)rootType;
-+    /* AEMULATOR RT FIX: this is a UNION of { VkDeviceAddress deviceAddress;
-+     * const void* hostAddress; }. For VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR
-+     * the app supplies a *device* address, which aliases hostAddress and is NOT a valid
-+     * CPU pointer -- dereferencing it faults. Reproduced as a SIGSEGV in the guest ICD by
-+     * both vk_rt_probe and a real ray-query app, at the same instruction. count_ and
-+     * reservedmarshal_ only ever transmit the 8-byte deviceAddress, so no host-side
-+     * payload is expected and a plain copy is both sufficient and correct. */
 +    *to = *from;
++    // A union arm that is a pointer is NOT dereferenced: without the
++    // discriminant, a non-live arm reads another arm's bytes. The value is
++    // already carried by the assignment above.
 +}
 +
 +void deepcopy_VkAccelerationStructureBuildRangeInfoKHR(
@@ -11981,7 +12439,7 @@ index 8b65a1b..24e7bad 100644
  #endif
  void deepcopy_extension_struct(Allocator* alloc, VkStructureType rootType,
                                 const void* structExtension, void* structExtension_out) {
-@@ -11806,6 +12320,44 @@ void deepcopy_extension_struct(Allocator* alloc, VkStructureType rootType,
+@@ -11806,6 +12312,44 @@ void deepcopy_extension_struct(Allocator* alloc, VkStructureType rootType,
                      structExtension_out));
              break;
          }
@@ -12027,7 +12485,6 @@ index 8b65a1b..24e7bad 100644
          default: {
              return;
 diff --git a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_deepcopy_guest.h b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_deepcopy_guest.h
-index 5c06971..5b02783 100644
 --- a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_deepcopy_guest.h
 +++ b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_deepcopy_guest.h
 @@ -2377,6 +2377,112 @@ void deepcopy_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
@@ -12144,7 +12601,6 @@ index 5c06971..5b02783 100644
  }  // namespace vk
  }  // namespace gfxstream
 diff --git a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_extension_structs_guest.cpp b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_extension_structs_guest.cpp
-index 7ab8f8b..b719b19 100644
 --- a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_extension_structs_guest.cpp
 +++ b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_extension_structs_guest.cpp
 @@ -813,6 +813,22 @@ size_t goldfish_vk_extension_struct_size(VkStructureType rootType, const void* s
@@ -12194,13 +12650,391 @@ index 7ab8f8b..b719b19 100644
          default: {
              return (size_t)0;
 diff --git a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_marshaling_guest.cpp b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_marshaling_guest.cpp
-index 2e371e7..57fbd04 100644
 --- a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_marshaling_guest.cpp
 +++ b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_marshaling_guest.cpp
-@@ -15658,6 +15658,826 @@ void unmarshal_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
-     vkStream->read((VkBool32*)&forUnmarshaling->imageCompressionControlSwapchain, sizeof(VkBool32));
+@@ -13086,16 +13086,58 @@ void unmarshal_VkPipelineExecutableInfoKHR(VulkanStreamGuest* vkStream, VkStruct
+ 
+ void marshal_VkPipelineExecutableStatisticValueKHR(
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    const VkPipelineExecutableStatisticValueKHR* forMarshaling) {
++    const VkPipelineExecutableStatisticValueKHR* forMarshaling,
++    const VkPipelineExecutableStatisticFormatKHR format) {
+     (void)rootType;
+-    vkStream->write((VkBool32*)&forMarshaling->b32, sizeof(VkBool32));
++    switch (format) {
++        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR: {
++            vkStream->write((VkBool32*)&forMarshaling->b32, sizeof(VkBool32));
++            break;
++        }
++        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR: {
++            vkStream->write((int64_t*)&forMarshaling->i64, sizeof(int64_t));
++            break;
++        }
++        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR: {
++            vkStream->write((uint64_t*)&forMarshaling->u64, sizeof(uint64_t));
++            break;
++        }
++        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR: {
++            vkStream->write((double*)&forMarshaling->f64, sizeof(double));
++            break;
++        }
++        default: {
++            break;
++        }
++    }
  }
  
+ void unmarshal_VkPipelineExecutableStatisticValueKHR(
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    VkPipelineExecutableStatisticValueKHR* forUnmarshaling) {
++    VkPipelineExecutableStatisticValueKHR* forUnmarshaling,
++    const VkPipelineExecutableStatisticFormatKHR format) {
+     (void)rootType;
+-    vkStream->read((VkBool32*)&forUnmarshaling->b32, sizeof(VkBool32));
++    switch (format) {
++        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR: {
++            vkStream->read((VkBool32*)&forUnmarshaling->b32, sizeof(VkBool32));
++            break;
++        }
++        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR: {
++            vkStream->read((int64_t*)&forUnmarshaling->i64, sizeof(int64_t));
++            break;
++        }
++        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR: {
++            vkStream->read((uint64_t*)&forUnmarshaling->u64, sizeof(uint64_t));
++            break;
++        }
++        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR: {
++            vkStream->read((double*)&forUnmarshaling->f64, sizeof(double));
++            break;
++        }
++        default: {
++            break;
++        }
++    }
+ }
+ 
+ void marshal_VkPipelineExecutableStatisticKHR(
+@@ -13112,7 +13154,8 @@ void marshal_VkPipelineExecutableStatisticKHR(
+     vkStream->write((VkPipelineExecutableStatisticFormatKHR*)&forMarshaling->format,
+                     sizeof(VkPipelineExecutableStatisticFormatKHR));
+     marshal_VkPipelineExecutableStatisticValueKHR(
+-        vkStream, rootType, (VkPipelineExecutableStatisticValueKHR*)(&forMarshaling->value));
++        vkStream, rootType, (VkPipelineExecutableStatisticValueKHR*)(&forMarshaling->value),
++        forMarshaling->format);
+ }
+ 
+ void unmarshal_VkPipelineExecutableStatisticKHR(VulkanStreamGuest* vkStream,
+@@ -13129,7 +13172,8 @@ void unmarshal_VkPipelineExecutableStatisticKHR(VulkanStreamGuest* vkStream,
+     vkStream->read((VkPipelineExecutableStatisticFormatKHR*)&forUnmarshaling->format,
+                    sizeof(VkPipelineExecutableStatisticFormatKHR));
+     unmarshal_VkPipelineExecutableStatisticValueKHR(
+-        vkStream, rootType, (VkPipelineExecutableStatisticValueKHR*)(&forUnmarshaling->value));
++        vkStream, rootType, (VkPipelineExecutableStatisticValueKHR*)(&forUnmarshaling->value),
++        forUnmarshaling->format);
+ }
+ 
+ void marshal_VkPipelineExecutableInternalRepresentationKHR(
+@@ -15364,298 +15408,1161 @@ void unmarshal_VkImportColorBufferGOOGLE(VulkanStreamGuest* vkStream, VkStructur
+     vkStream->read((uint32_t*)&forUnmarshaling->colorBuffer, sizeof(uint32_t));
+ }
+ 
+-void marshal_VkImportBufferGOOGLE(VulkanStreamGuest* vkStream, VkStructureType rootType,
+-                                  const VkImportBufferGOOGLE* forMarshaling) {
++void marshal_VkImportBufferGOOGLE(VulkanStreamGuest* vkStream, VkStructureType rootType,
++                                  const VkImportBufferGOOGLE* forMarshaling) {
++    (void)rootType;
++    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forMarshaling->sType;
++    }
++    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
++    vkStream->write((uint32_t*)&forMarshaling->buffer, sizeof(uint32_t));
++}
++
++void unmarshal_VkImportBufferGOOGLE(VulkanStreamGuest* vkStream, VkStructureType rootType,
++                                    VkImportBufferGOOGLE* forUnmarshaling) {
++    (void)rootType;
++    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
++    forUnmarshaling->sType = VK_STRUCTURE_TYPE_IMPORT_BUFFER_GOOGLE;
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
++    vkStream->read((uint32_t*)&forUnmarshaling->buffer, sizeof(uint32_t));
++}
++
++void marshal_VkCreateBlobGOOGLE(VulkanStreamGuest* vkStream, VkStructureType rootType,
++                                const VkCreateBlobGOOGLE* forMarshaling) {
++    (void)rootType;
++    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forMarshaling->sType;
++    }
++    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
++    vkStream->write((uint32_t*)&forMarshaling->blobMem, sizeof(uint32_t));
++    vkStream->write((uint32_t*)&forMarshaling->blobFlags, sizeof(uint32_t));
++    vkStream->write((uint64_t*)&forMarshaling->blobId, sizeof(uint64_t));
++}
++
++void unmarshal_VkCreateBlobGOOGLE(VulkanStreamGuest* vkStream, VkStructureType rootType,
++                                  VkCreateBlobGOOGLE* forUnmarshaling) {
++    (void)rootType;
++    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
++    forUnmarshaling->sType = VK_STRUCTURE_TYPE_CREATE_BLOB_GOOGLE;
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
++    vkStream->read((uint32_t*)&forUnmarshaling->blobMem, sizeof(uint32_t));
++    vkStream->read((uint32_t*)&forUnmarshaling->blobFlags, sizeof(uint32_t));
++    vkStream->read((uint64_t*)&forUnmarshaling->blobId, sizeof(uint64_t));
++}
++
++void marshal_VkDebugMetadataGuestProcessNameGOOGLE(
++    VulkanStreamGuest* vkStream, VkStructureType rootType,
++    const VkDebugMetadataGuestProcessNameGOOGLE* forMarshaling) {
++    (void)rootType;
++    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forMarshaling->sType;
++    }
++    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
++    if (vkStream->getFeatureBits() & VULKAN_STREAM_FEATURE_NULL_OPTIONAL_STRINGS_BIT) {
++        // WARNING PTR CHECK
++        uint64_t cgen_var_0 = (uint64_t)(uintptr_t)forMarshaling->pName;
++        vkStream->putBe64(cgen_var_0);
++        if (forMarshaling->pName) {
++            vkStream->putString(forMarshaling->pName);
++        }
++    } else {
++        vkStream->putString(forMarshaling->pName);
++    }
++}
++
++void unmarshal_VkDebugMetadataGuestProcessNameGOOGLE(
++    VulkanStreamGuest* vkStream, VkStructureType rootType,
++    VkDebugMetadataGuestProcessNameGOOGLE* forUnmarshaling) {
++    (void)rootType;
++    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
++    if (vkStream->getFeatureBits() & VULKAN_STREAM_FEATURE_NULL_OPTIONAL_STRINGS_BIT) {
++        // WARNING PTR CHECK
++        const char* check_pName;
++        (void)check_pName;
++        check_pName = (const char*)(uintptr_t)vkStream->getBe64();
++        if (forUnmarshaling->pName) {
++            if (!(check_pName)) {
++                fprintf(stderr,
++                        "fatal: forUnmarshaling->pName inconsistent between guest and host\n");
++            }
++            vkStream->loadStringInPlace((char**)&forUnmarshaling->pName);
++        }
++    } else {
++        vkStream->loadStringInPlace((char**)&forUnmarshaling->pName);
++    }
++}
++
++void marshal_VkDebugMetadataGuestProcessIdGOOGLE(
++    VulkanStreamGuest* vkStream, VkStructureType rootType,
++    const VkDebugMetadataGuestProcessIdGOOGLE* forMarshaling) {
++    (void)rootType;
++    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forMarshaling->sType;
++    }
++    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
++    vkStream->write((uint64_t*)&forMarshaling->id, sizeof(uint64_t));
++}
++
++void unmarshal_VkDebugMetadataGuestProcessIdGOOGLE(
++    VulkanStreamGuest* vkStream, VkStructureType rootType,
++    VkDebugMetadataGuestProcessIdGOOGLE* forUnmarshaling) {
++    (void)rootType;
++    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
++    vkStream->read((uint64_t*)&forUnmarshaling->id, sizeof(uint64_t));
++}
++
++void marshal_VkDebugMetadataGuestThreadNameGOOGLE(
++    VulkanStreamGuest* vkStream, VkStructureType rootType,
++    const VkDebugMetadataGuestThreadNameGOOGLE* forMarshaling) {
++    (void)rootType;
++    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forMarshaling->sType;
++    }
++    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
++    if (vkStream->getFeatureBits() & VULKAN_STREAM_FEATURE_NULL_OPTIONAL_STRINGS_BIT) {
++        // WARNING PTR CHECK
++        uint64_t cgen_var_0 = (uint64_t)(uintptr_t)forMarshaling->pName;
++        vkStream->putBe64(cgen_var_0);
++        if (forMarshaling->pName) {
++            vkStream->putString(forMarshaling->pName);
++        }
++    } else {
++        vkStream->putString(forMarshaling->pName);
++    }
++}
++
++void unmarshal_VkDebugMetadataGuestThreadNameGOOGLE(
++    VulkanStreamGuest* vkStream, VkStructureType rootType,
++    VkDebugMetadataGuestThreadNameGOOGLE* forUnmarshaling) {
++    (void)rootType;
++    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
++    if (vkStream->getFeatureBits() & VULKAN_STREAM_FEATURE_NULL_OPTIONAL_STRINGS_BIT) {
++        // WARNING PTR CHECK
++        const char* check_pName;
++        (void)check_pName;
++        check_pName = (const char*)(uintptr_t)vkStream->getBe64();
++        if (forUnmarshaling->pName) {
++            if (!(check_pName)) {
++                fprintf(stderr,
++                        "fatal: forUnmarshaling->pName inconsistent between guest and host\n");
++            }
++            vkStream->loadStringInPlace((char**)&forUnmarshaling->pName);
++        }
++    } else {
++        vkStream->loadStringInPlace((char**)&forUnmarshaling->pName);
++    }
++}
++
++void marshal_VkDebugMetadataGuestThreadIdGOOGLE(
++    VulkanStreamGuest* vkStream, VkStructureType rootType,
++    const VkDebugMetadataGuestThreadIdGOOGLE* forMarshaling) {
++    (void)rootType;
++    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forMarshaling->sType;
++    }
++    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
++    vkStream->write((uint64_t*)&forMarshaling->id, sizeof(uint64_t));
++}
++
++void unmarshal_VkDebugMetadataGuestThreadIdGOOGLE(
++    VulkanStreamGuest* vkStream, VkStructureType rootType,
++    VkDebugMetadataGuestThreadIdGOOGLE* forUnmarshaling) {
++    (void)rootType;
++    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
++    vkStream->read((uint64_t*)&forUnmarshaling->id, sizeof(uint64_t));
++}
++
++void marshal_VkDebugMetadataGOOGLE(VulkanStreamGuest* vkStream, VkStructureType rootType,
++                                   const VkDebugMetadataGOOGLE* forMarshaling) {
++    (void)rootType;
++    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forMarshaling->sType;
++    }
++    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
++}
++
++void unmarshal_VkDebugMetadataGOOGLE(VulkanStreamGuest* vkStream, VkStructureType rootType,
++                                     VkDebugMetadataGOOGLE* forUnmarshaling) {
++    (void)rootType;
++    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
++}
++
++#endif
++#ifdef VK_EXT_border_color_swizzle
++void marshal_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
++    VulkanStreamGuest* vkStream, VkStructureType rootType,
++    const VkPhysicalDeviceBorderColorSwizzleFeaturesEXT* forMarshaling) {
++    (void)rootType;
++    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forMarshaling->sType;
++    }
++    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
++    vkStream->write((VkBool32*)&forMarshaling->borderColorSwizzle, sizeof(VkBool32));
++    vkStream->write((VkBool32*)&forMarshaling->borderColorSwizzleFromImage, sizeof(VkBool32));
++}
++
++void unmarshal_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
++    VulkanStreamGuest* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceBorderColorSwizzleFeaturesEXT* forUnmarshaling) {
++    (void)rootType;
++    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
++    vkStream->read((VkBool32*)&forUnmarshaling->borderColorSwizzle, sizeof(VkBool32));
++    vkStream->read((VkBool32*)&forUnmarshaling->borderColorSwizzleFromImage, sizeof(VkBool32));
++}
++
++void marshal_VkSamplerBorderColorComponentMappingCreateInfoEXT(
++    VulkanStreamGuest* vkStream, VkStructureType rootType,
++    const VkSamplerBorderColorComponentMappingCreateInfoEXT* forMarshaling) {
++    (void)rootType;
++    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forMarshaling->sType;
++    }
++    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
++    marshal_VkComponentMapping(vkStream, rootType,
++                               (VkComponentMapping*)(&forMarshaling->components));
++    vkStream->write((VkBool32*)&forMarshaling->srgb, sizeof(VkBool32));
++}
++
++void unmarshal_VkSamplerBorderColorComponentMappingCreateInfoEXT(
++    VulkanStreamGuest* vkStream, VkStructureType rootType,
++    VkSamplerBorderColorComponentMappingCreateInfoEXT* forUnmarshaling) {
++    (void)rootType;
++    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
++    unmarshal_VkComponentMapping(vkStream, rootType,
++                                 (VkComponentMapping*)(&forUnmarshaling->components));
++    vkStream->read((VkBool32*)&forUnmarshaling->srgb, sizeof(VkBool32));
++}
++
++#endif
++#ifdef VK_EXT_image_compression_control_swapchain
++void marshal_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
++    VulkanStreamGuest* vkStream, VkStructureType rootType,
++    const VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT* forMarshaling) {
++    (void)rootType;
++    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forMarshaling->sType;
++    }
++    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
++    vkStream->write((VkBool32*)&forMarshaling->imageCompressionControlSwapchain, sizeof(VkBool32));
++}
++
++void unmarshal_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
++    VulkanStreamGuest* vkStream, VkStructureType rootType,
++    VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT* forUnmarshaling) {
++    (void)rootType;
++    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
++    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
++        rootType = forUnmarshaling->sType;
++    }
++    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
++    vkStream->read((VkBool32*)&forUnmarshaling->imageCompressionControlSwapchain, sizeof(VkBool32));
++}
++
 +#endif
 +#ifdef VK_KHR_acceleration_structure
 +void marshal_VkDeviceOrHostAddressKHR(VulkanStreamGuest* vkStream, VkStructureType rootType,
@@ -12381,20 +13215,61 @@ index 2e371e7..57fbd04 100644
 +
 +void marshal_VkAccelerationStructureGeometryDataKHR(
 +    VulkanStreamGuest* vkStream, VkStructureType rootType,
-+    const VkAccelerationStructureGeometryDataKHR* forMarshaling) {
++    const VkAccelerationStructureGeometryDataKHR* forMarshaling,
++    const VkGeometryTypeKHR geometryType) {
 +    (void)rootType;
-+    marshal_VkAccelerationStructureGeometryTrianglesDataKHR(
-+        vkStream, rootType,
-+        (VkAccelerationStructureGeometryTrianglesDataKHR*)(&forMarshaling->triangles));
++    switch (geometryType) {
++        case VK_GEOMETRY_TYPE_TRIANGLES_KHR: {
++            marshal_VkAccelerationStructureGeometryTrianglesDataKHR(
++                vkStream, rootType,
++                (VkAccelerationStructureGeometryTrianglesDataKHR*)(&forMarshaling->triangles));
++            break;
++        }
++        case VK_GEOMETRY_TYPE_AABBS_KHR: {
++            marshal_VkAccelerationStructureGeometryAabbsDataKHR(
++                vkStream, rootType,
++                (VkAccelerationStructureGeometryAabbsDataKHR*)(&forMarshaling->aabbs));
++            break;
++        }
++        case VK_GEOMETRY_TYPE_INSTANCES_KHR: {
++            marshal_VkAccelerationStructureGeometryInstancesDataKHR(
++                vkStream, rootType,
++                (VkAccelerationStructureGeometryInstancesDataKHR*)(&forMarshaling->instances));
++            break;
++        }
++        default: {
++            break;
++        }
++    }
 +}
 +
 +void unmarshal_VkAccelerationStructureGeometryDataKHR(
 +    VulkanStreamGuest* vkStream, VkStructureType rootType,
-+    VkAccelerationStructureGeometryDataKHR* forUnmarshaling) {
++    VkAccelerationStructureGeometryDataKHR* forUnmarshaling, const VkGeometryTypeKHR geometryType) {
 +    (void)rootType;
-+    unmarshal_VkAccelerationStructureGeometryTrianglesDataKHR(
-+        vkStream, rootType,
-+        (VkAccelerationStructureGeometryTrianglesDataKHR*)(&forUnmarshaling->triangles));
++    switch (geometryType) {
++        case VK_GEOMETRY_TYPE_TRIANGLES_KHR: {
++            unmarshal_VkAccelerationStructureGeometryTrianglesDataKHR(
++                vkStream, rootType,
++                (VkAccelerationStructureGeometryTrianglesDataKHR*)(&forUnmarshaling->triangles));
++            break;
++        }
++        case VK_GEOMETRY_TYPE_AABBS_KHR: {
++            unmarshal_VkAccelerationStructureGeometryAabbsDataKHR(
++                vkStream, rootType,
++                (VkAccelerationStructureGeometryAabbsDataKHR*)(&forUnmarshaling->aabbs));
++            break;
++        }
++        case VK_GEOMETRY_TYPE_INSTANCES_KHR: {
++            unmarshal_VkAccelerationStructureGeometryInstancesDataKHR(
++                vkStream, rootType,
++                (VkAccelerationStructureGeometryInstancesDataKHR*)(&forUnmarshaling->instances));
++            break;
++        }
++        default: {
++            break;
++        }
++    }
 +}
 +
 +void marshal_VkAccelerationStructureGeometryKHR(
@@ -12408,7 +13283,8 @@ index 2e371e7..57fbd04 100644
 +    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
 +    vkStream->write((VkGeometryTypeKHR*)&forMarshaling->geometryType, sizeof(VkGeometryTypeKHR));
 +    marshal_VkAccelerationStructureGeometryDataKHR(
-+        vkStream, rootType, (VkAccelerationStructureGeometryDataKHR*)(&forMarshaling->geometry));
++        vkStream, rootType, (VkAccelerationStructureGeometryDataKHR*)(&forMarshaling->geometry),
++        forMarshaling->geometryType);
 +    vkStream->write((VkGeometryFlagsKHR*)&forMarshaling->flags, sizeof(VkGeometryFlagsKHR));
 +}
 +
@@ -12423,7 +13299,8 @@ index 2e371e7..57fbd04 100644
 +    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
 +    vkStream->read((VkGeometryTypeKHR*)&forUnmarshaling->geometryType, sizeof(VkGeometryTypeKHR));
 +    unmarshal_VkAccelerationStructureGeometryDataKHR(
-+        vkStream, rootType, (VkAccelerationStructureGeometryDataKHR*)(&forUnmarshaling->geometry));
++        vkStream, rootType, (VkAccelerationStructureGeometryDataKHR*)(&forUnmarshaling->geometry),
++        forUnmarshaling->geometryType);
 +    vkStream->read((VkGeometryFlagsKHR*)&forUnmarshaling->flags, sizeof(VkGeometryFlagsKHR));
 +}
 +
@@ -12644,12 +13521,13 @@ index 2e371e7..57fbd04 100644
 +void marshal_VkWriteDescriptorSetAccelerationStructureKHR(
 +    VulkanStreamGuest* vkStream, VkStructureType rootType,
 +    const VkWriteDescriptorSetAccelerationStructureKHR* forMarshaling) {
-+    (void)rootType;
-+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forMarshaling->sType;
-+    }
-+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+     (void)rootType;
+     vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forMarshaling->sType;
+     }
+     marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+-    vkStream->write((uint32_t*)&forMarshaling->buffer, sizeof(uint32_t));
 +    vkStream->write((uint32_t*)&forMarshaling->accelerationStructureCount, sizeof(uint32_t));
 +    // WARNING PTR CHECK
 +    uint64_t cgen_var_0 = (uint64_t)(uintptr_t)forMarshaling->pAccelerationStructures;
@@ -12664,17 +13542,21 @@ index 2e371e7..57fbd04 100644
 +            vkStream->write((uint64_t*)cgen_var_0_0, forMarshaling->accelerationStructureCount * 8);
 +        }
 +    }
-+}
-+
+ }
+ 
+-void unmarshal_VkImportBufferGOOGLE(VulkanStreamGuest* vkStream, VkStructureType rootType,
+-                                    VkImportBufferGOOGLE* forUnmarshaling) {
 +void unmarshal_VkWriteDescriptorSetAccelerationStructureKHR(
 +    VulkanStreamGuest* vkStream, VkStructureType rootType,
 +    VkWriteDescriptorSetAccelerationStructureKHR* forUnmarshaling) {
-+    (void)rootType;
-+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forUnmarshaling->sType;
-+    }
-+    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+     (void)rootType;
+     vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+-    forUnmarshaling->sType = VK_STRUCTURE_TYPE_IMPORT_BUFFER_GOOGLE;
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forUnmarshaling->sType;
+     }
+     unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+-    vkStream->read((uint32_t*)&forUnmarshaling->buffer, sizeof(uint32_t));
 +    vkStream->read((uint32_t*)&forUnmarshaling->accelerationStructureCount, sizeof(uint32_t));
 +    // WARNING PTR CHECK
 +    const VkAccelerationStructureKHR* check_pAccelerationStructures;
@@ -12697,17 +13579,22 @@ index 2e371e7..57fbd04 100644
 +                forUnmarshaling->accelerationStructureCount);
 +        }
 +    }
-+}
-+
+ }
+ 
+-void marshal_VkCreateBlobGOOGLE(VulkanStreamGuest* vkStream, VkStructureType rootType,
+-                                const VkCreateBlobGOOGLE* forMarshaling) {
 +void marshal_VkPhysicalDeviceAccelerationStructureFeaturesKHR(
 +    VulkanStreamGuest* vkStream, VkStructureType rootType,
 +    const VkPhysicalDeviceAccelerationStructureFeaturesKHR* forMarshaling) {
-+    (void)rootType;
-+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forMarshaling->sType;
-+    }
-+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+     (void)rootType;
+     vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forMarshaling->sType;
+     }
+     marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+-    vkStream->write((uint32_t*)&forMarshaling->blobMem, sizeof(uint32_t));
+-    vkStream->write((uint32_t*)&forMarshaling->blobFlags, sizeof(uint32_t));
+-    vkStream->write((uint64_t*)&forMarshaling->blobId, sizeof(uint64_t));
 +    vkStream->write((VkBool32*)&forMarshaling->accelerationStructure, sizeof(VkBool32));
 +    vkStream->write((VkBool32*)&forMarshaling->accelerationStructureCaptureReplay,
 +                    sizeof(VkBool32));
@@ -12717,17 +13604,23 @@ index 2e371e7..57fbd04 100644
 +    vkStream->write(
 +        (VkBool32*)&forMarshaling->descriptorBindingAccelerationStructureUpdateAfterBind,
 +        sizeof(VkBool32));
-+}
-+
+ }
+ 
+-void unmarshal_VkCreateBlobGOOGLE(VulkanStreamGuest* vkStream, VkStructureType rootType,
+-                                  VkCreateBlobGOOGLE* forUnmarshaling) {
 +void unmarshal_VkPhysicalDeviceAccelerationStructureFeaturesKHR(
 +    VulkanStreamGuest* vkStream, VkStructureType rootType,
 +    VkPhysicalDeviceAccelerationStructureFeaturesKHR* forUnmarshaling) {
-+    (void)rootType;
-+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forUnmarshaling->sType;
-+    }
-+    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+     (void)rootType;
+     vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+-    forUnmarshaling->sType = VK_STRUCTURE_TYPE_CREATE_BLOB_GOOGLE;
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forUnmarshaling->sType;
+     }
+     unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+-    vkStream->read((uint32_t*)&forUnmarshaling->blobMem, sizeof(uint32_t));
+-    vkStream->read((uint32_t*)&forUnmarshaling->blobFlags, sizeof(uint32_t));
+-    vkStream->read((uint64_t*)&forUnmarshaling->blobId, sizeof(uint64_t));
 +    vkStream->read((VkBool32*)&forUnmarshaling->accelerationStructure, sizeof(VkBool32));
 +    vkStream->read((VkBool32*)&forUnmarshaling->accelerationStructureCaptureReplay,
 +                   sizeof(VkBool32));
@@ -12738,17 +13631,29 @@ index 2e371e7..57fbd04 100644
 +    vkStream->read(
 +        (VkBool32*)&forUnmarshaling->descriptorBindingAccelerationStructureUpdateAfterBind,
 +        sizeof(VkBool32));
-+}
-+
+ }
+ 
+-void marshal_VkDebugMetadataGuestProcessNameGOOGLE(
 +void marshal_VkPhysicalDeviceAccelerationStructurePropertiesKHR(
-+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    const VkDebugMetadataGuestProcessNameGOOGLE* forMarshaling) {
 +    const VkPhysicalDeviceAccelerationStructurePropertiesKHR* forMarshaling) {
-+    (void)rootType;
-+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forMarshaling->sType;
-+    }
-+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+     (void)rootType;
+     vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forMarshaling->sType;
+     }
+     marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+-    if (vkStream->getFeatureBits() & VULKAN_STREAM_FEATURE_NULL_OPTIONAL_STRINGS_BIT) {
+-        // WARNING PTR CHECK
+-        uint64_t cgen_var_0 = (uint64_t)(uintptr_t)forMarshaling->pName;
+-        vkStream->putBe64(cgen_var_0);
+-        if (forMarshaling->pName) {
+-            vkStream->putString(forMarshaling->pName);
+-        }
+-    } else {
+-        vkStream->putString(forMarshaling->pName);
+-    }
 +    vkStream->write((uint64_t*)&forMarshaling->maxGeometryCount, sizeof(uint64_t));
 +    vkStream->write((uint64_t*)&forMarshaling->maxInstanceCount, sizeof(uint64_t));
 +    vkStream->write((uint64_t*)&forMarshaling->maxPrimitiveCount, sizeof(uint64_t));
@@ -12764,17 +13669,34 @@ index 2e371e7..57fbd04 100644
 +        sizeof(uint32_t));
 +    vkStream->write((uint32_t*)&forMarshaling->minAccelerationStructureScratchOffsetAlignment,
 +                    sizeof(uint32_t));
-+}
-+
+ }
+ 
+-void unmarshal_VkDebugMetadataGuestProcessNameGOOGLE(
 +void unmarshal_VkPhysicalDeviceAccelerationStructurePropertiesKHR(
-+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    VkDebugMetadataGuestProcessNameGOOGLE* forUnmarshaling) {
 +    VkPhysicalDeviceAccelerationStructurePropertiesKHR* forUnmarshaling) {
-+    (void)rootType;
-+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forUnmarshaling->sType;
-+    }
-+    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+     (void)rootType;
+     vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forUnmarshaling->sType;
+     }
+     unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+-    if (vkStream->getFeatureBits() & VULKAN_STREAM_FEATURE_NULL_OPTIONAL_STRINGS_BIT) {
+-        // WARNING PTR CHECK
+-        const char* check_pName;
+-        (void)check_pName;
+-        check_pName = (const char*)(uintptr_t)vkStream->getBe64();
+-        if (forUnmarshaling->pName) {
+-            if (!(check_pName)) {
+-                fprintf(stderr,
+-                        "fatal: forUnmarshaling->pName inconsistent between guest and host\n");
+-            }
+-            vkStream->loadStringInPlace((char**)&forUnmarshaling->pName);
+-        }
+-    } else {
+-        vkStream->loadStringInPlace((char**)&forUnmarshaling->pName);
+-    }
 +    vkStream->read((uint64_t*)&forUnmarshaling->maxGeometryCount, sizeof(uint64_t));
 +    vkStream->read((uint64_t*)&forUnmarshaling->maxInstanceCount, sizeof(uint64_t));
 +    vkStream->read((uint64_t*)&forUnmarshaling->maxPrimitiveCount, sizeof(uint64_t));
@@ -12790,73 +13712,111 @@ index 2e371e7..57fbd04 100644
 +        sizeof(uint32_t));
 +    vkStream->read((uint32_t*)&forUnmarshaling->minAccelerationStructureScratchOffsetAlignment,
 +                   sizeof(uint32_t));
-+}
-+
+ }
+ 
+-void marshal_VkDebugMetadataGuestProcessIdGOOGLE(
 +void marshal_VkAccelerationStructureDeviceAddressInfoKHR(
-+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    const VkDebugMetadataGuestProcessIdGOOGLE* forMarshaling) {
 +    const VkAccelerationStructureDeviceAddressInfoKHR* forMarshaling) {
-+    (void)rootType;
-+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forMarshaling->sType;
-+    }
-+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+     (void)rootType;
+     vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forMarshaling->sType;
+     }
+     marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+-    vkStream->write((uint64_t*)&forMarshaling->id, sizeof(uint64_t));
 +    uint64_t cgen_var_0;
 +    vkStream->handleMapping()->mapHandles_VkAccelerationStructureKHR_u64(
 +        &forMarshaling->accelerationStructure, &cgen_var_0, 1);
 +    vkStream->write((uint64_t*)&cgen_var_0, 1 * 8);
-+}
-+
+ }
+ 
+-void unmarshal_VkDebugMetadataGuestProcessIdGOOGLE(
 +void unmarshal_VkAccelerationStructureDeviceAddressInfoKHR(
-+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    VkDebugMetadataGuestProcessIdGOOGLE* forUnmarshaling) {
 +    VkAccelerationStructureDeviceAddressInfoKHR* forUnmarshaling) {
-+    (void)rootType;
-+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forUnmarshaling->sType;
-+    }
-+    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+     (void)rootType;
+     vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forUnmarshaling->sType;
+     }
+     unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+-    vkStream->read((uint64_t*)&forUnmarshaling->id, sizeof(uint64_t));
 +    uint64_t cgen_var_0;
 +    vkStream->read((uint64_t*)&cgen_var_0, 1 * 8);
 +    vkStream->handleMapping()->mapHandles_u64_VkAccelerationStructureKHR(
 +        &cgen_var_0, (VkAccelerationStructureKHR*)&forUnmarshaling->accelerationStructure, 1);
-+}
-+
+ }
+ 
+-void marshal_VkDebugMetadataGuestThreadNameGOOGLE(
 +void marshal_VkAccelerationStructureVersionInfoKHR(
-+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    const VkDebugMetadataGuestThreadNameGOOGLE* forMarshaling) {
 +    const VkAccelerationStructureVersionInfoKHR* forMarshaling) {
-+    (void)rootType;
-+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forMarshaling->sType;
-+    }
-+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+     (void)rootType;
+     vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forMarshaling->sType;
+     }
+     marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+-    if (vkStream->getFeatureBits() & VULKAN_STREAM_FEATURE_NULL_OPTIONAL_STRINGS_BIT) {
+-        // WARNING PTR CHECK
+-        uint64_t cgen_var_0 = (uint64_t)(uintptr_t)forMarshaling->pName;
+-        vkStream->putBe64(cgen_var_0);
+-        if (forMarshaling->pName) {
+-            vkStream->putString(forMarshaling->pName);
+-        }
+-    } else {
+-        vkStream->putString(forMarshaling->pName);
+-    }
 +    vkStream->write((const uint8_t*)forMarshaling->pVersionData,
 +                    2 * VK_UUID_SIZE * sizeof(const uint8_t));
-+}
-+
+ }
+ 
+-void unmarshal_VkDebugMetadataGuestThreadNameGOOGLE(
 +void unmarshal_VkAccelerationStructureVersionInfoKHR(
-+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    VkDebugMetadataGuestThreadNameGOOGLE* forUnmarshaling) {
 +    VkAccelerationStructureVersionInfoKHR* forUnmarshaling) {
-+    (void)rootType;
-+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forUnmarshaling->sType;
-+    }
-+    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+     (void)rootType;
+     vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forUnmarshaling->sType;
+     }
+     unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+-    if (vkStream->getFeatureBits() & VULKAN_STREAM_FEATURE_NULL_OPTIONAL_STRINGS_BIT) {
+-        // WARNING PTR CHECK
+-        const char* check_pName;
+-        (void)check_pName;
+-        check_pName = (const char*)(uintptr_t)vkStream->getBe64();
+-        if (forUnmarshaling->pName) {
+-            if (!(check_pName)) {
+-                fprintf(stderr,
+-                        "fatal: forUnmarshaling->pName inconsistent between guest and host\n");
+-            }
+-            vkStream->loadStringInPlace((char**)&forUnmarshaling->pName);
+-        }
+-    } else {
+-        vkStream->loadStringInPlace((char**)&forUnmarshaling->pName);
+-    }
 +    vkStream->read((uint8_t*)forUnmarshaling->pVersionData,
 +                   2 * VK_UUID_SIZE * sizeof(const uint8_t));
-+}
-+
+ }
+ 
+-void marshal_VkDebugMetadataGuestThreadIdGOOGLE(
 +void marshal_VkCopyAccelerationStructureToMemoryInfoKHR(
-+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    const VkDebugMetadataGuestThreadIdGOOGLE* forMarshaling) {
 +    const VkCopyAccelerationStructureToMemoryInfoKHR* forMarshaling) {
-+    (void)rootType;
-+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forMarshaling->sType;
-+    }
-+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+     (void)rootType;
+     vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forMarshaling->sType;
+     }
+     marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+-    vkStream->write((uint64_t*)&forMarshaling->id, sizeof(uint64_t));
 +    uint64_t cgen_var_0;
 +    vkStream->handleMapping()->mapHandles_VkAccelerationStructureKHR_u64(&forMarshaling->src,
 +                                                                         &cgen_var_0, 1);
@@ -12865,17 +13825,20 @@ index 2e371e7..57fbd04 100644
 +                                     (VkDeviceOrHostAddressKHR*)(&forMarshaling->dst));
 +    vkStream->write((VkCopyAccelerationStructureModeKHR*)&forMarshaling->mode,
 +                    sizeof(VkCopyAccelerationStructureModeKHR));
-+}
-+
+ }
+ 
+-void unmarshal_VkDebugMetadataGuestThreadIdGOOGLE(
 +void unmarshal_VkCopyAccelerationStructureToMemoryInfoKHR(
-+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    VkDebugMetadataGuestThreadIdGOOGLE* forUnmarshaling) {
 +    VkCopyAccelerationStructureToMemoryInfoKHR* forUnmarshaling) {
-+    (void)rootType;
-+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forUnmarshaling->sType;
-+    }
-+    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+     (void)rootType;
+     vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forUnmarshaling->sType;
+     }
+     unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+-    vkStream->read((uint64_t*)&forUnmarshaling->id, sizeof(uint64_t));
 +    uint64_t cgen_var_0;
 +    vkStream->read((uint64_t*)&cgen_var_0, 1 * 8);
 +    vkStream->handleMapping()->mapHandles_u64_VkAccelerationStructureKHR(
@@ -12884,17 +13847,19 @@ index 2e371e7..57fbd04 100644
 +                                       (VkDeviceOrHostAddressKHR*)(&forUnmarshaling->dst));
 +    vkStream->read((VkCopyAccelerationStructureModeKHR*)&forUnmarshaling->mode,
 +                   sizeof(VkCopyAccelerationStructureModeKHR));
-+}
-+
+ }
+ 
+-void marshal_VkDebugMetadataGOOGLE(VulkanStreamGuest* vkStream, VkStructureType rootType,
+-                                   const VkDebugMetadataGOOGLE* forMarshaling) {
 +void marshal_VkCopyMemoryToAccelerationStructureInfoKHR(
 +    VulkanStreamGuest* vkStream, VkStructureType rootType,
 +    const VkCopyMemoryToAccelerationStructureInfoKHR* forMarshaling) {
-+    (void)rootType;
-+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forMarshaling->sType;
-+    }
-+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+     (void)rootType;
+     vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forMarshaling->sType;
+     }
+     marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
 +    marshal_VkDeviceOrHostAddressConstKHR(vkStream, rootType,
 +                                          (VkDeviceOrHostAddressConstKHR*)(&forMarshaling->src));
 +    uint64_t cgen_var_0;
@@ -12903,17 +13868,19 @@ index 2e371e7..57fbd04 100644
 +    vkStream->write((uint64_t*)&cgen_var_0, 1 * 8);
 +    vkStream->write((VkCopyAccelerationStructureModeKHR*)&forMarshaling->mode,
 +                    sizeof(VkCopyAccelerationStructureModeKHR));
-+}
-+
+ }
+ 
+-void unmarshal_VkDebugMetadataGOOGLE(VulkanStreamGuest* vkStream, VkStructureType rootType,
+-                                     VkDebugMetadataGOOGLE* forUnmarshaling) {
 +void unmarshal_VkCopyMemoryToAccelerationStructureInfoKHR(
 +    VulkanStreamGuest* vkStream, VkStructureType rootType,
 +    VkCopyMemoryToAccelerationStructureInfoKHR* forUnmarshaling) {
-+    (void)rootType;
-+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forUnmarshaling->sType;
-+    }
-+    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+     (void)rootType;
+     vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forUnmarshaling->sType;
+     }
+     unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
 +    unmarshal_VkDeviceOrHostAddressConstKHR(
 +        vkStream, rootType, (VkDeviceOrHostAddressConstKHR*)(&forUnmarshaling->src));
 +    uint64_t cgen_var_0;
@@ -12922,17 +13889,23 @@ index 2e371e7..57fbd04 100644
 +        &cgen_var_0, (VkAccelerationStructureKHR*)&forUnmarshaling->dst, 1);
 +    vkStream->read((VkCopyAccelerationStructureModeKHR*)&forUnmarshaling->mode,
 +                   sizeof(VkCopyAccelerationStructureModeKHR));
-+}
-+
+ }
+ 
+-#endif
+-#ifdef VK_EXT_border_color_swizzle
+-void marshal_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
 +void marshal_VkCopyAccelerationStructureInfoKHR(
-+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    const VkPhysicalDeviceBorderColorSwizzleFeaturesEXT* forMarshaling) {
 +    const VkCopyAccelerationStructureInfoKHR* forMarshaling) {
-+    (void)rootType;
-+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forMarshaling->sType;
-+    }
-+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+     (void)rootType;
+     vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forMarshaling->sType;
+     }
+     marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+-    vkStream->write((VkBool32*)&forMarshaling->borderColorSwizzle, sizeof(VkBool32));
+-    vkStream->write((VkBool32*)&forMarshaling->borderColorSwizzleFromImage, sizeof(VkBool32));
 +    uint64_t cgen_var_0;
 +    vkStream->handleMapping()->mapHandles_VkAccelerationStructureKHR_u64(&forMarshaling->src,
 +                                                                         &cgen_var_0, 1);
@@ -12943,17 +13916,21 @@ index 2e371e7..57fbd04 100644
 +    vkStream->write((uint64_t*)&cgen_var_1, 1 * 8);
 +    vkStream->write((VkCopyAccelerationStructureModeKHR*)&forMarshaling->mode,
 +                    sizeof(VkCopyAccelerationStructureModeKHR));
-+}
-+
+ }
+ 
+-void unmarshal_VkPhysicalDeviceBorderColorSwizzleFeaturesEXT(
 +void unmarshal_VkCopyAccelerationStructureInfoKHR(
-+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    VkPhysicalDeviceBorderColorSwizzleFeaturesEXT* forUnmarshaling) {
 +    VkCopyAccelerationStructureInfoKHR* forUnmarshaling) {
-+    (void)rootType;
-+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forUnmarshaling->sType;
-+    }
-+    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+     (void)rootType;
+     vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forUnmarshaling->sType;
+     }
+     unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+-    vkStream->read((VkBool32*)&forUnmarshaling->borderColorSwizzle, sizeof(VkBool32));
+-    vkStream->read((VkBool32*)&forUnmarshaling->borderColorSwizzleFromImage, sizeof(VkBool32));
 +    uint64_t cgen_var_0;
 +    vkStream->read((uint64_t*)&cgen_var_0, 1 * 8);
 +    vkStream->handleMapping()->mapHandles_u64_VkAccelerationStructureKHR(
@@ -12964,67 +13941,82 @@ index 2e371e7..57fbd04 100644
 +        &cgen_var_1, (VkAccelerationStructureKHR*)&forUnmarshaling->dst, 1);
 +    vkStream->read((VkCopyAccelerationStructureModeKHR*)&forUnmarshaling->mode,
 +                   sizeof(VkCopyAccelerationStructureModeKHR));
-+}
-+
+ }
+ 
+-void marshal_VkSamplerBorderColorComponentMappingCreateInfoEXT(
 +void marshal_VkAccelerationStructureBuildSizesInfoKHR(
-+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    const VkSamplerBorderColorComponentMappingCreateInfoEXT* forMarshaling) {
 +    const VkAccelerationStructureBuildSizesInfoKHR* forMarshaling) {
-+    (void)rootType;
-+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forMarshaling->sType;
-+    }
-+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+     (void)rootType;
+     vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forMarshaling->sType;
+     }
+     marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+-    marshal_VkComponentMapping(vkStream, rootType,
+-                               (VkComponentMapping*)(&forMarshaling->components));
+-    vkStream->write((VkBool32*)&forMarshaling->srgb, sizeof(VkBool32));
 +    vkStream->write((VkDeviceSize*)&forMarshaling->accelerationStructureSize, sizeof(VkDeviceSize));
 +    vkStream->write((VkDeviceSize*)&forMarshaling->updateScratchSize, sizeof(VkDeviceSize));
 +    vkStream->write((VkDeviceSize*)&forMarshaling->buildScratchSize, sizeof(VkDeviceSize));
-+}
-+
+ }
+ 
+-void unmarshal_VkSamplerBorderColorComponentMappingCreateInfoEXT(
 +void unmarshal_VkAccelerationStructureBuildSizesInfoKHR(
-+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    VkSamplerBorderColorComponentMappingCreateInfoEXT* forUnmarshaling) {
 +    VkAccelerationStructureBuildSizesInfoKHR* forUnmarshaling) {
-+    (void)rootType;
-+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forUnmarshaling->sType;
-+    }
-+    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+     (void)rootType;
+     vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forUnmarshaling->sType;
+     }
+     unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+-    unmarshal_VkComponentMapping(vkStream, rootType,
+-                                 (VkComponentMapping*)(&forUnmarshaling->components));
+-    vkStream->read((VkBool32*)&forUnmarshaling->srgb, sizeof(VkBool32));
 +    vkStream->read((VkDeviceSize*)&forUnmarshaling->accelerationStructureSize,
 +                   sizeof(VkDeviceSize));
 +    vkStream->read((VkDeviceSize*)&forUnmarshaling->updateScratchSize, sizeof(VkDeviceSize));
 +    vkStream->read((VkDeviceSize*)&forUnmarshaling->buildScratchSize, sizeof(VkDeviceSize));
-+}
-+
-+#endif
+ }
+ 
+ #endif
+-#ifdef VK_EXT_image_compression_control_swapchain
+-void marshal_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
 +#ifdef VK_KHR_ray_query
 +void marshal_VkPhysicalDeviceRayQueryFeaturesKHR(
-+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    const VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT* forMarshaling) {
 +    const VkPhysicalDeviceRayQueryFeaturesKHR* forMarshaling) {
-+    (void)rootType;
-+    vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forMarshaling->sType;
-+    }
-+    marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+     (void)rootType;
+     vkStream->write((VkStructureType*)&forMarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forMarshaling->sType;
+     }
+     marshal_extension_struct(vkStream, rootType, forMarshaling->pNext);
+-    vkStream->write((VkBool32*)&forMarshaling->imageCompressionControlSwapchain, sizeof(VkBool32));
 +    vkStream->write((VkBool32*)&forMarshaling->rayQuery, sizeof(VkBool32));
-+}
-+
+ }
+ 
+-void unmarshal_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT(
 +void unmarshal_VkPhysicalDeviceRayQueryFeaturesKHR(
-+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT* forUnmarshaling) {
 +    VkPhysicalDeviceRayQueryFeaturesKHR* forUnmarshaling) {
-+    (void)rootType;
-+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
-+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
-+        rootType = forUnmarshaling->sType;
-+    }
-+    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+     (void)rootType;
+     vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+     if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+         rootType = forUnmarshaling->sType;
+     }
+     unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+-    vkStream->read((VkBool32*)&forUnmarshaling->imageCompressionControlSwapchain, sizeof(VkBool32));
 +    vkStream->read((VkBool32*)&forUnmarshaling->rayQuery, sizeof(VkBool32));
-+}
-+
+ }
+ 
  #endif
- void marshal_extension_struct(VulkanStreamGuest* vkStream, VkStructureType rootType,
-                               const void* structExtension) {
-@@ -17198,6 +18018,37 @@ void marshal_extension_struct(VulkanStreamGuest* vkStream, VkStructureType rootT
+@@ -17198,6 +18105,37 @@ void marshal_extension_struct(VulkanStreamGuest* vkStream, VkStructureType rootT
                      structExtension));
              break;
          }
@@ -13062,7 +14054,7 @@ index 2e371e7..57fbd04 100644
  #endif
          default: {
              // fatal; the switch is only taken if the extension struct is known
-@@ -18726,6 +19577,37 @@ void unmarshal_extension_struct(VulkanStreamGuest* vkStream, VkStructureType roo
+@@ -18726,6 +19664,37 @@ void unmarshal_extension_struct(VulkanStreamGuest* vkStream, VkStructureType roo
                      structExtension_out));
              break;
          }
@@ -13100,7 +14092,7 @@ index 2e371e7..57fbd04 100644
  #endif
          default: {
              // fatal; the switch is only taken if the extension struct is known
-@@ -19514,6 +20396,16 @@ const char* api_opcode_to_string(const uint32_t opcode) {
+@@ -19514,6 +20483,16 @@ const char* api_opcode_to_string(const uint32_t opcode) {
              return "OP_vkCmdBindIndexBuffer2KHR";
          }
  #endif
@@ -13117,7 +14109,7 @@ index 2e371e7..57fbd04 100644
  #ifdef VK_EXT_extended_dynamic_state
          case OP_vkCmdSetScissorWithCountEXT: {
              return "OP_vkCmdSetScissorWithCountEXT";
-@@ -19579,11 +20471,21 @@ const char* api_opcode_to_string(const uint32_t opcode) {
+@@ -19579,11 +20558,21 @@ const char* api_opcode_to_string(const uint32_t opcode) {
              return "OP_vkCmdCopyImageToBuffer2";
          }
  #endif
@@ -13139,7 +14131,7 @@ index 2e371e7..57fbd04 100644
  #ifdef VK_EXT_extended_dynamic_state
          case OP_vkCmdSetDepthWriteEnableEXT: {
              return "OP_vkCmdSetDepthWriteEnableEXT";
-@@ -19604,6 +20506,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
+@@ -19604,6 +20593,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
              return "OP_vkCmdSetDepthBoundsTestEnable";
          }
  #endif
@@ -13151,7 +14143,7 @@ index 2e371e7..57fbd04 100644
  #ifdef VK_KHR_line_rasterization
          case OP_vkCmdSetLineStippleKHR: {
              return "OP_vkCmdSetLineStippleKHR";
-@@ -19637,6 +20544,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
+@@ -19637,6 +20631,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
              return "OP_vkCmdSetDepthBoundsTestEnableEXT";
          }
  #endif
@@ -13163,7 +14155,7 @@ index 2e371e7..57fbd04 100644
  #ifdef VK_BASE_VERSION_1_4
          case OP_vkCopyImageToImage: {
              return "OP_vkCopyImageToImage";
-@@ -19647,6 +20559,14 @@ const char* api_opcode_to_string(const uint32_t opcode) {
+@@ -19647,6 +20646,14 @@ const char* api_opcode_to_string(const uint32_t opcode) {
              return "OP_vkCopyImageToImageEXT";
          }
  #endif
@@ -13178,7 +14170,7 @@ index 2e371e7..57fbd04 100644
  #ifdef VK_BASE_VERSION_1_3
          case OP_vkDestroyPrivateDataSlot: {
              return "OP_vkDestroyPrivateDataSlot";
-@@ -19755,6 +20675,14 @@ const char* api_opcode_to_string(const uint32_t opcode) {
+@@ -19755,6 +20762,14 @@ const char* api_opcode_to_string(const uint32_t opcode) {
              return "OP_vkCmdSetDepthWriteEnable";
          }
  #endif
@@ -13193,7 +14185,7 @@ index 2e371e7..57fbd04 100644
  #ifdef VK_BASE_VERSION_1_3
          case OP_vkSetPrivateData: {
              return "OP_vkSetPrivateData";
-@@ -19883,16 +20811,31 @@ const char* api_opcode_to_string(const uint32_t opcode) {
+@@ -19883,16 +20898,31 @@ const char* api_opcode_to_string(const uint32_t opcode) {
              return "OP_vkCmdResolveImage2KHR";
          }
  #endif
@@ -13225,7 +14217,7 @@ index 2e371e7..57fbd04 100644
  #ifdef VK_EXT_extended_dynamic_state2
          case OP_vkCmdSetDepthBiasEnableEXT: {
              return "OP_vkCmdSetDepthBiasEnableEXT";
-@@ -19913,6 +20856,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
+@@ -19913,6 +20943,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
              return "OP_vkCmdSetPrimitiveTopologyEXT";
          }
  #endif
@@ -13237,7 +14229,7 @@ index 2e371e7..57fbd04 100644
  #ifdef VK_BASE_VERSION_1_3
          case OP_vkCreatePrivateDataSlot: {
              return "OP_vkCreatePrivateDataSlot";
-@@ -19933,6 +20881,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
+@@ -19933,6 +20968,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
              return "OP_vkCmdPushDescriptorSetWithTemplate2KHR";
          }
  #endif
@@ -13249,7 +14241,7 @@ index 2e371e7..57fbd04 100644
  #ifdef VK_EXT_line_rasterization
          case OP_vkCmdSetLineStippleEXT: {
              return "OP_vkCmdSetLineStippleEXT";
-@@ -19943,6 +20896,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
+@@ -19943,6 +20983,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
              return "OP_vkCmdSetCullModeEXT";
          }
  #endif
@@ -13261,7 +14253,7 @@ index 2e371e7..57fbd04 100644
  #ifdef VK_BASE_VERSION_1_2
          case OP_vkGetSemaphoreCounterValue: {
              return "OP_vkGetSemaphoreCounterValue";
-@@ -20016,6 +20974,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
+@@ -20016,6 +21061,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
              return "OP_vkGetPipelineExecutableStatisticsKHR";
          }
  #endif
@@ -13273,7 +14265,7 @@ index 2e371e7..57fbd04 100644
  #ifdef VK_COMPUTE_VERSION_1_3
          case OP_vkCmdResetEvent2: {
              return "OP_vkCmdResetEvent2";
-@@ -20026,11 +20989,21 @@ const char* api_opcode_to_string(const uint32_t opcode) {
+@@ -20026,11 +21076,21 @@ const char* api_opcode_to_string(const uint32_t opcode) {
              return "OP_vkCmdEndTransformFeedbackEXT";
          }
  #endif
@@ -13295,7 +14287,7 @@ index 2e371e7..57fbd04 100644
  #ifdef VK_GRAPHICS_VERSION_1_3
          case OP_vkCmdBlitImage2: {
              return "OP_vkCmdBlitImage2";
-@@ -20066,6 +21039,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
+@@ -20066,6 +21126,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
              return "OP_vkCmdSetStencilOpEXT";
          }
  #endif
@@ -13307,7 +14299,7 @@ index 2e371e7..57fbd04 100644
  #ifdef VK_GRAPHICS_VERSION_1_2
          case OP_vkCreateRenderPass2: {
              return "OP_vkCreateRenderPass2";
-@@ -20156,6 +21134,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
+@@ -20156,6 +21221,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
              return "OP_vkGetSwapchainGrallocUsage2ANDROID";
          }
  #endif
@@ -13320,7 +14312,6 @@ index 2e371e7..57fbd04 100644
          case OP_vkQueueFlushCommandsFromAuxMemoryGOOGLE: {
              return "OP_vkQueueFlushCommandsFromAuxMemoryGOOGLE";
 diff --git a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_marshaling_guest.h b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_marshaling_guest.h
-index c1ead1c..34e34db 100644
 --- a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_marshaling_guest.h
 +++ b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_marshaling_guest.h
 @@ -3181,6 +3181,13 @@ DEFINE_ALIAS_FUNCTION(unmarshal_VkDeviceMemoryOpaqueCaptureAddressInfo,
@@ -13337,7 +14328,23 @@ index c1ead1c..34e34db 100644
  #ifdef VK_KHR_pipeline_executable_properties
  void marshal_VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR(
      VulkanStreamGuest* vkStream, VkStructureType rootType,
-@@ -4476,6 +4483,202 @@ DEFINE_ALIAS_FUNCTION(marshal_VkPhysicalDevicePipelineProtectedAccessFeatures,
+@@ -3212,11 +3219,13 @@ void unmarshal_VkPipelineExecutableInfoKHR(VulkanStreamGuest* vkStream, VkStruct
+ 
+ void marshal_VkPipelineExecutableStatisticValueKHR(
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    const VkPipelineExecutableStatisticValueKHR* forMarshaling);
++    const VkPipelineExecutableStatisticValueKHR* forMarshaling,
++    const VkPipelineExecutableStatisticFormatKHR format);
+ 
+ void unmarshal_VkPipelineExecutableStatisticValueKHR(
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    VkPipelineExecutableStatisticValueKHR* forUnmarshaling);
++    VkPipelineExecutableStatisticValueKHR* forUnmarshaling,
++    const VkPipelineExecutableStatisticFormatKHR format);
+ 
+ void marshal_VkPipelineExecutableStatisticKHR(
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+@@ -4476,6 +4485,203 @@ DEFINE_ALIAS_FUNCTION(marshal_VkPhysicalDevicePipelineProtectedAccessFeatures,
  DEFINE_ALIAS_FUNCTION(unmarshal_VkPhysicalDevicePipelineProtectedAccessFeatures,
                        unmarshal_VkPhysicalDevicePipelineProtectedAccessFeaturesEXT)
  
@@ -13401,11 +14408,12 @@ index c1ead1c..34e34db 100644
 +
 +void marshal_VkAccelerationStructureGeometryDataKHR(
 +    VulkanStreamGuest* vkStream, VkStructureType rootType,
-+    const VkAccelerationStructureGeometryDataKHR* forMarshaling);
++    const VkAccelerationStructureGeometryDataKHR* forMarshaling,
++    const VkGeometryTypeKHR geometryType);
 +
 +void unmarshal_VkAccelerationStructureGeometryDataKHR(
 +    VulkanStreamGuest* vkStream, VkStructureType rootType,
-+    VkAccelerationStructureGeometryDataKHR* forUnmarshaling);
++    VkAccelerationStructureGeometryDataKHR* forUnmarshaling, const VkGeometryTypeKHR geometryType);
 +
 +void marshal_VkAccelerationStructureGeometryKHR(
 +    VulkanStreamGuest* vkStream, VkStructureType rootType,
@@ -13541,10 +14549,58 @@ index c1ead1c..34e34db 100644
  const char* api_opcode_to_string(const uint32_t opcode);
  
 diff --git a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_reserved_marshaling_guest.cpp b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_reserved_marshaling_guest.cpp
-index e6fff91..1bbfdea 100644
 --- a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_reserved_marshaling_guest.cpp
 +++ b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_reserved_marshaling_guest.cpp
-@@ -10472,6 +10472,511 @@ void reservedmarshal_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT
+@@ -8794,11 +8794,35 @@ void reservedmarshal_VkPipelineExecutableInfoKHR(VulkanStreamGuest* vkStream,
+ 
+ void reservedmarshal_VkPipelineExecutableStatisticValueKHR(
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    const VkPipelineExecutableStatisticValueKHR* forMarshaling, uint8_t** ptr) {
++    const VkPipelineExecutableStatisticValueKHR* forMarshaling, uint8_t** ptr,
++    const VkPipelineExecutableStatisticFormatKHR format) {
+     (void)vkStream;
+     (void)rootType;
+-    memcpy(*ptr, (VkBool32*)&forMarshaling->b32, sizeof(VkBool32));
+-    *ptr += sizeof(VkBool32);
++    switch (format) {
++        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR: {
++            memcpy(*ptr, (VkBool32*)&forMarshaling->b32, sizeof(VkBool32));
++            *ptr += sizeof(VkBool32);
++            break;
++        }
++        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR: {
++            memcpy(*ptr, (int64_t*)&forMarshaling->i64, sizeof(int64_t));
++            *ptr += sizeof(int64_t);
++            break;
++        }
++        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR: {
++            memcpy(*ptr, (uint64_t*)&forMarshaling->u64, sizeof(uint64_t));
++            *ptr += sizeof(uint64_t);
++            break;
++        }
++        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR: {
++            memcpy(*ptr, (double*)&forMarshaling->f64, sizeof(double));
++            *ptr += sizeof(double);
++            break;
++        }
++        default: {
++            break;
++        }
++    }
+ }
+ 
+ void reservedmarshal_VkPipelineExecutableStatisticKHR(
+@@ -8820,7 +8844,8 @@ void reservedmarshal_VkPipelineExecutableStatisticKHR(
+            sizeof(VkPipelineExecutableStatisticFormatKHR));
+     *ptr += sizeof(VkPipelineExecutableStatisticFormatKHR);
+     reservedmarshal_VkPipelineExecutableStatisticValueKHR(
+-        vkStream, rootType, (VkPipelineExecutableStatisticValueKHR*)(&forMarshaling->value), ptr);
++        vkStream, rootType, (VkPipelineExecutableStatisticValueKHR*)(&forMarshaling->value), ptr,
++        forMarshaling->format);
+ }
+ 
+ void reservedmarshal_VkPipelineExecutableInternalRepresentationKHR(
+@@ -10472,6 +10497,532 @@ void reservedmarshal_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT
      *ptr += sizeof(VkBool32);
  }
  
@@ -13673,12 +14729,33 @@ index e6fff91..1bbfdea 100644
 +
 +void reservedmarshal_VkAccelerationStructureGeometryDataKHR(
 +    VulkanStreamGuest* vkStream, VkStructureType rootType,
-+    const VkAccelerationStructureGeometryDataKHR* forMarshaling, uint8_t** ptr) {
++    const VkAccelerationStructureGeometryDataKHR* forMarshaling, uint8_t** ptr,
++    const VkGeometryTypeKHR geometryType) {
 +    (void)vkStream;
 +    (void)rootType;
-+    reservedmarshal_VkAccelerationStructureGeometryTrianglesDataKHR(
-+        vkStream, rootType,
-+        (VkAccelerationStructureGeometryTrianglesDataKHR*)(&forMarshaling->triangles), ptr);
++    switch (geometryType) {
++        case VK_GEOMETRY_TYPE_TRIANGLES_KHR: {
++            reservedmarshal_VkAccelerationStructureGeometryTrianglesDataKHR(
++                vkStream, rootType,
++                (VkAccelerationStructureGeometryTrianglesDataKHR*)(&forMarshaling->triangles), ptr);
++            break;
++        }
++        case VK_GEOMETRY_TYPE_AABBS_KHR: {
++            reservedmarshal_VkAccelerationStructureGeometryAabbsDataKHR(
++                vkStream, rootType,
++                (VkAccelerationStructureGeometryAabbsDataKHR*)(&forMarshaling->aabbs), ptr);
++            break;
++        }
++        case VK_GEOMETRY_TYPE_INSTANCES_KHR: {
++            reservedmarshal_VkAccelerationStructureGeometryInstancesDataKHR(
++                vkStream, rootType,
++                (VkAccelerationStructureGeometryInstancesDataKHR*)(&forMarshaling->instances), ptr);
++            break;
++        }
++        default: {
++            break;
++        }
++    }
 +}
 +
 +void reservedmarshal_VkAccelerationStructureGeometryKHR(
@@ -13696,7 +14773,7 @@ index e6fff91..1bbfdea 100644
 +    *ptr += sizeof(VkGeometryTypeKHR);
 +    reservedmarshal_VkAccelerationStructureGeometryDataKHR(
 +        vkStream, rootType, (VkAccelerationStructureGeometryDataKHR*)(&forMarshaling->geometry),
-+        ptr);
++        ptr, forMarshaling->geometryType);
 +    memcpy(*ptr, (VkGeometryFlagsKHR*)&forMarshaling->flags, sizeof(VkGeometryFlagsKHR));
 +    *ptr += sizeof(VkGeometryFlagsKHR);
 +}
@@ -14056,7 +15133,7 @@ index e6fff91..1bbfdea 100644
  #endif
  void reservedmarshal_extension_struct(VulkanStreamGuest* vkStream, VkStructureType rootType,
                                        const void* structExtension, uint8_t** ptr) {
-@@ -12157,6 +12662,40 @@ void reservedmarshal_extension_struct(VulkanStreamGuest* vkStream, VkStructureTy
+@@ -12157,6 +12708,40 @@ void reservedmarshal_extension_struct(VulkanStreamGuest* vkStream, VkStructureTy
                  ptr);
              break;
          }
@@ -14098,10 +15175,19 @@ index e6fff91..1bbfdea 100644
          default: {
              // fatal; the switch is only taken if the extension struct is known
 diff --git a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_reserved_marshaling_guest.h b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_reserved_marshaling_guest.h
-index 1b5c441..fa9fc43 100644
 --- a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_reserved_marshaling_guest.h
 +++ b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_reserved_marshaling_guest.h
-@@ -2370,6 +2370,100 @@ void reservedmarshal_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT
+@@ -1711,7 +1711,8 @@ void reservedmarshal_VkPipelineExecutableInfoKHR(VulkanStreamGuest* vkStream,
+ 
+ void reservedmarshal_VkPipelineExecutableStatisticValueKHR(
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+-    const VkPipelineExecutableStatisticValueKHR* forMarshaling, uint8_t** ptr);
++    const VkPipelineExecutableStatisticValueKHR* forMarshaling, uint8_t** ptr,
++    const VkPipelineExecutableStatisticFormatKHR format);
+ 
+ void reservedmarshal_VkPipelineExecutableStatisticKHR(
+     VulkanStreamGuest* vkStream, VkStructureType rootType,
+@@ -2370,6 +2371,101 @@ void reservedmarshal_VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT
  DEFINE_ALIAS_FUNCTION(reservedmarshal_VkPhysicalDevicePipelineProtectedAccessFeatures,
                        reservedmarshal_VkPhysicalDevicePipelineProtectedAccessFeaturesEXT)
  
@@ -14139,7 +15225,8 @@ index 1b5c441..fa9fc43 100644
 +
 +void reservedmarshal_VkAccelerationStructureGeometryDataKHR(
 +    VulkanStreamGuest* vkStream, VkStructureType rootType,
-+    const VkAccelerationStructureGeometryDataKHR* forMarshaling, uint8_t** ptr);
++    const VkAccelerationStructureGeometryDataKHR* forMarshaling, uint8_t** ptr,
++    const VkGeometryTypeKHR geometryType);
 +
 +void reservedmarshal_VkAccelerationStructureGeometryKHR(
 +    VulkanStreamGuest* vkStream, VkStructureType rootType,
@@ -14203,7 +15290,6 @@ index 1b5c441..fa9fc43 100644
  }  // namespace vk
  }  // namespace gfxstream
 diff --git a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_transform_guest.cpp b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_transform_guest.cpp
-index cc971c3..8c29edb 100644
 --- a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_transform_guest.cpp
 +++ b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_transform_guest.cpp
 @@ -9003,6 +9003,492 @@ void transform_fromhost_VkPhysicalDeviceImageCompressionControlSwapchainFeatures
@@ -14774,7 +15860,6 @@ index cc971c3..8c29edb 100644
          default: {
              return;
 diff --git a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_transform_guest.h b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_transform_guest.h
-index 74cf205..99beb72 100644
 --- a/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_transform_guest.h
 +++ b/src/gfxstream/guest/vulkan_enc/autogenerated/goldfish_vk_transform_guest.h
 @@ -3791,6 +3791,152 @@ DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDevicePipelineProtectedAccessFe

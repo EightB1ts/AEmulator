@@ -131,6 +131,13 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=gfxstream_backend");
     println!("cargo:rustc-link-arg=-Wl,-rpath,{gfxstream_build_host}");
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", brew_lib());
+
+    // 4. The same directory, as a compile-time string, for tests that `dlopen` the dylib rather
+    //    than link a symbol out of it. tests/cereal_union_wire.rs calls a C++ symbol that exists
+    //    only in a REAL renderer build — declaring it `extern "C"` would make the crate fail to
+    //    LINK against ci/stub-gfxstream, which is the only gfxstream the macos-14 CI job has. Going
+    //    through dlopen/dlsym keeps that job linking and lets the test skip loudly instead.
+    println!("cargo:rustc-env=AEMU_GFXSTREAM_BUILD_HOST={gfxstream_build_host}");
 }
 
 /// `brew --prefix` (the Homebrew root, no formula). `None` if brew is absent.
