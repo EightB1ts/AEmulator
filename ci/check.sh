@@ -131,7 +131,13 @@ elif [ ! -f "$TP_GFXSTREAM_DYLIB" ]; then
     printf '%s  ! skipped: gfxstream host renderer not built on this machine — run third_party/bootstrap.sh%s\n' \
         "$C_Y" "$C_0"
 else
-    bash "$DOCTOR" || fail "hvf-doctor failed — see its output above"
+    # --fix, deliberately. Steps 1-3 above RELINK aemulator-hvf (cargo test builds the debug
+    # profile), and relinking DISCARDS the ad-hoc hypervisor signature — so a plain `bash "$DOCTOR"`
+    # here fails on a binary this very script just stripped, and the gate can never be green after a
+    # build. --fix re-signs, which is exactly the step `pnpm hvf:build` chains and this script was
+    # missing. The only state it touches is a local ad-hoc code signature; it cannot mask a real
+    # problem, because every other doctor check still fails loudly.
+    bash "$DOCTOR" --fix || fail "hvf-doctor failed — see its output above"
     ok "host graphics stack verified (driver ICD + gfxstream ABI match)"
 fi
 
