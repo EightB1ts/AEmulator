@@ -1,7 +1,7 @@
 diff --git a/src/kosmickrisp/bridge/mtl_command_queue.h b/src/kosmickrisp/bridge/mtl_command_queue.h
 --- a/src/kosmickrisp/bridge/mtl_command_queue.h
 +++ b/src/kosmickrisp/bridge/mtl_command_queue.h
-@@ -42,4 +42,47 @@ void mtl_command_queue_wait_for_drawable(mtl_command_queue *queue,
+@@ -42,4 +42,61 @@
  void mtl_command_queue_signal_drawable(mtl_command_queue *queue,
                                         void *drawable);
  
@@ -45,15 +45,28 @@ diff --git a/src/kosmickrisp/bridge/mtl_command_queue.h b/src/kosmickrisp/bridge
 +void mtl_legacy_command_buffer_encode_signal_event(
 +   mtl_legacy_command_buffer *command_buffer, mtl_event *event, uint64_t value);
 +
-+void mtl_legacy_command_buffer_commit(
-+   mtl_legacy_command_buffer *command_buffer);
++/* Commits, and arms a completion handler that reports -[MTLCommandBuffer error]
++ * through `callback` if the command buffer FAILED on the GPU.
++ *
++ * Not optional, and not symmetric with the MTL4 path. An MTL4 commit reports its
++ * error through MTL4CommitOptions' feedback handler; a legacy command buffer has
++ * no such thing, so a bare -commit: discards the status of every
++ * acceleration-structure build kk issues. Since those builds run on a GPU where
++ * Metal emulates ray tracing — the only reason this queue exists — they are the
++ * likeliest thing in the driver to fault, and the least affordable to lose.
++ *
++ * `callback` runs on a Metal-internal thread once the GPU is done with the
++ * command buffer. It must not block and must not take a lock the submit path
++ * holds; it is called at most once per commit, and only on failure. */
++void mtl_legacy_command_buffer_commit(mtl_legacy_command_buffer *command_buffer,
++                                      mtl_feedback_handler_callback callback,
++                                      void *data);
 +
  #endif /* MTL_COMMAND_QUEUE_H */
 \ No newline at end of file
-diff --git a/src/kosmickrisp/bridge/mtl_command_queue.m b/src/kosmickrisp/bridge/mtl_command_queue.m
 --- a/src/kosmickrisp/bridge/mtl_command_queue.m
 +++ b/src/kosmickrisp/bridge/mtl_command_queue.m
-@@ -128,3 +128,81 @@
+@@ -128,3 +128,107 @@
        [q signalDrawable:d];
     }
  }
@@ -128,14 +141,39 @@ diff --git a/src/kosmickrisp/bridge/mtl_command_queue.m b/src/kosmickrisp/bridge
 +}
 +
 +void
-+mtl_legacy_command_buffer_commit(mtl_legacy_command_buffer *command_buffer)
++mtl_legacy_command_buffer_commit(mtl_legacy_command_buffer *command_buffer,
++                                 mtl_feedback_handler_callback callback,
++                                 void *data)
 +{
 +   @autoreleasepool {
 +      id<MTLCommandBuffer> cmd_buf = (id<MTLCommandBuffer>)command_buffer;
++
++      if (callback) {
++         [cmd_buf addCompletedHandler:^(id<MTLCommandBuffer> cb) {
++            @autoreleasepool {
++               NSError *error = cb.error;
++               if (error == nil)
++                  return;
++
++               /* MTLCommandBufferError and MTL4CommitFeedback's error share the
++                * numbering of enum mtl_command_queue_error, so one callback
++                * signature serves both queues. */
++               struct mtl_feedback_data feedback_data =
++                  (struct mtl_feedback_data){
++                     .user_data = data,
++                     .error_message = error.localizedDescription.UTF8String,
++                     .gpu_start = cb.GPUStartTime,
++                     .gpu_end = cb.GPUEndTime,
++                     .error = (enum mtl_command_queue_error)error.code,
++                  };
++               callback(&feedback_data);
++            }
++         }];
++      }
++
 +      [cmd_buf commit];
 +   }
 +}
-diff --git a/src/kosmickrisp/bridge/mtl_types.h b/src/kosmickrisp/bridge/mtl_types.h
 --- a/src/kosmickrisp/bridge/mtl_types.h
 +++ b/src/kosmickrisp/bridge/mtl_types.h
 @@ -24,6 +24,18 @@ typedef void mtl_command_encoder;
@@ -160,7 +198,7 @@ diff --git a/src/kosmickrisp/bridge/mtl_types.h b/src/kosmickrisp/bridge/mtl_typ
 diff --git a/src/kosmickrisp/bridge/stubs/mtl_command_queue.c b/src/kosmickrisp/bridge/stubs/mtl_command_queue.c
 --- a/src/kosmickrisp/bridge/stubs/mtl_command_queue.c
 +++ b/src/kosmickrisp/bridge/stubs/mtl_command_queue.c
-@@ -65,3 +65,52 @@ void
+@@ -65,3 +65,54 @@
  mtl_command_queue_signal_drawable(mtl_command_queue *queue, void *drawable)
  {
  }
@@ -210,10 +248,11 @@ diff --git a/src/kosmickrisp/bridge/stubs/mtl_command_queue.c b/src/kosmickrisp/
 +}
 +
 +void
-+mtl_legacy_command_buffer_commit(mtl_legacy_command_buffer *command_buffer)
++mtl_legacy_command_buffer_commit(mtl_legacy_command_buffer *command_buffer,
++                                 mtl_feedback_handler_callback callback,
++                                 void *data)
 +{
 +}
-diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
 @@ -50,6 +50,22 @@ kk_cmd_release_resources(struct kk_device *dev, struct kk_cmd_buffer *cmd)
@@ -559,7 +598,88 @@ diff --git a/src/kosmickrisp/vulkan/kk_device.h b/src/kosmickrisp/vulkan/kk_devi
 diff --git a/src/kosmickrisp/vulkan/kk_queue.c b/src/kosmickrisp/vulkan/kk_queue.c
 --- a/src/kosmickrisp/vulkan/kk_queue.c
 +++ b/src/kosmickrisp/vulkan/kk_queue.c
-@@ -38,8 +38,14 @@ rerecord_cmd_buffer(struct kk_cmd_buffer *cmd)
+@@ -18,18 +18,80 @@
+ 
+ #include "vk_cmd_queue.h"
+ 
++#include "util/log.h"
++
+ static void
+ commit_callback(struct mtl_feedback_data *data)
+ {
+    if (data->error != MTL_COMMAND_QUEUE_ERROR_NONE) {
+       struct kk_device *dev = (struct kk_device *)data->user_data;
++
++      /* mesa_loge FIRST, and unconditionally.
++       *
++       * vk_device_set_lost's message does not survive a release build. It goes to
++       * __vk_errorv -> __vk_log_impl, which opens with
++       *
++       *    #if !MESA_DEBUG
++       *       if (unlikely(!instance) ||
++       *           (likely(!instance->enable_debug_logging) && ...no debug_utils
++       *            callbacks... && ...no debug_report callbacks...))
++       *          return;
++       *    #endif
++       *
++       * and then gates the log on `MESA_VK_LOG || instance->enable_debug_logging`.
++       * MESA_VK_LOG is -D'd from meson's `debug` option (src/vulkan/runtime/
++       * meson.build), which is 0 in our buildtype=release driver; kosmickrisp
++       * never sets vk_instance::enable_debug_logging (only the intel drivers do);
++       * and gfxstream's host renderer registers no debug-utils messenger. So the
++       * string is formatted and dropped, every time.
++       *
++       * That is how a Solar Bay run reached
++       *    VkDecoderGlobalState.cpp:8073] FATAL in on_DeviceLost, err code: -4
++       * with not one line anywhere saying WHICH Metal command queue failed or why.
++       * This callback holds the only copy of Metal's reason; print it here or lose
++       * it. */
++      mesa_loge("kosmickrisp: Metal command queue error %s (code %d): %s",
++                mtl_command_queue_error_to_string(data->error),
++                (int)data->error,
++                data->error_message ? data->error_message : "(no message)");
++
+       vk_device_set_lost(
+          &dev->vk, "Command queue error: %s, with message \"%s\"",
+          mtl_command_queue_error_to_string(data->error), data->error_message);
+    }
+ }
+ 
++/* Commit `count` MTL4 command buffers, with error reporting armed for THIS commit.
++ *
++ * MEASURED (scratchpad/hang/mtl4-feedback-lifetime.m, Apple M2, macOS 26A5388g): a
++ * handler added with -[MTL4CommitOptions addFeedbackHandler:] is CONSUMED by the
++ * next -commit:. Add one, commit three times, and the invocation counts are 1, 0,
++ * 0; re-adding restores exactly one more.
++ *
++ * kk used to add a single handler per command buffer and then issue one commit per
++ * acceleration-structure pass boundary plus one for the tail. Only the FIRST of
++ * those was error-checked. Everything after a legacy pass — which is precisely
++ * where the dispatches that CONSUME the freshly built TLAS live, the likeliest
++ * place in the driver to fault — committed with no feedback handler at all, so a
++ * GPU fault there set nothing and logged nothing.
++ *
++ * A command buffer that took a pass with ::mtl4_prefix == 0 and had no tail also
++ * used to register a handler and never consume it, leaving it armed to fire for an
++ * unrelated later commit and attribute its error to the wrong submission.
++ *
++ * Arming per commit fixes both: exactly one handler is added and consumed each
++ * time, and every segment is checked. */
+ static void
++kk_queue_commit(struct kk_queue *queue, struct kk_device *dev,
++                mtl_command_buffer **cmds, uint32_t count)
++{
++   mtl_commit_options_add_feedback_handler(queue->commit_options,
++                                           commit_callback, dev);
++   mtl_command_queue_commit(queue->mtl_handle, cmds, count,
++                            queue->commit_options);
++}
++
++static void
+ rerecord_cmd_buffer(struct kk_cmd_buffer *cmd)
+ {
+    struct kk_device *dev = kk_cmd_buffer_device(cmd);
+@@ -38,8 +100,14 @@
     vk_cmd_queue_execute(&cmd->vk.cmd_queue, kk_cmd_buffer_to_handle(cmd),
                          &dev->vk.dispatch_table);
  
@@ -574,7 +694,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_queue.c b/src/kosmickrisp/vulkan/kk_queue
  
     /* Need to ensure the new buffers allocated at record are resident. */
     kk_device_make_resources_resident(dev);
-@@ -90,18 +96,50 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
+@@ -90,20 +158,44 @@
           util_dynarray_begin(&cmd_buffer->submit_cmd_bufs);
        uint32_t count = util_dynarray_num_elements(&cmd_buffer->submit_cmd_bufs,
                                                    mtl_command_buffer *);
@@ -588,15 +708,11 @@ diff --git a/src/kosmickrisp/vulkan/kk_queue.c b/src/kosmickrisp/vulkan/kk_queue
  
 -      /* Metal complains with empty submissions. */
 -      if (count > 0u) {
-+      /* One handler per command buffer, on the options object the commits below
-+       * all share — so splitting a command buffer's MTL4 stream around a legacy
-+       * pass does not register any more of them than a single commit would. */
-+      if (count > 0u || as_pass_count > 0u) {
-          mtl_commit_options_add_feedback_handler(queue->commit_options,
-                                                  commit_callback, dev);
+-         mtl_commit_options_add_feedback_handler(queue->commit_options,
+-                                                 commit_callback, dev);
 -         mtl_command_queue_commit(queue->mtl_handle, cmds, count,
 -                                  queue->commit_options);
-+      }
++      (void)as_pass_count;
 +
 +      /* Legacy acceleration-structure passes, spliced back into the MTL4 stream
 +       * at the point they were recorded. See struct kk_as_pass. Nothing here runs
@@ -608,8 +724,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_queue.c b/src/kosmickrisp/vulkan/kk_queue
 +
 +         /* Metal complains with empty submissions. */
 +         if (upto > committed) {
-+            mtl_command_queue_commit(queue->mtl_handle, cmds + committed,
-+                                     upto - committed, queue->commit_options);
++            kk_queue_commit(queue, dev, cmds + committed, upto - committed);
 +            committed = upto;
 +         }
 +
@@ -618,14 +733,15 @@ diff --git a/src/kosmickrisp/vulkan/kk_queue.c b/src/kosmickrisp/vulkan/kk_queue
 +          * Both queue operations are ordered against this queue's commits. */
 +         mtl_signal_event(queue->mtl_handle, pass->event,
 +                          KK_AS_PASS_EVENT_READY);
-+         mtl_legacy_command_buffer_commit(pass->cmd_buf);
++         mtl_legacy_command_buffer_commit(pass->cmd_buf, commit_callback, dev);
 +         mtl_wait_for_event(queue->mtl_handle, pass->event,
 +                            KK_AS_PASS_EVENT_DONE);
-+      }
-+
-+      if (count > committed) {
-+         mtl_command_queue_commit(queue->mtl_handle, cmds + committed,
-+                                  count - committed, queue->commit_options);
        }
  
++      if (count > committed) {
++         kk_queue_commit(queue, dev, cmds + committed, count - committed);
++      }
++
        if (cmd_buffer->drawable) {
+          mtl_command_queue_signal_drawable(queue->mtl_handle,
+                                            cmd_buffer->drawable);
