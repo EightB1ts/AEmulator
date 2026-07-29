@@ -1,76 +1,40 @@
 diff --git a/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp b/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
-index f25295f..0b4b1e3 100644
+index f25295f..70bd62e 100644
 --- a/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
 +++ b/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
-@@ -1777,6 +1777,53 @@ VkResult ResourceTracker::on_vkEnumerateInstanceExtensionProperties(
- VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
-     void* context, VkResult, VkPhysicalDevice physdev, const char*, uint32_t* pPropertyCount,
-     VkExtensionProperties* pProperties) {
-+    // ---------------------------------------------------------------------------------------
-+    // THE HOST MUST BE ABLE TO DECODE EVERYTHING THE GUEST CAN ENCODE.
-+    //
-+    // This list is not "extensions that are nice to have". It is the gate that decides which host
-+    // extensions Android is ever told about, and therefore which ones an app can pass to
-+    // vkCreateDevice, and therefore which VkStructureTypes this ICD's encoder will ever put on the
-+    // wire. Every name here is a promise that the host end of the pipe can decode the traffic the
-+    // name unlocks. Four independent things have to be true before a name may be added, and three
-+    // of them are invisible from this file:
-+    //
-+    //  1. THE HOST ADVERTISES IT. Names are intersected against the host's own
-+    //     vkEnumerateDeviceExtensionProperties below (getHostDeviceExtensionIndex), so a name the
-+    //     host lacks is inert. Adding one is harmless but pointless.
-+    //
-+    //  2. THE HOST DECODER HAS A CASE FOR EVERY VkStructureType THE EXTENSION OWNS. Compare
-+    //     reservedmarshal_extension_struct() in this tree's goldfish_vk_reserved_marshaling_guest.cpp
-+    //     against reservedunmarshal_extension_struct() in the HOST tree's
-+    //     goldfish_vk_reserved_marshaling.cpp, BY VALUE and not by spelling -- the two trees are
-+    //     ~20 months apart and the same sType is spelled _EXT on one side and core/_KHR on the
-+    //     other. Two distinct failure modes if you get this wrong:
-+    //       * host sizes the struct but has no unmarshal case -> reservedunmarshal's default arm
-+    //         abort()s the whole VMM. (That set is what the host's VkDecoderCerealGap.inc strips.)
-+    //       * host does not size the struct at all -> reservedunmarshal takes the
-+    //         "unknown struct extension; skip and call on its pNext field" branch WITHOUT advancing
-+    //         the read pointer past the body. The stream desynchronises. This is strictly worse
-+    //         than the abort, and VkDecoderCerealGap.inc does NOT catch it, because its definition
-+    //         is "sized but not decoded", not "encodable but not decodable".
-+    //
-+    //  3. THE HOST DECODER HAS AN OPCODE FOR EVERY DEVICE COMMAND THE EXTENSION ADDS. The guest and
-+    //     host OP_vk* spaces agree on the names they share, but this guest emits 28 opcodes the
-+    //     pinned host decoder has no case for. VkDecoder's default arm does
-+    //     `m_pool.freeAll(); return ptr - buf;` -- it silently stops decoding the rest of the
-+    //     buffer. Not a crash, not a log: truncated command stream, lost work, unsignalled fences.
-+    //
-+    //  4. MESA'S REGISTRY KNOWS THE NAME. gfxstream_vk_device.cpp intersects whatever this function
-+    //     returns against vk_device_extensions[] (generated from src/vulkan/registry/vk.xml) before
-+    //     anything reaches vk_physical_device_init(). A name absent from that table is dropped
-+    //     silently, with no diagnostic.
-+    //
-+    // AND ONE THING THAT IS NOT A SAFETY PROPERTY BUT IS AN HONESTY ONE: if this guest's
-+    // reservedmarshal_extension_struct() has no case for the extension's structs, the encoder's
-+    // extension_struct_size() returns 0, the chain entry is skipped, and the host never sees it.
-+    // The extension is then advertised and enableable but does nothing. Several names below are in
-+    // that state deliberately -- they are the ones a driver-info app should report and an app
-+    // should be able to enable without VK_ERROR_EXTENSION_NOT_PRESENT, and their pNext payloads are
-+    // queries/feature-bits whose loss is a missing capability rather than corruption.
-+    // ---------------------------------------------------------------------------------------
-     std::vector<const char*> allowedExtensionNames = {
-         "VK_KHR_vulkan_memory_model",
-         "VK_KHR_buffer_device_address",
-@@ -1895,6 +1942,113 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
+@@ -1895,6 +1895,82 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
          "VK_KHR_maintenance8",
          "VK_KHR_maintenance9",
          "VK_GOOGLE_display_timing",
-+
-+        // ---- AEmulator: widened against the KosmicKrisp host, see the invariant note above -----
-+        // Derived, not guessed:
-+        //   host advertises 140 device extensions (crates/aemulator-hvf/gfxstream/evidence/
-+        //   host-vulkan-identity.json); the host strips its cereal gap before the guest sees them;
-+        //   77 of the remainder were already above; 1 is in the deliberate host deny-set; 6 more
-+        //   fail invariant (2) or (3) and are named in the DO-NOT-ADD block at the end of this
-+        //   comment. What is left is below.
-+
-+        // Decoded end to end: the host has an unmarshal case for every sType these own, and no new
-+        // device commands (or only commands whose opcode the host decoder already has).
++        // ---------------------------------------------------------------------------------
++        // AEMULATOR: widened so the guest stops discarding extensions the host can serve.
++        //
++        // This list is intersected with the host's advertised set before Android sees a name, so
++        // every name absent here is a capability the guest throws away. Measured effect of the
++        // additions below: guest-visible DEVICE extensions 89 -> 115.
++        //
++        // TWO NAMES ARE DELIBERATELY EXCLUDED, and both crash the boot if added back:
++        //
++        //   VK_KHR_maintenance5   allowed only at ANDROID_API_LEVEL >= 35; this driver is built at
++        //                         34, so mesa generates `.KHR_maintenance5 = false`. ANGLE opts into
++        //                         it unconditionally (supportsMaintenance5), vk_device_init rejects
++        //                         it with VK_ERROR_EXTENSION_NOT_PRESENT, ANGLE fails
++        //                         createDeviceAndQueue, SurfaceFlinger finds no EGLConfig and
++        //                         SIGABRTs in a loop. Proven by single-variable boot test: the safe
++        //                         set boots, the safe set PLUS this one name does not.
++        //   VK_GOOGLE_user_type   has no entry in mesa's ALLOWED_ANDROID_VERSION, and VK_GOOGLE is
++        //                         an Android whitelist prefix, so it generates a literal `false` at
++        //                         EVERY api level. Raising the SDK level does not rescue it. Note
++        //                         its siblings VK_GOOGLE_decorate_string / _hlsl_functionality1 ARE
++        //                         allowed (>=30) — the family looks uniform and is not.
++        //
++        // THE UNDERLYING TRAP, for whoever widens this next: gfxstream REPLACES
++        // vk_common_EnumerateDeviceExtensionProperties with its own (gfxstream_vk_device.cpp), and
++        // the replacement drops the `#ifdef ANDROID_STRICT / vk_android_allowed_device_extensions`
++        // filter that upstream applies in vk_physical_device.c. Enumeration and validation are
++        // therefore ASYMMETRIC: anything supported-but-not-Android-allowed is advertised to the app
++        // and then rejected at vkCreateDevice. Before adding a name, check it in the GENERATED
++        // build/src/vulkan/util/vk_extensions.c, not in the registry.
 +        "VK_AMD_shader_image_load_store_lod",
 +        "VK_EXT_global_priority",
 +        "VK_EXT_global_priority_query",
@@ -82,18 +46,11 @@ index f25295f..0b4b1e3 100644
 +        "VK_EXT_vertex_attribute_divisor",
 +        "VK_GOOGLE_decorate_string",
 +        "VK_GOOGLE_hlsl_functionality1",
-+        "VK_GOOGLE_user_type",
 +        "VK_KHR_global_priority",
 +        "VK_KHR_index_type_uint8",
 +        "VK_KHR_load_store_op_none",
 +        "VK_KHR_robustness2",
 +        "VK_KHR_swapchain_mutable_format",
-+
-+        // Advertised and enableable, but this guest's cereal has no marshal case for their pNext
-+        // structs, so those structs are skipped rather than sent (see the honesty note above).
-+        // Safe -- the skip path is the guest's own, it advances correctly, and the host is never
-+        // handed bytes it cannot read. Listed separately so nobody mistakes "advertised" for
-+        // "plumbed": each of these becomes real only when the guest cereal is regenerated.
 +        "VK_EXT_attachment_feedback_loop_dynamic_state",
 +        "VK_EXT_attachment_feedback_loop_layout",
 +        "VK_EXT_buffer_device_address",
@@ -112,7 +69,6 @@ index f25295f..0b4b1e3 100644
 +        "VK_EXT_swapchain_maintenance1",
 +        "VK_EXT_vertex_attribute_robustness",
 +        "VK_KHR_calibrated_timestamps",
-+        "VK_KHR_maintenance5",
 +        "VK_KHR_maintenance10",
 +        "VK_KHR_present_id",
 +        "VK_KHR_present_id2",
@@ -126,47 +82,6 @@ index f25295f..0b4b1e3 100644
 +        "VK_KHR_swapchain_maintenance1",
 +        "VK_KHR_unified_image_layouts",
 +        "VK_KHR_workgroup_memory_explicit_layout",
-+
-+        // DO NOT ADD, each with the measurement that says why. The host advertises all of these.
-+        //
-+        //   VK_KHR_push_descriptor            vkCmdPushDescriptorSetWithTemplateKHR carries an
-+        //                                     opaque `const void* pData` shaped by a
-+        //                                     VkDescriptorUpdateTemplate; the host cereal cannot
-+        //                                     marshal it and never will. The host advertises it
-+        //                                     ANYWAY (kCerealGapExtensionsKeptAnyway in
-+        //                                     VkDecoderGlobalState.cpp) on the explicit assumption
-+        //                                     that THIS list filters it out. Keep it out.
-+        //   VK_EXT_extended_dynamic_state3    host cereal gap (sized, not decoded) -> abort()
-+        //   VK_EXT_multi_draw                 host cereal gap -> abort()
-+        //   VK_EXT_mutable_descriptor_type    host cereal gap -> abort()
-+        //   VK_KHR_maintenance6               guest emits OP_vkCmdBindDescriptorSets2KHR,
-+        //                                     OP_vkCmdPushConstants2KHR, OP_vkCmdPushDescriptorSet2KHR,
-+        //                                     OP_vkCmdPushDescriptorSetWithTemplate2KHR,
-+        //                                     OP_vkCmdSetDescriptorBufferOffsets2EXT,
-+        //                                     OP_vkCmdBindDescriptorBufferEmbeddedSamplers2EXT --
-+        //                                     none exist in the host decoder. Also upstream's own
-+        //                                     b/514638991 above.
-+        //   VK_KHR_map_memory2                guest emits OP_vkMapMemory2 / OP_vkUnmapMemory2; the
-+        //                                     host decoder has neither.
-+        //   VK_KHR_dynamic_rendering_local_read   guest emits OP_vkCmdSetRenderingAttachmentLocations
-+        //                                     and OP_vkCmdSetRenderingInputAttachmentIndices; the
-+        //                                     host decoder has neither, and the host cannot
-+        //                                     unmarshal its three sTypes either.
-+        //   VK_KHR_shader_expect_assume       Vulkan 1.4 feature struct; guest marshals
-+        //   VK_KHR_shader_float_controls2     it, host does not size OR decode it -> wire desync.
-+        //   VK_KHR_shader_subgroup_rotate     (Not in VkDecoderCerealGap.inc: that file only lists
-+        //                                     sized-but-not-decoded, and these are not sized.)
-+        //   VK_KHR_swapchain                  redundant -- gfxstream_vk_device.cpp forces it on via
-+        //                                     kGuestEmulatedDeviceExtensions and strips it before
-+        //                                     encoding, so listing it here changes nothing.
-+        //   VK_EXT_external_memory_host       host-side memory-import mechanisms. ResourceTracker
-+        //   VK_EXT_external_memory_metal      probes them to decide whether AHB is supported; a
-+        //                                     guest cannot import a host pointer or an MTLBuffer,
-+        //                                     so advertising them to Android is a lie with an
-+        //                                     entrypoint attached.
-+        //   VK_EXT_debug_marker               depends on the instance extension VK_EXT_debug_report,
-+        //                                     which is not in the instance allow-list above, so it
-+        //                                     can be enumerated but never legally enabled.
      };
  
      VkEncoder* enc = (VkEncoder*)context;

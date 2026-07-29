@@ -82,7 +82,10 @@ TP_AEMU_PATCHES=""
 TP_MESA_NAME="mesa"
 TP_MESA_URL="https://gitlab.freedesktop.org/mesa/mesa.git"
 TP_MESA_SHA="4f4b73dfe58171865f95e8ef1b52236ad341dea0"
-TP_MESA_PATCHES=""
+# Widens the GUEST Vulkan ICD's hardcoded device-extension allow-list. Boot-validated: guest-visible
+# device extensions 89 -> 115. See the patch's own comment for the two names that MUST stay out and
+# for the enumerate-vs-validate asymmetry that makes adding names dangerous.
+TP_MESA_PATCHES="mesa"
 
 # Iteration order for bootstrap. aemu before gfxstream: gfxstream's configure consumes aemu's .pc.
 TP_DEPS="AEMU GFXSTREAM MESA"
