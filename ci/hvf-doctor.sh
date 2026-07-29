@@ -364,13 +364,28 @@ esac
 ok "all dynamic dependencies resolve"
 
 step "hypervisor entitlement (hv_vm_create returns HV_DENIED without it)"
-if codesign -d --entitlements :- "$BIN" 2>&1 | grep -q "com.apple.security.hypervisor"; then
-    ok "signed with com.apple.security.hypervisor"
-elif [ "$FIX" -eq 1 ]; then
-    codesign --sign - --entitlements "$ENT" --force "$BIN" || fail "codesign failed"
-    ok "re-signed with com.apple.security.hypervisor"
+# EVERY built profile, not just $BIN. $BIN is target/release, but run-android64.sh and the control
+# harness launch target/DEBUG — so a doctor that checked release only would report "signed" while the
+# binary you are about to boot was stripped, and hv_vm_create would return HV_DENIED with the doctor
+# green. That is not hypothetical: it cost a debugging cycle. `pnpm hvf:sign` already signs both, so
+# checking both is what makes the doctor agree with it.
+ENT_MISSING=""
+for _p in debug release; do
+    _b="$HVF/target/$_p/aemulator-hvf"
+    [ -x "$_b" ] || continue
+    if codesign -d --entitlements :- "$_b" 2>&1 | grep -q "com.apple.security.hypervisor"; then
+        ok "$_p: signed with com.apple.security.hypervisor"
+    elif [ "$FIX" -eq 1 ]; then
+        codesign --sign - --entitlements "$ENT" --force "$_b" || fail "codesign failed on $_b"
+        ok "$_p: re-signed with com.apple.security.hypervisor"
+    else
+        ENT_MISSING="$ENT_MISSING $_p"
+    fi
+done
+if [ -z "$ENT_MISSING" ]; then
+    :
 else
-    fail "binary is NOT signed with the hypervisor entitlement — run:  pnpm hvf:sign
+    fail "NOT signed with the hypervisor entitlement:$ENT_MISSING — run:  pnpm hvf:sign
     This is expected after a plain \`cargo build\`: RELINKING DISCARDS the ad-hoc signature, and only
     \`pnpm hvf:build\` chains the signing step. So a rebuild always costs you a re-sign, and without it
     hv_vm_create returns HV_DENIED. (\`hvf:sign\` signs both debug and release, whichever exist.)"
