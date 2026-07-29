@@ -30,6 +30,17 @@ that this migration introduced and that only shows up under animation.
 > handing an MTL4 descriptor to the pre-Metal-4 size query (`0003`). See *Ray tracing: a real
 > ray-query application in the guest now renders shadows* — including why a 16/16 host gate could not
 > see either of them.
+> **And the guest is no longer stuck at OpenGL ES 2.0.** `VK_EXT_provoking_vertex` is implemented and
+> advertised (`0014-kosmickrisp-provoking-vertex.patch`) — Metal has no provoking-vertex state at all
+> and is first-vertex only, so last-vertex is emulated by decomposing and rotating primitives in the
+> index-rewrite path `kk_unroll_geometry` already owned, with `load_provoking_last` now reading
+> dynamic state instead of a hardcoded constant. ANGLE's `provokingVertex` feature flips to
+> **enabled**, its ES-3.0 gate stops firing, and `SurfaceFlinger` goes from
+> **`OpenGL ES 2.0 (ANGLE 2.1 …)`** to **`OpenGL ES 3.1 (ANGLE 2.1 …)`** — with **45 of 45**
+> EGLConfigs now carrying `EGL_OPENGL_ES3_BIT` where **0 of 45** did. 3DMark re-run: **10 of its 13
+> compatibility verdicts flip** from "not compatible" to offered, including **Solar Bay** and the
+> whole Wild Life family, and **Sling Shot Extreme downloads its data and renders**. See
+> *GLES, re-measured after `VK_EXT_provoking_vertex`* and *3DMark again*.
 > Superseded passages are marked where they stand rather than deleted, because the *reasoning* in
 > them is still how the current numbers were arrived at. Where a number is stated twice, the section
 > nearest the bottom is the current one.
@@ -731,6 +742,65 @@ time the exception list is argued about.)
 guest-visible set independently of the host's 140. That is why the count matters: "some are not
 guest-visible" is true and was wrongly generalised to "none are".)
 
+### 3DMark again, after `VK_EXT_provoking_vertex` — **10 of the 13 verdicts flipped**
+
+Same APK, same guest, same 13 tabs enumerated the same way (`uiautomator dump`, walked in both
+directions because a single-direction swipe walk stops at the end of the pager and silently reports 7
+of 13 — that is how the first pass this session under-counted).
+
+| Test | before (ES 2.0) | after (ES 3.1) |
+|---|---|---|
+| Sling Shot Extreme | not compatible | **offered** (no warning) |
+| Sling Shot | not compatible | **offered** |
+| Solar Bay | not compatible | **offered** |
+| Solar Bay Stress Test | not compatible | **offered** |
+| Solar Bay Extreme | not compatible | **offered** |
+| Solar Bay Extreme Stress Test | not compatible | **offered** |
+| Wild Life | not compatible | **offered** (and badged *Recommended*) |
+| Wild Life Stress Test | not compatible | **offered** |
+| Wild Life Extreme | not compatible | **offered** |
+| Wild Life Extreme Stress Test | not compatible | **offered** |
+| Steel Nomad Light | RAM: needs 8 GB | RAM: needs 8 GB — *unchanged* |
+| Steel Nomad Light Stress Test | RAM: needs 8 GB | RAM: needs 8 GB — *unchanged* |
+| Opacity Micromaps Feature Test | "does not support all the Vulkan features required" | *unchanged* |
+
+The three that did not move are the three whose gate is not the ES version: two are the 4 GB/8 GB RAM
+check (`MemTotal: 4009648 kB`, and 3DMark logs `memory requirement: 4.0 / Memory total: 4.10588` —
+it is reading a real property of this harness), and one is an opacity-micromap Vulkan feature check.
+
+**And they are not merely "offered" — the data downloads and the benchmark runs.** With working NAT
+(`ping 8.8.8.8` 0 % loss, an HTTP 200 from the guest), 3DMark's own in-app DLC installer fetched
+`solar-bay-android-data` and the Sling Shot Extreme data at 1–15 MB/s and the FAB turned from a
+download arrow into a **play** button. Screenshots, committed:
+`screenshots/phasepv-3dmark-solarbay-compatible.png` (offered, no warning, download FAB),
+`screenshots/phasepv-3dmark-solarbay-installed.png` (data installed, FAB is now **play**),
+`screenshots/phasepv-3dmark-slingshot-extreme-rendering.png` (Sling Shot Extreme **rendering its
+ES 3.1 scene**).
+
+**What is NOT claimed: a score.** Neither test was carried to a result in this session, and the two
+failures are different and both are recorded honestly:
+
+- **Solar Bay reaches `PogoVulkanNativeActivity`, shows its LOADING screen, and hangs — twice out of
+  two.** The guest parks in `AddressSpaceStream::speculativeRead` (spinning for a host reply) while
+  every host ASG thread sits in `onUnavailableRead` (waiting for guest work). On the *first* of the
+  two runs this also cost the Metal device: the process later aborted from an unrelated call —
+  `on_vkCreateFence` → `ExternalFencePool::pop` → `vkResetFences` → **`VkDecoderGlobalState.cpp:8073]
+  FATAL in on_DeviceLost, err code: -4`** (`VK_ERROR_DEVICE_LOST`), `SIGABRT`, crash report saved at
+  `scratchpad/pv/prove/aemulator-hvf-2026-07-29-145534.ips`. On the *second* run the identical
+  teardown was clean and the emulator survived — so the hang is deterministic and the device loss is
+  not. gfxstream treats device-lost as unrecoverable and calls `abort()`, so when it does happen one
+  lost device takes the whole VMM with it.
+  **This is a new workload reaching new code, not a regression:** Solar Bay was "not compatible" and
+  therefore unlaunchable in every previous run of this document, so there is no prior state it is
+  worse than. It is a ray-traced Vulkan test, so the suspect is the emulated-RT path, not the
+  provoking-vertex work (Solar Bay is a native Vulkan app and never touches ANGLE). Not root-caused.
+- **Sling Shot Extreme genuinely renders** — several distinct frames of its real ES 3.1 scene — and
+  then stops advancing the presented frame while its own `GLThread` in `lib3dmark_arkan.so` burns
+  ~100 % of one guest vCPU with **no GL, EGL or `vulkan.ranchu` frame on the stack**. The emulator
+  stayed alive and fault-free throughout (0 `Fatal signal`, 0 `Internal Vulkan error`, 0
+  `FATAL in`). So this one is app-side or a 2-vCPU throughput problem, not a driver abort — but it
+  was not carried to a score either, and no score is claimed.
+
 ---
 
 ## The crash this migration shipped, and the guard that now catches it
@@ -894,6 +964,38 @@ stored reference. The stable, falsifiable quantity is the fraction of the floor 
 shadowed; `scratchpad/final/shadowstat.py` computes it, and an all-miss frame has a flat, unimodal
 floor.
 
+### Re-verified again after `VK_EXT_provoking_vertex` (patch `0014`), on two more boots
+
+Every row below was re-measured on the tree that ships patch 0014, because the provoking-vertex work
+edits the geometry-shader unroll — the single most likely place for it to break something.
+
+| Gate | Result |
+|---|---|
+| `bootstrap.sh --verify` | **VERIFIED** — 14 mesa patches all "already applied", gfxstream tree digest matches |
+| `run-gate.sh` | **GATE PASSED**, 3/3 |
+| `run-rq-smoke.sh` | **16/16** |
+| `run-gs-smoke.sh` | **37/37** — the one flagged most at risk |
+| `run-pv-smoke.sh` (new) | **28/28** |
+| `run-sparse-smoke.sh` | **32/35**, the same three expected unbind failures |
+| `ci/check.sh` | **ALL CHECKS PASSED** |
+| `cargo test --workspace` | **245 passed / 0 failed** |
+| Guest ICD rebuilt from the patched tree | byte-identical, `sha256 981caa72…dc4c` — patch 0014 touches only `src/kosmickrisp/**`, so the guest ICD is unchanged and the installed image already matched |
+| Boot | clean ×2 — `Boot is finished` at **18,163 ms** and **14,549 ms**, 0 `Fatal signal`, 0 `Internal Vulkan error`, 0 `Unhandled Vulkan structure type` |
+| Launcher unregressed | **0 differing pixels of 781,632, max ∆ = 0** vs *both* stored known-goods, clock rect masked. After the whole 3DMark session the same frame is still 0 differing pixels of 704,512 below the status bar (max ∆ = 3); only the status-bar band moves, because the clock and the notification icons do |
+| Ray tracing in the guest | `vk-rt-probe` **PASS ×4** (default, `--fragment`, `--indexed`, `--primitives 53583 --indexed --fragment --flags 4`), and **PASS** again on the second boot |
+| Ray-traced shadows still render | `de.saschawillems.vulkanRayQuery`: **SHADOWS PRESENT** on 8/8 captures across both boots; at the comparable orbit phase **5.69 % / 5.67 % / 5.53 %** shadowed floor vs the known-good **5.06–5.66 %** |
+| The original app | `tech.incr.vulkanandroid` still renders its yellow cog, **2.59 %** of pixels changing between consecutive frames (the gear turning) |
+
+**A caution about the ray-query numbers.** Frames caught mid-orbit report 12 %, 36 %, 40 %, 48 %, 68 %
+"shadowed" — the classifier counts a globally dimmer floor as shadow. That is the light moving, not a
+regression; the falsifiable comparison is between frames at the *same* orbit phase (~70 % lit), and
+those land inside the known-good band.
+
+**One caution about the launcher gate that cost time here.** It is only a pixel-identity gate on a
+freshly-booted launcher. Take it *after* a session of tapping and downloading and the status bar
+carries different notification icons and a different clock, which reads as a 3 % regression and is
+not one. Compare below `y = 80`, or take the shot on a clean boot as the first thing you do.
+
 ### The original app finally runs
 
 `tech.incr.vulkanandroid` ("Vulkan Android Test" 1.0.17) is what this whole line of work started
@@ -904,7 +1006,14 @@ installed (`primaryCpuAbi=arm64-v8a`, `versionName=1.0.17`), it loads
 animating (3.7 % of pixels change between consecutive frames = the gear turning), with **0 `Fatal
 signal` and 0 `Internal Vulkan error`**.
 
-### GLES: the guest is capped at OpenGL ES **2.0**, and the blocker is named
+### ~~GLES: the guest is capped at OpenGL ES **2.0**, and the blocker is named~~ — **FIXED. The guest is now OpenGL ES 3.1.**
+
+The diagnosis below was right and the blocker named in it is now gone:
+`0014-kosmickrisp-provoking-vertex.patch` implements and advertises `VK_EXT_provoking_vertex`, ANGLE's
+`provokingVertex` feature flips to **enabled**, and `getMaxSupportedESVersion()` stops limiting to 2.0.
+The measurement is repeated verbatim below the original so the before/after is one comparison and not
+two documents. **Everything in the original diagnosis is retained, unedited, because it is how the fix
+was found.**
 
 `ro.opengles.version = 196609` advertises 3.1, but that property only feeds
 `ConfigurationInfo.reqGlEsVersion`. Measured on-device with `scratchpad/final/gles_probe`:
@@ -924,14 +1033,81 @@ guest ICD allow-list); only the host driver has to implement last-vertex provoki
 was not re-run** — its verdicts are a function of the ES/Vulkan capability set, and that set did not
 move this pass.
 
-This also corrects a claim elsewhere in this document. The `geometryShader` notes say *"so
+~~This also corrects a claim elsewhere in this document. The `geometryShader` notes say *"so
 `androidboot.opengles.version` stays at GLES 3.1"* as though 3.1 were what apps get. It is not: apps
-get **2.0**, and geometry shaders are not what is standing in the way of 3.0.
+get **2.0**, and geometry shaders are not what is standing in the way of 3.0.~~ **Now stale in its
+conclusion but right in its reasoning: 3.1 IS what apps get today, and geometry shaders are still not
+what stands in the way — they would only matter for 3.2.**
+
+### GLES, re-measured after `VK_EXT_provoking_vertex`: the guest reaches **OpenGL ES 3.1**
+
+Two consecutive clean boots (`Boot is finished` at 18,163 ms and 14,549 ms; 0 `Fatal signal`, 0
+`Internal Vulkan error`, 0 `Unhandled Vulkan structure type` on both). The **only** thing that changed
+between the two runs below is patch `0014`; the renderer string is byte-identical across them.
+
+| | before | after |
+|---|---|---|
+| `SurfaceFlinger: version` | `OpenGL ES 2.0 (ANGLE 2.1 git hash: 8d8796935e4faeaf19e67ac0a5949e71a5252e7f)` | `OpenGL ES 3.1 (ANGLE 2.1 git hash: 8d8796935e4faeaf19e67ac0a5949e71a5252e7f)` |
+| `SurfaceFlinger: renderer` | `ANGLE (Apple, Vulkan 1.3.0 (Virtio-GPU GFXStream (Apple M2) (0x00000064)), gfxstream (KosmicKrisp)-26.2.99)` | *identical* |
+| EGLConfigs with `ES3_BIT` | **0 of 45** | **45 of 45** |
+| `eglChooseConfig(ES3_BIT)` | `TRUE, matches=0` | `TRUE, matches=1` |
+| `eglCreateContext(CLIENT_VERSION=3)` | **`EGL_BAD_MATCH`** | **ok** |
+| `GL_VERSION` in that context | — | `OpenGL ES 3.1 (ANGLE 2.1 …)` |
+| `GL_SL_VERSION` | `OpenGL ES GLSL ES 1.00` | `OpenGL ES GLSL ES 3.10` |
+| ANGLE feature `provokingVertex` | `disabled` | **`enabled`** |
+
+`adb shell dumpsys SurfaceFlinger` agrees:
+`GLES: Google Inc. (Apple), ANGLE (Apple, Vulkan 1.3.0 (Virtio-GPU GFXStream (Apple M2) (0x00000064)), gfxstream (KosmicKrisp)-26.2.99), OpenGL ES 3.1 (ANGLE 2.1 …)`.
+
+Note `eglCreateContext(CLIENT_VERSION=2)` **also** now returns a 3.1 context — ES contexts are
+backward compatible, so this is not an ES2 app being broken, it is an ES2 app being handed the
+superset it is allowed to have.
+
+**Why 3.1 and not 3.2.** 3.1 is the ceiling this harness asks for:
+`androidboot.opengles.version=196609` is 3.1 and ANGLE clamps to the requested version. Raising it
+would need ES 3.2, which needs geometry shaders **plus** transform feedback advertised as real Vulkan
+features — `geometryShader` here is emulated and unadvertised, and there is no transform feedback at
+all. So the honest statement is: **the driver-side blocker is gone and the guest now takes everything
+the harness offers.** No second `getMaxSupportedESVersion()` gate appeared behind the first.
 
 ---
 
 ## Known, still open
 
+- **A device-lost anywhere kills the whole VMM, and 3DMark Solar Bay produces one.** New this pass,
+  and it is two separate facts that should be separated when it is fixed:
+  1. **gfxstream's `on_DeviceLost` is `abort()`.** `VkDecoderGlobalState.cpp:8073] FATAL in
+     on_DeviceLost, err code: -4` → `SIGABRT`. There is no path that surfaces `VK_ERROR_DEVICE_LOST`
+     to the guest and lets Android recreate its context; one lost device is a hard process death.
+     Note *where* the abort surfaced — `on_vkCreateFence` → `ExternalFencePool::pop` →
+     `vkResetFences` — which is **not** where the device was lost. The abort is at the next call that
+     happens to check, so the stack is not evidence about the cause.
+  2. **Solar Bay's workload hangs, deterministically — and the device loss is a *separate*, so far
+     non-deterministic, consequence.** This distinction was measured, not assumed, by running it
+     twice:
+     - **The hang is 2 of 2.** Both runs reach `PogoVulkanNativeActivity`, paint the LOADING screen,
+       and stop with the guest parked in `AddressSpaceStream::speculativeRead` (same frame, same
+       `vulkan.ranchu.so+0x18f46c`) while every host ASG thread sits in `onUnavailableRead` — the
+       guest waiting for a reply to work the host will never finish. Guest CPU goes to ~0 %.
+     - **The device loss is 1 of 2.** On the first run, force-stopping the app aborted the VMM with
+       the `on_DeviceLost` above. On the second, the identical force-stop cleaned up normally and the
+       emulator stayed alive with all fault counters still 0. So `VK_ERROR_DEVICE_LOST` is a
+       *sometimes* outcome of the hang, not its cause, and chasing the abort would be chasing the
+       wrong end.
+     Not root-caused, and not narrowed to a Vulkan call. Solar Bay is a **ray-traced** Vulkan test and
+     RT here runs on Metal's *emulated* BVH path (Apple8 has no hardware RT), so that is the first
+     place to look — but that is a hypothesis, not a measurement.
+     It is **not** a regression: Solar Bay reported "not compatible" and was unlaunchable in every
+     previous run recorded in this document, so nothing that used to work stopped working.
+     Log: `scratchpad/pv/prove/boot-solarbay-devicelost.log`, crash report
+     `scratchpad/pv/prove/aemulator-hvf-2026-07-29-145534.ips`.
+- **3DMark Sling Shot Extreme renders but was not carried to a score.** It draws several distinct
+  frames of its real ES 3.1 scene (frame 1 vs frame 5: **74.95 %** of pixels differ) and then stops
+  advancing while its own `GLThread` spins in `lib3dmark_arkan.so`
+  (`eva::concurrent::queue::help_enqueue`, a lock-free enqueue) at ~100 % of one guest vCPU, with **no
+  GL, EGL or `vulkan.ranchu` frame anywhere on the stack**. The emulator stayed alive and fault-free.
+  So the evidence points at the app's own task scheduler on a 2-vCPU guest rather than at the driver
+  — but it was not root-caused, and **no 3DMark score exists for this platform yet**.
 - **The Studio live view costs a readback per guest frame** — but it is **not** blank. An earlier
   draft of this document claimed it had "no pixel source"; that was **wrong** and is corrected here.
   Studio passes `--display`, but the `control` subcommand short-circuits it
@@ -1054,26 +1230,36 @@ get **2.0**, and geometry shaders are not what is standing in the way of 3.0.
     across a primitive and leaves it undefined otherwise. A geometry shader that sets the layer once
     per primitive is therefore exact (measured); one that varies it between the vertices of a single
     primitive is defined in Vulkan and undefined here.
-  - **Provoking vertex is hardcoded to FIRST** in `kk_nir_lower_poly`, which is Vulkan's only mode
+  - ~~**Provoking vertex is hardcoded to FIRST** in `kk_nir_lower_poly`, which is Vulkan's only mode
     without `VK_EXT_provoking_vertex` — not advertised. If that extension is ever added, that
     lowering must read dynamic state or every flat-shaded and strip-decomposed geometry primitive
-    picks the wrong vertex.
-  - **Not tried at all:** the dEQP/CTS geometry-shader groups, any guest workload, and adjacency input
+    picks the wrong vertex.~~ **DONE, and that hazard was the whole job.**
+    `0014-kosmickrisp-provoking-vertex.patch` makes `load_provoking_last` read
+    `root.draw.provoking_last` instead of constant 0, threads the mode into
+    `kk_gs_unroll_static_topology()` (which now both *decomposes in that mode's order* and *rotates*),
+    and rotates the index stream for the strip/fan/tessellation paths. Guarded by
+    `run-pv-smoke.sh` (**28/28**), with `run-gs-smoke.sh` still **37/37**.
+  - **Not tried at all:** the dEQP/CTS geometry-shader groups and adjacency input
     topologies (libpoly's software input assembly handles them, and nothing has exercised them here).
-    So `androidboot.opengles.version` stays at GLES 3.1 (196609): GLES 3.2 needs geometry shaders
-    *plus* transform feedback, and ANGLE would find that immediately.
-- **An app on this guest gets OpenGL ES 2.0, and the one blocker is `VK_EXT_provoking_vertex`.**
-  Measured, not inferred: 0 of 45 EGLConfigs carry `EGL_OPENGL_ES3_BIT` and
-  `eglCreateContext(CLIENT_VERSION=3)` returns `EGL_BAD_MATCH`. ANGLE's
+    ~~any guest workload~~ — no longer true: 3DMark **Sling Shot Extreme** renders in the guest
+    through ANGLE on this path. `androidboot.opengles.version` stays at GLES 3.1 (196609), which is
+    now what apps actually get: GLES 3.2 needs geometry shaders *plus* transform feedback advertised
+    as real features, and ANGLE would find that immediately.
+- ~~**An app on this guest gets OpenGL ES 2.0, and the one blocker is `VK_EXT_provoking_vertex`.**~~
+  **CLOSED — an app on this guest now gets OpenGL ES 3.1.** The diagnosis was exactly right, including
+  that nothing above the driver needed changing. Retained because it is the argument that produced the
+  fix: 0 of 45 EGLConfigs carried `EGL_OPENGL_ES3_BIT` and
+  `eglCreateContext(CLIENT_VERSION=3)` returned `EGL_BAD_MATCH`; ANGLE's
   `Renderer::getMaxSupportedESVersion()` limits to 2.0 when `provokingVertex` is disabled, and that
-  is the only one of its ES-3.0 gates this driver fails. Fixing it means emulating last-vertex
-  provoking on Metal (Metal is first-vertex only), which for `TRIANGLE_STRIP`/`FAN` means rotating
-  indices in the same index-rewrite path `kk_unroll_geometry` already owns — and note that
-  `kk_nir_lower_poly` currently **hardcodes** provoking vertex to FIRST, so that lowering has to
-  learn dynamic state at the same time. Nothing above the driver needs changing.
-- **`geometryShader` is emulated and unadvertised; that is not what caps GLES.** Corrected here
-  because the geometry-shader notes above imply otherwise. GLES 3.2 would need geometry shaders plus
-  transform feedback, but the guest is not at 3.1 to begin with — see the previous bullet.
+  was the only one of its ES-3.0 gates this driver failed. Fixing it meant emulating last-vertex
+  provoking on Metal (Metal is first-vertex only), which for `TRIANGLE_STRIP`/`FAN` meant rotating
+  indices in the same index-rewrite path `kk_unroll_geometry` already owns — and
+  `kk_nir_lower_poly`'s **hardcoded** FIRST had to learn dynamic state at the same time.
+  Now: **45 of 45** configs carry `ES3_BIT`, `CLIENT_VERSION=3` succeeds, `GL_VERSION` is
+  `OpenGL ES 3.1`, `GL_SL_VERSION` is `GLSL ES 3.10`, and no second gate appeared behind the first.
+- **`geometryShader` is emulated and unadvertised; that is not what caps GLES.** Still true, and now
+  it is the *only* thing left between 3.1 and 3.2 (with transform feedback). ~~but the guest is not at
+  3.1 to begin with~~ — it is now.
 - **There is no automated guard that a generated file has not been hand-edited on the GUEST side
   beyond `regen-guest-encoder.sh --reproduce`, and nothing runs it in `ci/check.sh`.** The
   ray-tracing regression this pass shipped precisely because a hand-edit lived in a generated file
@@ -1166,6 +1352,23 @@ bash crates/aemulator-hvf/kosmickrisp/run-gs-smoke.sh
 #   needs primitive restart, which Metal does not have; each has one check that fails specifically
 #   if the restart was dropped rather than unrolled.
 
+# 5d. VK_EXT_provoking_vertex on the HOST driver — the extension that unblocked GLES 3.x. Metal has
+#     NO provoking-vertex state and is first-vertex only, so LAST is emulated by decomposing and
+#     rotating primitives; this reads back the actual per-primitive flat-shaded vertex ID.
+bash crates/aemulator-hvf/kosmickrisp/run-pv-smoke.sh
+#   expect: "28/28". Covers FIRST and LAST across triangle list / strip / fan, line list / strip,
+#   indexed and non-indexed, the static and dynamic (vkCmdSetProvokingVertexModeEXT) paths, and the
+#   geometry-shader unroll — which is where the mode has to be applied TWICE (decompose in that
+#   mode's order AND rotate) and where a regression would land first.
+
+# 5e. The guest's actual GLES ceiling. Requires a booted guest + adb.
+adb shell /data/local/tmp/gles_probe        # built by scratchpad/final/build-gles-probe.sh
+#   expect: "45 configs: 45 with ES1 bit, 45 with ES2 bit, 45 with ES3 bit"
+#           "eglCreateContext(CLIENT_VERSION=3) -> ok"
+#           "GL_VERSION   OpenGL ES 3.1 (ANGLE 2.1 …)"   and   "provokingVertex   enabled"
+#   Before patch 0014 this printed "0 with ES3 bit", "EGL_BAD_MATCH" and "OpenGL ES 2.0".
+adb shell dumpsys SurfaceFlinger | grep -a GLES:
+
 # 6. Android on KosmicKrisp, windowed, in-Vulkan present:
 rm -f crates/aemulator-hvf/testdata/cf64/img/userdata.img
 cd crates/aemulator-hvf && SKIP_PREP_SUPER=1 SKIP_PREP_32BIT=1 SKIP_PREP_APEX=1 \
@@ -1227,12 +1430,14 @@ Everything KosmicKrisp-era in the tables above was measured on **2026-07-29** on
 
 | Pin / artifact | Value |
 |---|---|
-| `TP_MESA_SHA` | `4f4b73dfe58171865f95e8ef1b52236ad341dea0` + `third_party/patches/mesa/0001…0013` |
+| `TP_MESA_SHA` | `4f4b73dfe58171865f95e8ef1b52236ad341dea0` + `third_party/patches/mesa/0001…0014` |
 | `TP_GFXSTREAM_SHA` | `5c5fe539389dc4fc6b0566f8f9785285f0144af9` + `third_party/patches/gfxstream/` |
 | Host cereal | regenerated by `third_party/regen-cereal.sh`, `TP_GFXSTREAM_CODEGEN_REF=838dd1d61`, registry v1.4.348 |
-| Guest ICD | rebuilt `vulkan.ranchu.so`, 1,962,824 B, `sha256 e66cac99…` (stock: 5,218,752 B, `sha256 3910089c…`) |
-| Gates | `bootstrap.sh --verify` ✓ (13 patches), `ci/check.sh` ✓, `cargo test --workspace` 245/0, `run-gate.sh` 3/3, `run-rq-smoke.sh` 16/16 x4 + 4 probe axes, `hvf-doctor.sh` ✓ |
+| Guest ICD | rebuilt `vulkan.ranchu.so`, 1,964,376 B, `sha256 981caa72…dc4c` (stock: 5,218,752 B, `sha256 3910089c…`). Unchanged by patch 0014 — it touches only `src/kosmickrisp/**`. |
+| Gates | `bootstrap.sh --verify` ✓ (**14** patches), `ci/check.sh` ✓, `cargo test --workspace` 245/0, `run-gate.sh` 3/3, `run-rq-smoke.sh` 16/16 x4 + 4 probe axes, `run-gs-smoke.sh` 37/37, `run-pv-smoke.sh` 28/28, `run-sparse-smoke.sh` 32/35 (3 expected), `hvf-doctor.sh` ✓ |
 | Ray tracing | `run-rq-smoke.sh` **16/16 x4 + 4 probe axes, exit 0**; `vk-rt-probe` PASS in the guest in all four modes; the reference ray-query application renders shadows. `MESA_KK_RT_LEGACY_BUILDER=0` reproduces the old 12/16 on demand. |
+| GLES ceiling | **OpenGL ES 3.1** — `SurfaceFlinger: version : OpenGL ES 3.1 (ANGLE 2.1 git hash: 8d8796935e4faeaf19e67ac0a5949e71a5252e7f)`; 45/45 EGLConfigs carry `ES3_BIT`; `GLSL ES 3.10`. Was **2.0** / 0 of 45 / `GLSL ES 1.00` before patch 0014. |
+| 3DMark | **10 of 13** verdicts flipped to offered (Sling Shot ×2, Solar Bay ×4, Wild Life ×4); the 3 that did not are the two 8 GB-RAM checks and the opacity-micromaps feature check. Sling Shot Extreme **renders**. No score was obtained — see the 3DMark section for exactly why, for each test. |
 
 Earlier revisions of this file were written before any of it was committed and said so. It is
 committed now; use `git log` on this path for the history, and treat a number's *section* as its

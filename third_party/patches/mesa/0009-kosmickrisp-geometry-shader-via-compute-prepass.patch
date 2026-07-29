@@ -32,7 +32,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_
 diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
 --- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
-@@ -1084,6 +1084,197 @@ kk_upload_vertex_params(struct kk_cmd_buffer *cmd,
+@@ -1084,6 +1084,284 @@ kk_upload_vertex_params(struct kk_cmd_buffer *cmd,
     return kk_pool_upload(cmd, &params, sizeof(params), 8).gpu;
  }
  
@@ -143,7 +143,11 @@ diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cm
 +kk_upload_gs_static_indices(struct kk_cmd_buffer *cmd,
 +                            const struct poly_gs_info *gsi, uint64_t *addr_out)
 +{
-+   uint32_t count = kk_gs_unroll_static_topology(gsi, NULL);
++   /* Per draw, so the provoking mode is simply read here — the unrolled list is
++    * mode-specific and a pipeline-compile-time cache would have to key on it. */
++   bool provoking_last = kk_rotate_provoking(cmd);
++
++   uint32_t count = kk_gs_unroll_static_topology(gsi, NULL, provoking_last);
 +   if (count == 0u) {
 +      *addr_out = 0u;
 +      return 0u;
@@ -156,7 +160,80 @@ diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cm
 +      return 0u;
 +   }
 +
-+   kk_gs_unroll_static_topology(gsi, (uint32_t *)indices.cpu);
++   kk_gs_unroll_static_topology(gsi, (uint32_t *)indices.cpu, provoking_last);
++   *addr_out = indices.gpu;
++   return count;
++}
++
++/* Give one of the two NON-indexed geometry-shader output shapes an index buffer,
++ * for last-vertex provoking only.
++ *
++ * Both shapes hand Metal the geometry shader's output vertices in emission
++ * order, and Metal reads the flat-shaded value off the first vertex of each
++ * primitive with no state to say otherwise. An index buffer is the only way to
++ * name them in a different order — and naming them is enough, because RAST
++ * derives the output vertex from the vertex ID, which for an indexed draw is the
++ * index VALUE. The draw's instancing is untouched, so poly_gs_rast_instances()
++ * still describes it and the RAST shader's ID inversion is unchanged.
++ *
++ *   STATIC_PER_PRIM      the output is a strip 0..max_indices-1 redrawn per
++ *                        input primitive, so this is the STATIC_INDEXED case
++ *                        over the identity topology: decompose and rotate.
++ *                        Bounded by 3 * max_indices, i.e. 192 indices.
++ *   STATIC_PER_INSTANCE  the output already pattern-matched an independent
++ *                        primitive list, so there is nothing to decompose and
++ *                        this is the rotation alone — but over the whole draw,
++ *                        one index per output vertex (max_indices * input
++ *                        primitives). That is the one place this costs
++ *                        something proportional to the draw, and it is only
++ *                        reached by a flat-shaded last-vertex geometry draw.
++ *
++ * Returns the index count and the address, or 0 if there was nothing to draw or
++ * the pool is exhausted — the caller treats both the way the static-index path
++ * does, by issuing an empty draw rather than a wrong one.
++ */
++static uint32_t
++kk_upload_gs_rotated_indices(struct kk_cmd_buffer *cmd,
++                             const struct poly_gs_info *gsi, uint32_t prims,
++                             uint64_t *addr_out)
++{
++   const enum mesa_prim mode = gsi->mode;
++   const uint32_t per_prim = mesa_vertices_per_prim(mode);
++   const bool strip = gsi->shape == POLY_GS_SHAPE_STATIC_PER_PRIM;
++   uint32_t out_prims;
++
++   *addr_out = 0u;
++   assert(strip || gsi->shape == POLY_GS_SHAPE_STATIC_PER_INSTANCE);
++
++   if (strip)
++      out_prims = u_decomposed_prims_for_vertices(mode, gsi->max_indices);
++   else
++      out_prims = (gsi->max_indices / per_prim) * prims;
++
++   uint32_t count = out_prims * per_prim;
++   if (count == 0u)
++      return 0u;
++
++   struct kk_ptr indices =
++      kk_pool_alloc(cmd, count * sizeof(uint32_t), sizeof(uint32_t));
++   if (unlikely(!indices.gpu))
++      return 0u;
++
++   uint32_t *out = (uint32_t *)indices.cpu;
++   for (uint32_t p = 0u; p < out_prims; ++p) {
++      for (uint32_t v = 0u; v < per_prim; ++v) {
++         uint32_t slot = kk_provoking_slot(v, per_prim, true);
++
++         /* The strip's vertex order is the mode's; the list's is the identity,
++          * which poly_vertex_id_for_topology() would also return, spelled out
++          * here because `mode` is the already-decomposed form there. */
++         out[(p * per_prim) + v] =
++            strip ? poly_vertex_id_for_topology(mode, false /* flatshade first */,
++                                                p, slot, out_prims)
++                  : ((p * per_prim) + slot);
++      }
++   }
++
 +   *addr_out = indices.gpu;
 +   return count;
 +}
@@ -204,33 +281,43 @@ diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cm
 +   uint32_t prims =
 +      u_decomposed_prims_for_vertices(in_prim, draw.grid.size.x);
 +   uint32_t instances = draw.grid.size.y;
++   uint32_t rast_instances =
++      poly_gs_rast_instances(gsi->shape, gsi->max_indices, prims, instances);
++
++   /* An index buffer names the output vertices in an order Metal will read the
++    * provoking one first from; see kk_upload_gs_rotated_indices(). The
++    * instancing and the RAST ID inversion are the same either way, so this is
++    * only ever a different vertex count, index buffer and primitive type. */
++   uint64_t addr = 0u;
++   uint32_t count = 0u;
 +
 +   if (gsi->shape == POLY_GS_SHAPE_STATIC_INDEXED) {
-+      uint64_t addr = 0u;
-+      uint32_t count = kk_upload_gs_static_indices(cmd, gsi, &addr);
-+
++      count = kk_upload_gs_static_indices(cmd, gsi, &addr);
++   } else if (kk_rotate_provoking(cmd) &&
++              mesa_vertices_per_prim(gsi->mode) > 1u) {
++      count = kk_upload_gs_rotated_indices(cmd, gsi, prims, &addr);
++   } else {
 +      return (struct kk_draw_data){
-+         .grid = kk_grid_3d(count, prims * instances, 0u),
-+         .index = {.gpu = {addr, count * sizeof(uint32_t)},
-+                   .el_size_B = sizeof(uint32_t)},
-+         .primitive_type =
-+            mesa_prim_to_mtl_primitive_type(u_decomposed_prim(gsi->mode)),
++         .grid = kk_grid_3d(poly_gs_rast_vertices(gsi->shape, gsi->max_indices,
++                                                  prims, instances),
++                            rast_instances, 0u),
++         .primitive_type = mesa_prim_to_mtl_primitive_type(gsi->mode),
 +      };
 +   }
 +
 +   return (struct kk_draw_data){
-+      .grid = kk_grid_3d(
-+         poly_gs_rast_vertices(gsi->shape, gsi->max_indices, prims, instances),
-+         poly_gs_rast_instances(gsi->shape, gsi->max_indices, prims, instances),
-+         0u),
-+      .primitive_type = mesa_prim_to_mtl_primitive_type(gsi->mode),
++      .grid = kk_grid_3d(count, rast_instances, 0u),
++      .index = {.gpu = {addr, count * sizeof(uint32_t)},
++                .el_size_B = sizeof(uint32_t)},
++      .primitive_type =
++         mesa_prim_to_mtl_primitive_type(u_decomposed_prim(gsi->mode)),
 +   };
 +}
 +
  static void
  kk_upload_tess_params(struct kk_cmd_buffer *cmd, struct poly_tess_params *out,
                        const struct kk_draw_data *draw)
-@@ -1455,25 +1646,6 @@ kk_unroll_geometry(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+@@ -1455,25 +1733,6 @@ kk_unroll_geometry(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
     return true;
  }
  
@@ -256,7 +343,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cm
  static uint32_t
  build_per_draw_upload_mask(struct kk_cmd_buffer *cmd)
  {
-@@ -1490,6 +1662,12 @@ build_per_draw_upload_mask(struct kk_cmd_buffer *cmd)
+@@ -1490,6 +1749,12 @@ build_per_draw_upload_mask(struct kk_cmd_buffer *cmd)
        mask |= BITFIELD_BIT(MESA_SHADER_TESS_EVAL);
     }
  
@@ -269,7 +356,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cm
     struct kk_shader *fragment = cmd->state.shaders[MESA_SHADER_FRAGMENT];
     if (fragment && fragment->info.uses_per_draw_data) {
        mask |= BITFIELD_BIT(MESA_SHADER_FRAGMENT);
-@@ -1707,18 +1885,24 @@ upload_base_instance(struct kk_cmd_buffer *cmd, const struct kk_draw_data *data)
+@@ -1707,18 +1972,24 @@ upload_base_instance(struct kk_cmd_buffer *cmd, const struct kk_draw_data *data)
   * values not present in Metal such as drawID. */
  static void
  kk_upload_per_draw_data(struct kk_cmd_buffer *cmd, uint32_t upload_mask,
@@ -297,7 +384,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cm
        struct kk_ptr tess_args =
           kk_pool_alloc(cmd, sizeof(struct poly_tess_params), 4);
        gfx->per_draw_data.tess_params = tess_args.gpu;
-@@ -1726,6 +1910,10 @@ kk_upload_per_draw_data(struct kk_cmd_buffer *cmd, uint32_t upload_mask,
+@@ -1726,6 +1997,10 @@ kk_upload_per_draw_data(struct kk_cmd_buffer *cmd, uint32_t upload_mask,
           kk_upload_tess_params(cmd, tess_args.cpu, draw);
        }
     }
@@ -308,7 +395,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cm
  
     struct kk_ptr shader_data_gpu =
        kk_pool_upload(cmd, &gfx->per_draw_data, sizeof(gfx->per_draw_data), 8u);
-@@ -1837,16 +2025,133 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
+@@ -1837,16 +2112,143 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
     return draw;
  }
  
@@ -359,6 +446,8 @@ diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cm
 +   if (gsi->shape != POLY_GS_SHAPE_DYNAMIC_INDEXED)
 +      return kk_gs_rast_draw(cmd, draw, in_prim);
 +
++   bool provoking_last = kk_rotate_provoking(cmd);
++
 +   /* Nothing to rasterize, and libkk_unroll_geometry would allocate a zero-sized
 +    * index buffer for it. Return an empty direct draw, which kk_dispatch_draw
 +    * skips. */
@@ -405,12 +494,20 @@ diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cm
 +      .index_buffer_size_el = gfx->gs.index_count,
 +      .in_el_size_B = sizeof(uint32_t),
 +      .out_el_size_B = sizeof(uint32_t),
-+      /* Matches kk_nir_lower_poly()'s lowering of load_provoking_last. */
-+      .flatshade_first = true,
++      /* The same mode kk_nir_lower_poly() feeds load_provoking_last, and the
++       * same order kk_gs_unroll_static_topology() gives the static shape. If
++       * these three disagree the geometry renders, with one vertex's flat value
++       * per primitive replaced by another's. */
++      .flatshade_first = !provoking_last,
 +      .mode = gsi->mode,
 +   };
 +
 +   libkk_unroll_geometry_struct(cmd, kk_grid_1d(1024u), true, unroll);
++
++   if (provoking_last) {
++      kk_rotate_provoking_indices(cmd, dev->heap->gpu + sizeof(struct poly_heap),
++                                  out.gpu, 1u, u_decomposed_prim(gsi->mode));
++   }
 +
 +   draw.grid = kk_grid_indirect(out.gpu);
 +   /* TODO_KOSMICKRISP Self-contained until we have rodata at the device. */
@@ -444,16 +541,37 @@ diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cm
     };
  
     if (data->indirect) {
-@@ -1889,6 +2194,7 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+@@ -1889,24 +2291,59 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
        return;
  
     bool tess = cmd->state.shaders[MESA_SHADER_TESS_EVAL];
 +   bool geom = kk_pipeline_has_gs(cmd->state.shaders[MESA_SHADER_VERTEX]);
++
++   /* Last-vertex provoking has to be resolved by whoever produces the primitive
++    * list the RASTERIZER sees, and with tessellation or a geometry shader that
++    * is kk_launch_tess()/kk_launch_gs(), not this index buffer — here it is only
++    * the input to a software vertex fetch, and rotating it would reorder the
++    * primitives fed INTO those stages. Hence !tess && !geom. */
++   bool provoking_last = !tess && !geom && kk_rotate_provoking(cmd);
  
     /* Unroll geometry. Skip draw if we fail. No need to unroll if tessellation
-     * is present since it also handles unrolling. */
-@@ -1899,14 +2205,33 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
-    if (requires_unroll && !kk_unroll_geometry(cmd, data))
+-    * is present since it also handles unrolling. */
++    * is present since it also handles unrolling.
++    *
++    * Last-vertex provoking joins the list because Metal draws a strip as a
++    * strip: there is no later point at which the wrong vertex can be swapped
++    * back, so the decomposition has to happen even when nothing else asks for
++    * it. It costs one dispatch per draw and is skipped entirely unless a bound
++    * shader can observe the difference — see kk_provoking_observable(). */
+    bool requires_unroll = !tess && (data->prim == MESA_PRIM_TRIANGLE_FAN ||
+                                     requires_index_promotion(data) ||
+                                     requires_unroll_robustness(cmd, data) ||
+-                                    requires_unroll_restart(cmd, data));
+-   if (requires_unroll && !kk_unroll_geometry(cmd, data))
++                                    requires_unroll_restart(cmd, data) ||
++                                    (provoking_last &&
++                                     mesa_vertices_per_prim(data->prim) > 1u));
++   if (requires_unroll && !kk_unroll_geometry(cmd, data, provoking_last))
        return;
  
 +   /* An indirect draw through a geometry shader needs the (primitives,
@@ -526,7 +644,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_debug.h b/src/kosmickrisp/vulkan/kk_debug
 diff --git a/src/kosmickrisp/vulkan/kk_nir_lower_descriptors.c b/src/kosmickrisp/vulkan/kk_nir_lower_descriptors.c
 --- a/src/kosmickrisp/vulkan/kk_nir_lower_descriptors.c
 +++ b/src/kosmickrisp/vulkan/kk_nir_lower_descriptors.c
-@@ -851,8 +851,29 @@ lower_poly(struct nir_builder *b, nir_intrinsic_instr *intrin, void *data)
+@@ -851,8 +851,35 @@ lower_poly(struct nir_builder *b, nir_intrinsic_instr *intrin, void *data)
        return lower_sysval_to_per_draw(b, intrin, vertex_params);
     case nir_intrinsic_load_tess_param_buffer_poly:
        return lower_sysval_to_per_draw(b, intrin, tess_params);
@@ -544,15 +662,21 @@ diff --git a/src/kosmickrisp/vulkan/kk_nir_lower_descriptors.c b/src/kosmickrisp
 +      return lower_sysval_to_root_table(b, intrin, draw.clip_z_coeff);
 +   case nir_intrinsic_load_provoking_last:
 +      /* libpoly's software input assembly asks which vertex of a primitive is
-+       * the provoking one. VK_EXT_provoking_vertex is not advertised, so the
-+       * answer is always "the first" — Vulkan's only mode without it. If that
-+       * extension is ever added, this must read dynamic state instead, or every
-+       * flat-shaded and every strip-decomposed GS primitive silently picks the
-+       * wrong vertex. */
-+      b->cursor = nir_instr_remove(&intrin->instr);
-+      nir_def_rewrite_uses(&intrin->def,
-+                           nir_imm_intN_t(b, 0, intrin->def.bit_size));
-+      return true;
++       * the provoking one. VK_EXT_provoking_vertex IS advertised, so this reads
++       * the mode the draw is in rather than the constant "first" it used to be
++       * lowered to. Getting this wrong is silent: the geometry shader would be
++       * handed gl_in[] in the other mode's order, so a flat-shaded or
++       * strip-decomposed primitive would pick a different vertex here than the
++       * rasterizer does.
++       *
++       * Caught here rather than in try_lower_descriptors_instr for the reason
++       * the load_clip_z_coeff case above spells out — kk_nir_lower_poly runs
++       * last and is the only pass that sees BOTH the geometry MAIN compute
++       * program and the RAST vertex shader, which is created after descriptor
++       * lowering has already run. Both consume this intrinsic
++       * (poly_nir_lower_gs.c's vertex_id_for_topology_class), and they have to
++       * agree. */
++      return lower_sysval_to_root_table(b, intrin, draw.provoking_last);
     case nir_intrinsic_load_first_vertex:
        /* Lower only compute shaders */
        if (*(bool *)data) {
@@ -650,7 +774,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shad
     struct msl_compile_data *data = &shader->msl_data[shader->info.stage];
     ralloc_free((void *)data->entrypoint_name);
     ralloc_free((void *)data->code);
-@@ -759,6 +785,220 @@ kk_nir_lower_vertex_id_zero_base(struct nir_shader *nir)
+@@ -759,6 +785,241 @@ kk_nir_lower_vertex_id_zero_base(struct nir_shader *nir)
     return progress;
  }
  
@@ -714,18 +838,37 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shad
 + * 4,5,6, 5,7,6 for that example — which any API can draw.
 + *
 + * Writes `out` (which must hold the returned count, so call with NULL first) and
-+ * returns the number of unrolled indices. The provoking vertex is the first one,
-+ * matching kk_nir_lower_poly()'s lowering of load_provoking_last to false; if
-+ * VK_EXT_provoking_vertex is ever advertised this has to follow it, or a
-+ * flat-shaded strip picks a different vertex here than the rasterizer does.
++ * returns the number of unrolled indices.
++ *
++ * WHICH vertex ends up first matters, because Metal reads the flat-shaded value
++ * off the first vertex of a primitive and has no state to change that. Two
++ * things follow from provoking_last, and BOTH are needed — one without the other
++ * makes a flat-shaded strip pick a different vertex here than the rasterizer
++ * does, silently:
++ *
++ *   1. the strip is decomposed in that mode's vertex order. libpoly's
++ *      poly_vertex_id_for_topology() already does this; it is the same
++ *      flatshade_first argument the GPU unroll kernel takes. For a triangle
++ *      strip: first gives (0,1,2), (1,3,2); last gives (0,1,2), (2,1,3).
++ *   2. each primitive is then rotated one step to the right, moving the vertex
++ *      Vulkan calls provoking — the LAST one in that order — into slot 0, where
++ *      Metal looks. (0,1,2), (2,1,3) becomes (2,0,1), (3,2,1). A cyclic
++ *      rotation does not change the winding, so facing and culling are
++ *      unaffected; libkk_rotate_provoking does the same thing on the GPU for the
++ *      dynamic-topology shape.
++ *
++ * Rotating is expressed as a shift of the vertex index handed to libpoly rather
++ * than a second pass over `out`, so the two shapes cannot drift apart.
 + */
 +uint32_t
-+kk_gs_unroll_static_topology(const struct poly_gs_info *gsi, uint32_t *out)
++kk_gs_unroll_static_topology(const struct poly_gs_info *gsi, uint32_t *out,
++                             bool provoking_last)
 +{
 +   const enum mesa_prim mode = gsi->mode;
 +   const uint32_t per_prim = mesa_vertices_per_prim(mode);
 +   /* poly writes the restart index as -1 into a uint8_t array. */
 +   const uint8_t restart_index = (uint8_t)~0u;
++   const bool flatshade_first = !provoking_last;
 +   uint32_t written = 0u;
 +
 +   assert(gsi->shape == POLY_GS_SHAPE_STATIC_INDEXED);
@@ -738,8 +881,10 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shad
 +      uint32_t prims = u_decomposed_prims_for_vertices(mode, end - needle);
 +      for (uint32_t i = 0u; i < prims; ++i) {
 +         for (uint32_t v = 0u; v < per_prim; ++v) {
-+            uint32_t id = poly_vertex_id_for_topology(mode, true /* flatshade
-+                                                      first */, i, v, prims);
++            uint32_t slot = kk_provoking_slot(v, per_prim, provoking_last);
++            uint32_t id =
++               poly_vertex_id_for_topology(mode, flatshade_first, i, slot,
++                                           prims);
 +            assert(needle + id < end);
 +            if (out)
 +               out[written] = gsi->topology[needle + id];
@@ -871,7 +1016,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shad
  static VkResult
  kk_compile_shader(struct kk_device *dev, nir_shader *nir,
                    struct kk_shader *prev_stage,
-@@ -793,7 +1033,11 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
+@@ -793,7 +1054,11 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
        /* VBO lowering needs to go here otherwise, the linking step removes all
         * inputs since we read vertex attributes from UBOs. */
        kk_lower_vs_vbo(nir, state, robustness);
@@ -884,7 +1029,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shad
           NIR_PASS(_, nir, poly_nir_lower_vs_before_gs);
           NIR_PASS(_, nir, kk_nir_lower_vertex_id_zero_base);
           nir->info.stage = MESA_SHADER_COMPUTE;
-@@ -829,48 +1073,19 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
+@@ -829,48 +1094,19 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
        NIR_PASS(_, nir, poly_nir_lower_tes, true);
     }
  
@@ -943,7 +1088,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shad
  
     *shader_out = shader;
  
-@@ -1092,6 +1307,29 @@ kk_compile_depth_stencil_state(struct kk_device *device,
+@@ -1092,6 +1328,29 @@ kk_compile_depth_stencil_state(struct kk_device *device,
     return kk_compile_ds_state(device, &info);
  }
  
@@ -973,7 +1118,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shad
  /* Copies all msl shader data to the vertex and gathers information for pipeline
   * compilation. */
  static void
-@@ -1153,20 +1391,21 @@ gather_graphics_pipeline_create_info(
+@@ -1153,20 +1412,21 @@ gather_graphics_pipeline_create_info(
     for (uint32_t i = 1; i < shader_count; ++i) {
        struct kk_shader *s = shaders[i];
        mesa_shader_stage stage = s->info.stage;
@@ -1004,7 +1149,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shad
     }
  
     uint8_t topology = state->ia->primitive_topology;
-@@ -1186,6 +1425,22 @@ gather_graphics_pipeline_create_info(
+@@ -1186,6 +1446,22 @@ gather_graphics_pipeline_create_info(
        } else {
           topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
        }
@@ -1027,7 +1172,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shad
     }
  
     info->vs.topology =
-@@ -1217,6 +1472,21 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+@@ -1217,6 +1493,21 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
        vs_stage = u_bit_scan(&stages_bits);
     }
  
@@ -1049,7 +1194,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shad
     const struct msl_compile_data *vs_data = &vs->msl_data[vs_stage];
     mtl_library *vertex_library = mtl_new_library(
        device->mtl_compiler_handle, vs_data->code, MTL_MATH_MODE_FAST,
-@@ -1311,15 +1581,27 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+@@ -1311,15 +1602,27 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
     nir_shader *nir_shaders[shader_count + 1u];
     struct kk_shader *shaders[shader_count + 1u];
  
@@ -1082,7 +1227,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shad
     }
  
     /* Lower shaders, notably lowering IO. This is a prerequisite for intershader
-@@ -1329,9 +1611,12 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+@@ -1329,9 +1632,12 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
        const struct vk_shader_compile_info *info = &infos[i];
        nir_shader *nir = info->nir;
  
@@ -1098,7 +1243,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shad
  
        msl_preprocess_nir_workarounds(nir, dev->disabled_workarounds);
        kk_lower_nir(dev, nir, emulated_stage, info->robustness,
-@@ -1420,10 +1705,8 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+@@ -1420,10 +1726,8 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
  }
  
  static void
@@ -1110,7 +1255,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shad
     uint32_t entrypoint_length = strlen(data->entrypoint_name) + 1;
     uint32_t code_length = strlen(data->code) + 1;
     blob_write_uint32(blob, entrypoint_length);
-@@ -1432,6 +1715,28 @@ kk_msl_serialize(struct kk_shader *shader, mesa_shader_stage stage,
+@@ -1432,6 +1736,28 @@ kk_msl_serialize(struct kk_shader *shader, mesa_shader_stage stage,
     blob_write_bytes(blob, data->code, code_length);
  }
  
@@ -1139,7 +1284,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shad
  static bool
  kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
                      struct blob *blob)
-@@ -1446,16 +1751,19 @@ kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
+@@ -1446,16 +1772,19 @@ kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
        }
     }
  
@@ -1162,7 +1307,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shad
     data->entrypoint_name = ralloc_array(NULL, char, entrypoint_length);
     if (data->entrypoint_name == NULL)
        return VK_ERROR_OUT_OF_HOST_MEMORY;
-@@ -1473,6 +1781,32 @@ kk_msl_deserialize(struct blob_reader *blob, mesa_shader_stage stage,
+@@ -1473,6 +1802,32 @@ kk_msl_deserialize(struct blob_reader *blob, mesa_shader_stage stage,
     return VK_SUCCESS;
  }
  
@@ -1195,7 +1340,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shad
  static VkResult
  kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
                        uint32_t binary_version,
-@@ -1505,6 +1839,14 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
+@@ -1505,6 +1860,14 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
        }
     }
  
@@ -1265,7 +1410,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shad
           mtl_depth_stencil_state *ds_handle;
           uint32_t pre_render_count;
        } gfx;
-@@ -130,8 +159,36 @@ struct kk_shader {
+@@ -130,8 +159,55 @@ struct kk_shader {
     struct kk_pipeline_handles pipeline;
     struct kk_shader_info info;
     struct msl_compile_data msl_data[MESA_SHADER_STAGES];
@@ -1284,9 +1429,28 @@ diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shad
  
 +/* Rewrite gsi->topology (strips separated by a restart index) as an independent
 + * primitive list, because Metal has no primitive restart. Returns the number of
-+ * indices; fills `out` with them when it is non-NULL. */
++ * indices; fills `out` with them when it is non-NULL.
++ *
++ * provoking_last selects VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT: the
++ * primitives come out in the vertex order that mode defines AND rotated so the
++ * provoking vertex is first, which is where Metal looks for it. */
 +uint32_t kk_gs_unroll_static_topology(const struct poly_gs_info *gsi,
-+                                      uint32_t *out);
++                                      uint32_t *out, bool provoking_last);
++
++/* Which of a primitive's `per_prim` slots the vertex written to slot `slot` has
++ * to come from. Metal reads a flat-shaded value off slot 0 and has no state to
++ * change that, so last-vertex provoking is a rotation by one step: slot 0 takes
++ * the last vertex, and everything else shifts up. Identity for first-vertex
++ * mode, and for points (per_prim == 1) either way.
++ *
++ * One definition because three producers of decomposed primitives have to agree
++ * with each other and with the rasterizer — the CPU unrolls in kk_shader.c and
++ * kk_cmd_draw.c, and libkk_rotate_provoking on the GPU. */
++static inline uint32_t
++kk_provoking_slot(uint32_t slot, uint32_t per_prim, bool provoking_last)
++{
++   return provoking_last ? ((slot + per_prim - 1u) % per_prim) : slot;
++}
 +
 +/* Whether this vertex shader owns a pipeline with a geometry shader in it. Read
 + * off additional_stages_bits rather than a flag of its own so that it survives

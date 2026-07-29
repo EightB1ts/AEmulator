@@ -1,0 +1,390 @@
+diff --git a/src/kosmickrisp/libkk/kk_draws.cl b/src/kosmickrisp/libkk/kk_draws.cl
+--- a/src/kosmickrisp/libkk/kk_draws.cl
++++ b/src/kosmickrisp/libkk/kk_draws.cl
+@@ -88,3 +88,44 @@ libkk_unroll_geometry(
+                         index_buffer_size_el, in_el_size_B, out_el_size_B,
+                         restart_index, flatshade_first, mode, scratch);
+ }
++
++/*
++ * VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT on a first-vertex-provoking GPU.
++ *
++ * Metal reads a flat-shaded value off the FIRST vertex of a primitive and has no
++ * state to change that, so last-vertex mode is implemented by moving the vertex:
++ * rotate every primitive of an already-decomposed index buffer one step to the
++ * right, which puts what was the last vertex in slot 0. A cyclic rotation is a
++ * permutation of the same three (or two) vertices in the same cyclic order, so
++ * the winding — and therefore facing, culling and front/back stencil — comes out
++ * identical; only which vertex Metal calls provoking changes.
++ *
++ * The producer must already have emitted the primitives in LAST-provoking vertex
++ * order (poly_unroll_geometry with flatshade_first = 0, or the tessellator,
++ * which emits independent primitives): rotating the first-provoking order gives
++ * a different, wrong answer for strips, where the two orders differ.
++ *
++ * One workgroup per draw descriptor. Both the index count and the first index
++ * are read off the descriptor rather than passed in, because for an unrolled or
++ * tessellated draw the GPU is the only thing that knows them.
++ */
++KERNEL(1024)
++libkk_rotate_provoking(global uint32_t *indices, constant uint32_t *draw,
++                       uint32_t draw_stride_el, uint32_t per_prim)
++{
++   draw += cl_group_id.x * draw_stride_el;
++
++   /* VkDrawIndexedIndirectCommand: [0] indexCount, [2] firstIndex. */
++   uint prims = draw[0] / per_prim;
++   global uint32_t *base = indices + draw[2];
++
++   for (uint p = cl_local_id.x; p < prims; p += cl_local_size.x) {
++      global uint32_t *prim = base + (p * per_prim);
++      uint last = prim[per_prim - 1u];
++
++      for (uint v = per_prim - 1u; v > 0u; --v)
++         prim[v] = prim[v - 1u];
++
++      prim[0] = last;
++   }
++}
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -39,6 +39,15 @@ struct kk_root_descriptor_table {
+ 
+          float blend_constant[4];
+          float clip_z_coeff;
++
++         /* VkPipelineRasterizationProvokingVertexStateCreateInfoEXT's mode, as
++          * 0/1, for libpoly's software input assembly to read back through
++          * nir_intrinsic_load_provoking_last. In the root table rather than
++          * baked into the shader because the geometry-shader MAIN program that
++          * needs it is a COMPUTE dispatch inside a graphics draw: it sees this
++          * table, not the compute one, and it is compiled once for a pipeline
++          * that the draw state — not the shader key — decides the mode for. */
++         uint32_t provoking_last;
+       } draw;
+       struct {
+          uint32_t base_group[3];
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -22,6 +22,7 @@
+ #include "kosmickrisp/libkk/kk_tessellator.h"
+ 
+ #include "poly/geometry.h"
++#include "poly/prim.h"
+ #include "poly/tessellator.h"
+ 
+ #include "vulkan/runtime/vk_render_pass.h"
+@@ -779,6 +780,91 @@ set_empty_scissor(mtl_render_encoder *enc)
+ #define IS_SHADER_DIRTY(bit)                                                   \
+    (cmd->state.dirty_shaders & BITFIELD_BIT(MESA_SHADER_##bit))
+ 
++/* ------------------------------------------------------- VK_EXT_provoking_vertex
++ *
++ * Metal's provoking vertex is the FIRST vertex of a primitive, and there is no
++ * state anywhere in Metal to change it — measured, not assumed: nothing named
++ * "provoking" exists in the macOS 26/27 Metal headers, MTLRenderPipelineDescriptor
++ * and MTL4RenderPipelineDescriptor answer respondsToSelector: with no for every
++ * spelling of it, and MSL's [[flat]] resolves to vertex 0 for triangle lists,
++ * strips (indexed or not) and line strips alike.
++ *
++ * So VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT is emulated by moving the vertex
++ * into the slot Metal reads: decompose the draw into independent primitives in
++ * the last-provoking vertex order, then rotate each primitive one step right so
++ * its last vertex becomes its first. Rotation is cyclic, so the winding order —
++ * and therefore facing, culling and front/back stencil — is untouched.
++ *
++ * Every producer of a decomposed primitive list does this the same way:
++ *
++ *   plain draws        libkk_unroll_geometry with flatshade_first = 0, then
++ *                      libkk_rotate_provoking (kk_unroll_geometry below). The
++ *                      unroll is FORCED for this when it would not otherwise
++ *                      run, because a strip handed to Metal as a strip cannot be
++ *                      fixed after the fact.
++ *   geometry shaders   the same kernel for a dynamic output topology, and
++ *                      kk_gs_unroll_static_topology() on the CPU for a static
++ *                      one. Both take the mode.
++ *   tessellation       the tessellator already emits independent primitives, so
++ *                      only the rotation is needed.
++ *
++ * The mode ALSO has to reach libpoly's software input assembly, which asks for
++ * it through nir_intrinsic_load_provoking_last; that goes through the root
++ * table (see kk_nir_lower_descriptors.c and root.draw.provoking_last).
++ */
++
++/* Whether the mode is observable at all. See kk_shader_info::provoking_sensitive
++ * — with no flat fragment input and no layer/viewport write, first and last
++ * select different vertices but nothing downstream can tell, and the
++ * decomposition would be pure cost. */
++static bool
++kk_provoking_observable(const struct kk_cmd_buffer *cmd)
++{
++   for (uint32_t s = 0u; s < ARRAY_SIZE(cmd->state.shaders); ++s) {
++      const struct kk_shader *shader = cmd->state.shaders[s];
++      if (shader != NULL && shader->info.provoking_sensitive)
++         return true;
++   }
++
++   return false;
++}
++
++/* Whether this draw's primitives must be rotated. */
++static bool
++kk_rotate_provoking(const struct kk_cmd_buffer *cmd)
++{
++   const struct vk_dynamic_graphics_state *dyn =
++      &cmd->vk.dynamic_graphics_state;
++
++   return dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT &&
++          kk_provoking_observable(cmd);
++}
++
++/* Rotate every primitive of an already-decomposed indexed indirect draw.
++ *
++ * `first_draw` is the first of `draw_count` VkDrawIndexedIndirectCommands and
++ * `indices` the base the draw will hand Metal; the index count and first index
++ * are read off the descriptor on the GPU because for an unrolled or tessellated
++ * draw that is the only place they exist. Points have nothing to rotate.
++ */
++static void
++kk_rotate_provoking_indices(struct kk_cmd_buffer *cmd, uint64_t indices,
++                            uint64_t first_draw, uint32_t draw_count,
++                            enum mesa_prim decomposed)
++{
++   uint32_t per_prim = mesa_vertices_per_prim(decomposed);
++   if (per_prim < 2u)
++      return;
++
++   /* One workgroup per draw descriptor, matching libkk_unroll_geometry's
++    * KERNEL(1024) shape. */
++   libkk_rotate_provoking(cmd, kk_grid_1d(1024u * draw_count), true, indices,
++                          first_draw,
++                          sizeof(VkDrawIndexedIndirectCommand) /
++                             sizeof(uint32_t),
++                          per_prim);
++}
++
+ static bool
+ kk_flush_sample_locations(struct kk_cmd_buffer *cmd)
+ {
+@@ -1495,6 +1581,17 @@ kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
+       desc->root_dirty = true;
+    }
+ 
++   /* Unconditional, not gated on kk_provoking_observable(): this is what
++    * libpoly's software input assembly reads to decide the ORDER it hands
++    * gl_in[] to a geometry shader in, which the Vulkan spec defines for both
++    * modes whether or not anything is flat-shaded. Only the index rotation is
++    * an optimization. */
++   if (IS_DIRTY(RS_PROVOKING_VERTEX)) {
++      desc->root.draw.provoking_last =
++         dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT;
++      desc->root_dirty = true;
++   }
++
+    if (IS_DIRTY(RS_FRONT_FACE) || IS_DIRTY(TS_DOMAIN_ORIGIN) ||
+        IS_SHADER_DIRTY(TESS_CTRL) || IS_SHADER_DIRTY(TESS_EVAL)) {
+       bool front_face_ccw = dyn->rs.front_face != VK_FRONT_FACE_CLOCKWISE;
+@@ -1683,7 +1780,8 @@ kk_predicate_draws(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+ /* Unrolling will always be done through indirect rendering, so if this is
+  * called from non-indirect calls, we will fake it. */
+ static bool
+-kk_unroll_geometry(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
++kk_unroll_geometry(struct kk_cmd_buffer *cmd, struct kk_draw_command *data,
++                   bool provoking_last)
+ {
+    struct kk_device *dev = kk_cmd_buffer_device(cmd);
+ 
+@@ -1711,7 +1809,10 @@ kk_unroll_geometry(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+                        : 0u,
+       .in_el_size_B = data->index_buffer_el_size_B,
+       .out_el_size_B = 4u,
+-      .flatshade_first = true,
++      /* The decomposed vertex ORDER, which differs between the modes for strips
++       * and fans; kk_rotate_provoking_indices() below then does the half libpoly
++       * cannot know about, moving the provoking vertex into Metal's slot 0. */
++      .flatshade_first = !provoking_last,
+       .mode = data->prim,
+    };
+ 
+@@ -1719,6 +1820,13 @@ kk_unroll_geometry(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+                                 info);
+ 
+    data->prim = u_decomposed_prim(data->prim);
++
++   if (provoking_last) {
++      kk_rotate_provoking_indices(cmd,
++                                  dev->heap->gpu + sizeof(struct poly_heap),
++                                  out_draws.gpu, data->draw_count, data->prim);
++   }
++
+    /* TODO_KOSMICKRISP Self-contained until we have rodata at the device. */
+    data->index_buffer.addr = dev->heap->gpu + sizeof(struct poly_heap);
+    data->index_buffer.range = dev->heap->size_B - sizeof(struct poly_heap);
+@@ -2103,6 +2211,16 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
+    libkk_tessellate(cmd, grid_tess, true, info.mode, POLY_TESS_MODE_WITH_COUNTS,
+                     state);
+ 
++   /* The tessellator emits independent primitives already, so unlike a strip
++    * there is nothing to decompose — only the rotation that puts the provoking
++    * vertex where Metal reads it. One descriptor covers the whole tessellated
++    * draw (libkk_prefix_sum_tess writes total/first_index into out_draws), so
++    * one workgroup's worth of rotation covers every patch. */
++   if (kk_rotate_provoking(cmd)) {
++      kk_rotate_provoking_indices(cmd, dev->heap->gpu + sizeof(struct poly_heap),
++                                  gfx->tess.out_draws_addr, 1u, gfx->tess.prim);
++   }
++
+    draw.grid = kk_grid_indirect(gfx->tess.out_draws_addr);
+ 
+    draw.index.gpu.addr = dev->heap->gpu + sizeof(struct poly_heap);
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -237,6 +237,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
+       .EXT_post_depth_coverage = true,
+       .EXT_primitive_restart_index = true,
+       .EXT_primitive_topology_list_restart = true,
++      .EXT_provoking_vertex = true,
+       .EXT_robustness2 = true,
+       .EXT_sample_locations = true,
+       .EXT_shader_atomic_float = true,
+@@ -576,6 +577,28 @@ kk_get_device_features(
+       .primitiveTopologyListRestart = true,
+       .primitiveTopologyPatchListRestart = false,
+ 
++      /* VK_EXT_provoking_vertex.
++       *
++       * Metal's provoking vertex is the FIRST vertex of a primitive and there
++       * is no state anywhere in Metal 3 or Metal 4 to change that — no property
++       * on MTLRenderPipelineDescriptor or MTL4RenderPipelineDescriptor, no
++       * setter on either render command encoder, nothing in the SDK headers.
++       * MSL's [[flat]] is defined as, and measures as, the first vertex.
++       *
++       * Last-vertex mode is therefore emulated: the draw is decomposed into
++       * independent primitives and each one is rotated by a step so that the
++       * vertex Vulkan calls provoking lands in the slot Metal reads. See
++       * kk_rotate_provoking() in kk_cmd_draw.c for where, and why it is only
++       * paid for by draws that can actually observe the difference.
++       *
++       * transformFeedbackPreservesProvokingVertex describes what transform
++       * feedback captures, and this driver has no transform feedback at all
++       * (kk_lower_gs() refuses a geometry shader that uses it and
++       * VK_EXT_transform_feedback is not advertised), so the honest answer is
++       * false rather than a guarantee about a path that does not exist. */
++      .provokingVertexLast = true,
++      .transformFeedbackPreservesProvokingVertex = false,
++
+       /* VK_EXT_shader_replicated_composites */
+       .shaderReplicatedComposites = true,
+ 
+@@ -954,7 +977,29 @@ kk_get_device_properties(const struct kk_physical_device *pdev,
+ 
+       /* VK_EXT_physical_device_drm gets populated later */
+ 
+-      /* VK_EXT_provoking_vertex */
++      /* VK_EXT_provoking_vertex.
++       *
++       * provokingVertexModePerPipeline is true and earned: the mode is read out
++       * of the rasterization state at draw time, so two pipelines bound inside
++       * one render pass may choose different modes. It is also the ONLY thing
++       * claimed — VK_DYNAMIC_STATE_PROVOKING_VERTEX_MODE_EXT is deliberately
++       * not offered (extendedDynamicState3ProvokingVertexMode stays false),
++       * because per-pipeline is what the mode costs here and is all ANGLE, the
++       * consumer this was implemented for, ever asks for.
++       *
++       * transformFeedbackPreservesTriangleFanProvokingVertex describes what
++       * transform feedback captures for a fan, and this driver has no transform
++       * feedback at all: VK_EXT_transform_feedback is not advertised, the
++       * transformFeedbackPreservesProvokingVertex feature that gates this
++       * property is VK_FALSE above, and kk_lower_gs() refuses a geometry shader
++       * that uses it. Nothing can reach the behaviour it describes, so the value
++       * left over from the pin is kept rather than churned.
++       *
++       * IT IS NOT A PROMISE TO BUILD ON. A fan is decomposed and then rotated
++       * (kk_rotate_provoking()), which moves the provoking vertex out of the
++       * position the fan had it in — so whoever implements transform feedback
++       * here has to either make that survive or set this to false in the same
++       * commit. */
+       .provokingVertexModePerPipeline = true,
+       .transformFeedbackPreservesTriangleFanProvokingVertex = true,
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -702,6 +702,27 @@ gather_vs_inputs(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+    return false;
+ }
+ 
++/* A fragment shader observes the provoking vertex exactly when it reads a
++ * flat-interpolated input. After kk_lower_nir()'s nir_lower_io that is either a
++ * bare load_input (which msl_iomap.c emits as interpolation::flat) or a
++ * load_interpolated_input whose barycentric says INTERP_MODE_FLAT. */
++static bool
++gather_fs_flat_inputs(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   bool *flat = data;
++
++   if (intr->intrinsic == nir_intrinsic_load_input) {
++      *flat = true;
++   } else if (intr->intrinsic == nir_intrinsic_load_interpolated_input) {
++      nir_intrinsic_instr *bary = nir_src_as_intrinsic(intr->src[0]);
++      if (bary != NULL && nir_intrinsic_has_interp_mode(bary) &&
++          nir_intrinsic_interp_mode(bary) == INTERP_MODE_FLAT)
++         *flat = true;
++   }
++
++   return false;
++}
++
+ static void
+ gather_shader_info(struct kk_shader *shader, nir_shader *nir,
+                    const struct vk_graphics_pipeline_state *state)
+@@ -709,6 +730,26 @@ gather_shader_info(struct kk_shader *shader, nir_shader *nir,
+    shader->info.stage = nir->info.stage;
+    shader->info.uses_per_draw_data = msl_gather_uses_per_draw_data(nir);
+    shader->info.num_cull_distances = nir->info.cull_distance_array_size;
++
++   /* See kk_shader_info::provoking_sensitive. Deliberately conservative on both
++    * halves: every flat fragment input counts even when the value happens to be
++    * uniform across the primitive, and a layer/viewport write counts even when
++    * it came from multiview lowering (where every vertex of a primitive carries
++    * the same view, so the provoking vertex cannot matter). Both mistakes cost
++    * a decomposition; the opposite mistake renders the wrong colour. */
++   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
++      bool flat = false;
++      nir_shader_intrinsics_pass(nir, gather_fs_flat_inputs, nir_metadata_all,
++                                 &flat);
++      shader->info.provoking_sensitive = flat;
++   } else {
++      const uint64_t from_provoking_vertex =
++         BITFIELD64_BIT(VARYING_SLOT_LAYER) |
++         BITFIELD64_BIT(VARYING_SLOT_VIEWPORT);
++      shader->info.provoking_sensitive =
++         (nir->info.outputs_written & from_provoking_vertex) != 0u;
++   }
++
+    if (nir->info.stage == MESA_SHADER_VERTEX) {
+       nir_shader_intrinsics_pass(nir, gather_vs_inputs, nir_metadata_all,
+                                  &shader->info.vs.attribs_read);
+diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
+--- a/src/kosmickrisp/vulkan/kk_shader.h
++++ b/src/kosmickrisp/vulkan/kk_shader.h
+@@ -68,6 +68,16 @@ struct kk_shader_info {
+    mesa_shader_stage stage;
+    bool uses_per_draw_data;
+ 
++   /* Whether this shader can OBSERVE which vertex of a primitive is the
++    * provoking one: a fragment shader with a flat-interpolated input, or a
++    * pre-rasterization shader that writes gl_Layer/gl_ViewportIndex (both are
++    * taken from the provoking vertex). Metal is first-vertex provoking with no
++    * knob, so VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT costs a primitive
++    * decomposition and an index rotation — a real cost, and one nothing can
++    * tell was skipped when no bound shader sets this. kk_rotate_provoking()
++    * ORs it across the bound stages. */
++   bool provoking_sensitive;
++
+    /* Required for fragment shader cull distance discards. */
+    uint8_t num_cull_distances;
+ 
