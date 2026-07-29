@@ -1,40 +1,59 @@
 /* rq-smoke.c — exercise VK_KHR_ray_query on KosmicKrisp end to end.
  *
  * as-smoke.c stops at "the acceleration structures build". This goes the rest of
- * the way: it builds the same BLAS+TLAS, compiles a compute shader that does a
- * real rayQueryEXT against the TLAS, dispatches it, and reads the intersection
- * back. Eight invocations shoot parallel rays down +Z from (0.25 + i, 0.25, 0);
- * the one triangle in the BLAS spans (0,0,1) (1,0,1) (0,1,1), so ray 0 must hit
- * at t = 1 with barycentrics (0.25, 0.25) and rays 1..7 must miss. Both halves
- * are checked, because a driver that reports "hit" for everything and one that
- * reports "miss" for everything are equally broken and a hit-only test cannot
- * tell them apart.
+ * the way: it builds a BLAS+TLAS, compiles a compute shader that does a real
+ * rayQueryEXT against the TLAS, dispatches it, and reads the intersection back.
+ * Eight invocations shoot parallel rays down +Z from (0.25 + i, 0.25, 0); the one
+ * triangle in the BLAS spans (0,0,1) (1,0,1) (0,1,1), so exactly one ray must hit
+ * at t = 1 with barycentrics (0.25, 0.25) and the other seven must miss. Both
+ * halves are checked, because a driver that reports "hit" for everything and one
+ * that reports "miss" for everything are equally broken and a hit-only test
+ * cannot tell them apart.
  *
- * EXPECT "GATED" ON AN APPLE M2 (Apple8). The driver no longer advertises
- * VK_KHR_ray_query on a device whose acceleration-structure builds cannot be
- * intersected — see kk_ray_tracing.c — so there is nothing to test and that is
- * the pass. Set MESA_KK_FORCE_RAY_TRACING=1 to advertise it anyway and get the
- * measurement the rest of this comment describes.
+ * FOUR MODES, 16 checks each:
  *
- * EXPECT 12/16 ON AN APPLE M2 WITH MESA_KK_FORCE_RAY_TRACING=1, and expect the
- * four failures to be
- * exactly the four hit-path checks. That is not this harness being wrong and it
- * is not the driver's shader path being wrong: the M2 does not implement Metal 4
- * ray tracing, so an acceleration structure built through
- * -[MTL4ComputeCommandEncoder buildAccelerationStructure:...] — which is the
- * only builder a Metal 4 driver can reach — intersects nothing. Metal API
- * validation states it outright; run mtl4-rt-matrix under
- * METAL_DEVICE_WRAPPER_TYPE=1 to see it, and without validation to see the same
- * BLAS+TLAS built on the legacy MTLAccelerationStructureCommandEncoder hit
- * correctly. So on Apple8 the honest reading of a 12/16 is:
+ *   (no argument)          identity transforms; ray 0 hits.
+ *   --transform            the INSTANCE transform translates +2 along x, so ray 2
+ *                          hits and ray 0 does not.
+ *   --triangle-transform   the per-geometry VkTransformMatrixKHR in the BLAS
+ *                          translates +2 along x instead; ray 2 hits.
+ *   --resubmit             submit the same command buffer twice and check the
+ *                          SECOND submission, which on this driver means checking
+ *                          a replay that had to rebuild everything.
  *
- *    advertisement, features, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
- *    SPIR-V OpRayQuery* -> NIR -> MSL, pipeline creation, dispatch, the ray
- *    flags/tmin accessors and the MISS path all work; the hit path is blocked
- *    below the driver.
+ * WHY THE TWO TRANSFORM MODES EXIST. A VkTransformMatrixKHR is a row-major 3x4
+ * and kk asks Metal for MTLMatrixLayoutRowMajor so that the 48 bytes copy across
+ * verbatim rather than being transposed into Metal's historical column-major
+ * packed_float4x3. Identity is its own transpose, so the default mode cannot tell
+ * the two apart — which matters, because the private
+ * -[MTLDevice supportsRayTracingMatrixLayout] answers NO on an Apple M2 and the
+ * obvious reading of that NO is "row-major is ignored here". These modes are the
+ * measurement that settles it in the driver. Feeding row-major bytes and having
+ * them read column-major would put the triangle at y = 1 for all three vertices,
+ * where no ray at y = 0.25 can reach it, so every ray would miss; a hit at ray 2
+ * with t = 1 and barycentrics (0.25, 0.25) means the transform was applied as a
+ * row-major 3x4 and nothing else. The instance and per-triangle transforms are
+ * separate code paths in kk_as_fill_geometry/kk_as_new_descriptor, hence two
+ * modes. mtl-rt-matrix-layout.m is the pure-Metal version of the same question.
  *
- * On Apple9 (M3) and later the four hit checks are the ones that say whether
- * ray tracing actually works, and 16/16 is the bar.
+ * WHAT A PARTIAL PASS MEANS. Which builder the driver used decides this, and
+ * MESA_KK_RT_DEBUG=1 makes it say so:
+ *
+ *   16/16   ray query works: real hit, real miss.
+ *   12/16   every ray missed, and the four failures are exactly the four hit-path
+ *           checks. Everything above the intersection works — advertisement,
+ *           features, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, SPIR-V
+ *           OpRayQuery* -> NIR -> MSL, pipeline creation, dispatch, the ray
+ *           flags/tmin accessors and the MISS path — and the structure itself
+ *           intersects nothing. On an Apple8 GPU that is what the Metal 4 builder
+ *           produces, which is why kk uses the legacy
+ *           MTLAccelerationStructureCommandEncoder there instead. Reproduce it
+ *           deliberately with MESA_KK_RT_LEGACY_BUILDER=0, and see
+ *           mtl4-rt-matrix.m for the pure-Metal control.
+ *   GATED    the driver advertises no ray tracing at all, because it has no
+ *           builder that works on this device. 0 of 16 checks run, and that is
+ *           the correct answer rather than a failure — see kk_ray_tracing.c.
+ *   other    a real driver bug: some rays hit, with the wrong answer.
  *
  * The values checked are the ones Metal can answer. Not checked:
  *   - instanceShaderBindingTableRecordOffset (no shader binding table exists)
@@ -45,6 +64,7 @@
 
 #include <math.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,6 +81,55 @@
    } while (0)
 
 #define NRAYS 8
+
+/* Which transform is non-identity, and therefore which ray must hit. See the
+ * header for why an identity-only test cannot check a matrix layout. */
+enum tx_mode {
+   TX_NONE,
+   TX_INSTANCE,
+   TX_TRIANGLE,
+};
+static enum tx_mode tx_mode = TX_NONE;
+
+/* --resubmit: submit the SAME command buffer a second time and check the second
+ * submission's results, not the first's.
+ *
+ * Metal command buffers are single-shot, so kk answers a resubmission by replaying
+ * the recorded commands into fresh Metal objects (rerecord_cmd_buffer in
+ * kk_queue.c). That replay has to rebuild the acceleration structures too, and on
+ * the legacy builder it has to reconstitute the pass objects and ordering events
+ * from kk_cmd_buffer.h's struct kk_as_pass. Nothing else in this harness goes down
+ * that path.
+ *
+ * The catch, and why this mode does more than submit twice: a replay that drops
+ * the rebuild is INVISIBLE if the structure is unchanged, because the Metal
+ * acceleration structure is a separate object that still holds what the first
+ * submission built. So the first submission is given deliberately wrong instance
+ * data — a decoy custom index and a transform that moves the hit to a different
+ * ray — and the real values are written into the instance buffer only between the
+ * two submissions. The build reads that buffer on the GPU, so the checks below can
+ * only pass if the second submission genuinely rebuilt the TLAS.
+ *
+ * Verified to have teeth: with the pass close removed from rerecord_cmd_buffer,
+ * this mode reports 11/16 and the failures name the decoy. */
+static bool resubmit = false;
+#define DECOY_CUSTOM_INDEX 0xABCDEFu
+
+/* Ray i starts at x = 0.25 + i. Untransformed the triangle covers x in [0,1], so
+ * ray 0 is the one inside it; translated +2 along x it covers [2,3] and ray 2 is.
+ * Either way exactly one ray hits and the rest must miss. */
+static int hit_ray;
+
+/* A row-major VkTransformMatrixKHR that translates +2 along x. The +2 sits in the
+ * last column of the first row, i.e. at float index 3 — which is where a
+ * column-major reader would find the x of the second column instead, and that is
+ * the whole point. */
+static const VkTransformMatrixKHR tx_translate_x2 = {
+   {{1, 0, 0, 2}, {0, 1, 0, 0}, {0, 0, 1, 0}},
+};
+static const VkTransformMatrixKHR tx_identity = {
+   {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}},
+};
 
 static VkDevice dev;
 static VkPhysicalDevice pdev;
@@ -174,8 +243,28 @@ near(float a, float b)
 #define CUSTOM_INDEX 0x123456u
 
 int
-main(void)
+main(int argc, char **argv)
 {
+   for (int i = 1; i < argc; ++i) {
+      if (!strcmp(argv[i], "--transform")) {
+         tx_mode = TX_INSTANCE;
+      } else if (!strcmp(argv[i], "--triangle-transform")) {
+         tx_mode = TX_TRIANGLE;
+      } else if (!strcmp(argv[i], "--resubmit")) {
+         resubmit = true;
+      } else {
+         printf("usage: %s [--transform | --triangle-transform] [--resubmit]\n",
+                argv[0]);
+         return 2;
+      }
+   }
+   hit_ray = tx_mode == TX_NONE ? 0 : 2;
+   printf("mode: %s%s, ray %d must hit\n",
+          tx_mode == TX_NONE         ? "identity transforms"
+          : tx_mode == TX_INSTANCE   ? "INSTANCE transform, translate +2x"
+                                     : "per-TRIANGLE transform, translate +2x",
+          resubmit ? ", resubmitted" : "", hit_ray);
+
    VkApplicationInfo app = {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
       .apiVersion = VK_API_VERSION_1_3,
@@ -228,8 +317,7 @@ main(void)
          "MESA_KK_RT_DEBUG=1 for the driver's own account of the decision, and\n"
          "--matrix for the pure-Metal control that confirms it.\n"
          "\nTo exercise the ray-query path anyway — pipeline, descriptors,\n"
-         "dispatch and the miss path all work, every hit MISSES, which is the\n"
-         "12/16 this harness reported before the gate existed:\n"
+         "dispatch and the miss path all work, every hit MISSES, for a 12/16:\n"
          "    MESA_KK_FORCE_RAY_TRACING=1 ./run-rq-smoke.sh\n"
          "\nGATED: ray tracing is not advertised, 0 of 16 checks run.\n");
       return 0;
@@ -309,6 +397,13 @@ main(void)
       VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
    memcpy(vb.map, verts, sizeof(verts));
 
+   /* Allocated in every mode so that the only difference between them is which
+    * transform is non-identity and which structure carries it. */
+   struct buf txb = make_buf(
+      sizeof(VkTransformMatrixKHR),
+      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+   memcpy(txb.map, &tx_translate_x2, sizeof(tx_translate_x2));
+
    VkAccelerationStructureGeometryKHR tri_geom = {
       .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
       .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
@@ -321,6 +416,8 @@ main(void)
          .vertexStride = 12,
          .maxVertex = 2,
          .indexType = VK_INDEX_TYPE_NONE_KHR,
+         .transformData.deviceAddress =
+            tx_mode == TX_TRIANGLE ? txb.addr : 0,
       },
    };
    VkAccelerationStructureBuildGeometryInfoKHR blas_info = {
@@ -360,18 +457,25 @@ main(void)
    };
    VkDeviceAddress blas_handle = pGetASAddr(dev, &adi);
 
-   /* ---- 5. TLAS: one identity instance of that BLAS ---- */
+   /* ---- 5. TLAS: one instance of that BLAS ---- */
    VkAccelerationStructureInstanceKHR inst_data = {
-      .transform = {{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}},
+      .transform = tx_mode == TX_INSTANCE ? tx_translate_x2 : tx_identity,
       .instanceCustomIndex = CUSTOM_INDEX,
       .mask = 0xFF,
       .flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR,
       .accelerationStructureReference = blas_handle,
    };
+   /* The decoy the first submission of a --resubmit run builds from. Both fields
+    * differ from the real ones and both are checked, so a replay that skipped the
+    * rebuild fails loudly instead of coasting on the first build's result. */
+   VkAccelerationStructureInstanceKHR decoy_data = inst_data;
+   decoy_data.instanceCustomIndex = DECOY_CUSTOM_INDEX;
+   decoy_data.transform = tx_mode == TX_INSTANCE ? tx_identity : tx_translate_x2;
+
    struct buf ib = make_buf(
       sizeof(inst_data),
       VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-   memcpy(ib.map, &inst_data, sizeof(inst_data));
+   memcpy(ib.map, resubmit ? &decoy_data : &inst_data, sizeof(inst_data));
 
    VkAccelerationStructureGeometryKHR inst_geom = {
       .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
@@ -558,7 +662,10 @@ main(void)
 
    VkCommandBufferBeginInfo bi = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+      /* ONE_TIME_SUBMIT is a promise this command buffer will be submitted once,
+       * and kk takes it: a one-time-submit buffer skips command enqueueing
+       * entirely and so cannot be replayed. */
+      .flags = resubmit ? 0u : VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
    };
    CHECK(vkBeginCommandBuffer(cmd, &bi));
 
@@ -621,6 +728,18 @@ main(void)
    };
    CHECK(vkQueueSubmit(queue, 1, &si, fence));
    VkResult wr = vkWaitForFences(dev, 1, &fence, VK_TRUE, 10ull * 1000000000ull);
+
+   if (wr == VK_SUCCESS && resubmit) {
+      /* The first submission has completed, so the instance buffer is safe to
+       * rewrite. Swap the decoy for the real values and wipe the results, so that
+       * everything checked below can only have come from a replay that rebuilt. */
+      memcpy(ib.map, &inst_data, sizeof(inst_data));
+      memset(out.map, 0xCD, NRAYS * sizeof(struct result));
+      CHECK(vkResetFences(dev, 1, &fence));
+      CHECK(vkQueueSubmit(queue, 1, &si, fence));
+      wr = vkWaitForFences(dev, 1, &fence, VK_TRUE, 10ull * 1000000000ull);
+   }
+
    report(wr == VK_SUCCESS, "build + ray query dispatch completed (wait -> %d)",
           wr);
    if (wr != VK_SUCCESS)
@@ -637,29 +756,33 @@ main(void)
              r[i].ray_flags);
    }
 
-   report(r[0].committed_type == 1,
-          "ray 0 committed a TRIANGLE intersection (type=%u, want 1)",
-          r[0].committed_type);
-   report(near(r[0].t, 1.0f), "ray 0 hit distance t = %.6f (want 1.0)", r[0].t);
-   report(r[0].prim == 0 && r[0].geom == 0 && r[0].instance_id == 0,
-          "ray 0 primitive/geometry/instance index = %u/%u/%u (want 0/0/0)",
-          r[0].prim, r[0].geom, r[0].instance_id);
-   report(r[0].custom_index == CUSTOM_INDEX,
-          "ray 0 instanceCustomIndex = 0x%x (want 0x%x)", r[0].custom_index,
-          CUSTOM_INDEX);
-   report(near(r[0].bary_x, 0.25f) && near(r[0].bary_y, 0.25f),
-          "ray 0 barycentrics = (%.6f, %.6f) (want 0.25, 0.25)", r[0].bary_x,
-          r[0].bary_y);
-   report(near(r[0].ray_tmin, 0.001f), "ray 0 rayQueryGetRayTMin = %.6f (want 0.001)",
-          r[0].ray_tmin);
-   report(r[0].ray_flags == 1u,
-          "ray 0 rayQueryGetRayFlags = 0x%x (want 0x1, gl_RayFlagsOpaque)",
-          r[0].ray_flags);
+   const struct result *h = &r[hit_ray];
+
+   report(h->committed_type == 1,
+          "ray %d committed a TRIANGLE intersection (type=%u, want 1)", hit_ray,
+          h->committed_type);
+   report(near(h->t, 1.0f), "ray %d hit distance t = %.6f (want 1.0)", hit_ray,
+          h->t);
+   report(h->prim == 0 && h->geom == 0 && h->instance_id == 0,
+          "ray %d primitive/geometry/instance index = %u/%u/%u (want 0/0/0)",
+          hit_ray, h->prim, h->geom, h->instance_id);
+   report(h->custom_index == CUSTOM_INDEX,
+          "ray %d instanceCustomIndex = 0x%x (want 0x%x)", hit_ray,
+          h->custom_index, CUSTOM_INDEX);
+   report(near(h->bary_x, 0.25f) && near(h->bary_y, 0.25f),
+          "ray %d barycentrics = (%.6f, %.6f) (want 0.25, 0.25)", hit_ray,
+          h->bary_x, h->bary_y);
+   report(near(h->ray_tmin, 0.001f),
+          "ray %d rayQueryGetRayTMin = %.6f (want 0.001)", hit_ray,
+          h->ray_tmin);
+   report(h->ray_flags == 1u,
+          "ray %d rayQueryGetRayFlags = 0x%x (want 0x1, gl_RayFlagsOpaque)",
+          hit_ray, h->ray_flags);
 
    int misses = 0;
-   for (int i = 1; i < NRAYS; i++)
-      misses += (r[i].committed_type == 0);
-   report(misses == NRAYS - 1, "rays 1..%d all missed (%d of %d)", NRAYS - 1,
+   for (int i = 0; i < NRAYS; i++)
+      misses += (i != hit_ray && r[i].committed_type == 0);
+   report(misses == NRAYS - 1, "every ray but %d missed (%d of %d)", hit_ray,
           misses, NRAYS - 1);
 
    /* Cleanup enough to catch a teardown crash. */
@@ -680,18 +803,28 @@ main(void)
     * is how "ray tracing works" gets claimed off a harness that only proved a
     * pipeline compiles. */
    if (fail_count == 0) {
-      printf("VERDICT: ray query works — real hit, real miss.\n");
-   } else if (r[0].committed_type == 0 && misses == NRAYS - 1) {
+      printf("VERDICT: ray query works — real hit, real miss%s.\n",
+             tx_mode == TX_NONE ? ""
+                                : ", and the row-major 3x4 transform was applied "
+                                  "as a row-major 3x4");
+   } else if (h->committed_type == 0 && misses == NRAYS - 1) {
       printf(
          "VERDICT: every ray missed. The shader path is exercised (pipeline,\n"
          "         descriptors, dispatch, flags/tmin accessors, miss path) but\n"
-         "         nothing intersects. On Apple8 and earlier that is expected:\n"
-         "         this GPU has no Metal 4 ray tracing, so the MTL4 acceleration\n"
-         "         structure build produces a structure that traces to nothing.\n"
-         "         Confirm with mtl4-rt-matrix before blaming the driver.\n");
+         "         nothing intersects.%s\n"
+         "         Run with MESA_KK_RT_DEBUG=1 to see which builder the driver\n"
+         "         chose, and mtl4-rt-matrix for the pure-Metal control.\n",
+         tx_mode == TX_NONE
+            ? " The Metal 4 acceleration-structure\n"
+              "         builder does this on every Apple GPU below Apple9, which\n"
+              "         is why kk uses the legacy encoder there."
+            : " Since the identity-transform mode of this\n"
+              "         same harness passes, the transform is what was\n"
+              "         mishandled: 48 row-major bytes read as column-major put\n"
+              "         the triangle where no ray can reach it.");
    } else {
       printf("VERDICT: wrong intersection results — this is a driver bug, not\n"
-             "         the Metal 4 build limitation (some rays did hit).\n");
+             "         a build-path limitation (something did hit).\n");
    }
    return fail_count ? 1 : 0;
 }

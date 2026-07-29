@@ -1,0 +1,631 @@
+diff --git a/src/kosmickrisp/bridge/mtl_command_queue.h b/src/kosmickrisp/bridge/mtl_command_queue.h
+--- a/src/kosmickrisp/bridge/mtl_command_queue.h
++++ b/src/kosmickrisp/bridge/mtl_command_queue.h
+@@ -42,4 +42,47 @@ void mtl_command_queue_wait_for_drawable(mtl_command_queue *queue,
+ void mtl_command_queue_signal_drawable(mtl_command_queue *queue,
+                                        void *drawable);
+ 
++/* ---------------------------------------------------------------------------
++ * MTLCommandQueue, the pre-Metal-4 one.
++ *
++ * This exists for exactly one reason: the acceleration-structure builder that
++ * works on a GPU where Metal emulates ray tracing is reachable only from
++ * -[MTLCommandBuffer accelerationStructureCommandEncoder], and that command
++ * buffer has to come from a legacy queue. Nothing else in KosmicKrisp uses it.
++ *
++ * Ordering against the MTL4CommandQueue is by MTLEvent, and it is real:
++ * MEASURED in crates/aemulator-hvf/kosmickrisp/mtl-legacy-as-probe.m, an MTL4
++ * dispatch still in flight, a legacy build that reads what it wrote, and a
++ * correct intersection, with no CPU wait anywhere between the two queues. The
++ * one subtlety is that -encodeWaitForEvent: and -encodeSignalEvent: are ordered
++ * against the command buffer's ENCODERS by call order, so the wait has to be
++ * encoded before the first encoder is created and the signal after the last one
++ * ends.
++ * ------------------------------------------------------------------------- */
++mtl_legacy_command_queue *mtl_new_legacy_command_queue(mtl_device *device);
++
++void mtl_legacy_command_queue_add_residency_set(mtl_legacy_command_queue *queue,
++                                                mtl_residency_set *set);
++
++void mtl_legacy_command_queue_remove_residency_set(
++   mtl_legacy_command_queue *queue, mtl_residency_set *set);
++
++/* Retained; release with mtl_release() once it has been committed. */
++mtl_legacy_command_buffer *
++mtl_legacy_command_queue_new_command_buffer(mtl_legacy_command_queue *queue);
++
++/* Additive on top of whatever the queue already declares resident. kk relies on
++ * both: the queue-level set for the lifetime and this for the command buffer. */
++void mtl_legacy_command_buffer_use_residency_set(
++   mtl_legacy_command_buffer *command_buffer, mtl_residency_set *set);
++
++void mtl_legacy_command_buffer_encode_wait_for_event(
++   mtl_legacy_command_buffer *command_buffer, mtl_event *event, uint64_t value);
++
++void mtl_legacy_command_buffer_encode_signal_event(
++   mtl_legacy_command_buffer *command_buffer, mtl_event *event, uint64_t value);
++
++void mtl_legacy_command_buffer_commit(
++   mtl_legacy_command_buffer *command_buffer);
++
+ #endif /* MTL_COMMAND_QUEUE_H */
+\ No newline at end of file
+diff --git a/src/kosmickrisp/bridge/mtl_command_queue.m b/src/kosmickrisp/bridge/mtl_command_queue.m
+--- a/src/kosmickrisp/bridge/mtl_command_queue.m
++++ b/src/kosmickrisp/bridge/mtl_command_queue.m
+@@ -128,3 +128,81 @@
+       [q signalDrawable:d];
+    }
+ }
++
++/* MTLCommandQueue, the pre-Metal-4 one. See the header for why it exists. */
++mtl_legacy_command_queue *
++mtl_new_legacy_command_queue(mtl_device *device)
++{
++   @autoreleasepool {
++      id<MTLDevice> dev = (id<MTLDevice>)device;
++      return [dev newCommandQueue];
++   }
++}
++
++void
++mtl_legacy_command_queue_add_residency_set(mtl_legacy_command_queue *queue,
++                                           mtl_residency_set *set)
++{
++   @autoreleasepool {
++      id<MTLCommandQueue> q = (id<MTLCommandQueue>)queue;
++      [q addResidencySet:(id<MTLResidencySet>)set];
++   }
++}
++
++void
++mtl_legacy_command_queue_remove_residency_set(mtl_legacy_command_queue *queue,
++                                              mtl_residency_set *set)
++{
++   @autoreleasepool {
++      id<MTLCommandQueue> q = (id<MTLCommandQueue>)queue;
++      [q removeResidencySet:(id<MTLResidencySet>)set];
++   }
++}
++
++mtl_legacy_command_buffer *
++mtl_legacy_command_queue_new_command_buffer(mtl_legacy_command_queue *queue)
++{
++   @autoreleasepool {
++      id<MTLCommandQueue> q = (id<MTLCommandQueue>)queue;
++      return [[q commandBuffer] retain];
++   }
++}
++
++void
++mtl_legacy_command_buffer_use_residency_set(
++   mtl_legacy_command_buffer *command_buffer, mtl_residency_set *set)
++{
++   @autoreleasepool {
++      id<MTLCommandBuffer> cmd_buf = (id<MTLCommandBuffer>)command_buffer;
++      [cmd_buf useResidencySet:(id<MTLResidencySet>)set];
++   }
++}
++
++void
++mtl_legacy_command_buffer_encode_wait_for_event(
++   mtl_legacy_command_buffer *command_buffer, mtl_event *event, uint64_t value)
++{
++   @autoreleasepool {
++      id<MTLCommandBuffer> cmd_buf = (id<MTLCommandBuffer>)command_buffer;
++      [cmd_buf encodeWaitForEvent:(id<MTLEvent>)event value:value];
++   }
++}
++
++void
++mtl_legacy_command_buffer_encode_signal_event(
++   mtl_legacy_command_buffer *command_buffer, mtl_event *event, uint64_t value)
++{
++   @autoreleasepool {
++      id<MTLCommandBuffer> cmd_buf = (id<MTLCommandBuffer>)command_buffer;
++      [cmd_buf encodeSignalEvent:(id<MTLEvent>)event value:value];
++   }
++}
++
++void
++mtl_legacy_command_buffer_commit(mtl_legacy_command_buffer *command_buffer)
++{
++   @autoreleasepool {
++      id<MTLCommandBuffer> cmd_buf = (id<MTLCommandBuffer>)command_buffer;
++      [cmd_buf commit];
++   }
++}
+diff --git a/src/kosmickrisp/bridge/mtl_types.h b/src/kosmickrisp/bridge/mtl_types.h
+--- a/src/kosmickrisp/bridge/mtl_types.h
++++ b/src/kosmickrisp/bridge/mtl_types.h
+@@ -24,6 +24,18 @@ typedef void mtl_command_encoder;
+ typedef void mtl_blit_encoder;
+ typedef void mtl_compute_encoder;
+ typedef void mtl_render_encoder;
++
++/* The pre-Metal-4 objects, which exist only for acceleration-structure builds:
++ * on a GPU that emulates ray tracing the emulated builder is reachable only
++ * through -[MTLCommandBuffer accelerationStructureCommandEncoder], and that
++ * comes from a legacy id<MTLCommandBuffer> off a legacy id<MTLCommandQueue>.
++ * Distinct typedefs from mtl_command_queue/mtl_command_buffer because they are
++ * different Metal classes and a mix-up would be a silent crash — every handle in
++ * this file is `void`, so the compiler cannot help. */
++typedef void mtl_legacy_command_queue;
++typedef void mtl_legacy_command_buffer;
++typedef void mtl_acceleration_structure_encoder;
++
+ typedef void mtl_event;
+ typedef void mtl_shared_event;
+ typedef void mtl_sampler_descriptor;
+diff --git a/src/kosmickrisp/bridge/stubs/mtl_command_queue.c b/src/kosmickrisp/bridge/stubs/mtl_command_queue.c
+--- a/src/kosmickrisp/bridge/stubs/mtl_command_queue.c
++++ b/src/kosmickrisp/bridge/stubs/mtl_command_queue.c
+@@ -65,3 +65,52 @@ void
+ mtl_command_queue_signal_drawable(mtl_command_queue *queue, void *drawable)
+ {
+ }
++
++/* MTLCommandQueue, the pre-Metal-4 one, used only by the legacy
++ * acceleration-structure builder. */
++mtl_legacy_command_queue *
++mtl_new_legacy_command_queue(mtl_device *device)
++{
++   return NULL;
++}
++
++void
++mtl_legacy_command_queue_add_residency_set(mtl_legacy_command_queue *queue,
++                                           mtl_residency_set *set)
++{
++}
++
++void
++mtl_legacy_command_queue_remove_residency_set(mtl_legacy_command_queue *queue,
++                                              mtl_residency_set *set)
++{
++}
++
++mtl_legacy_command_buffer *
++mtl_legacy_command_queue_new_command_buffer(mtl_legacy_command_queue *queue)
++{
++   return NULL;
++}
++
++void
++mtl_legacy_command_buffer_use_residency_set(
++   mtl_legacy_command_buffer *command_buffer, mtl_residency_set *set)
++{
++}
++
++void
++mtl_legacy_command_buffer_encode_wait_for_event(
++   mtl_legacy_command_buffer *command_buffer, mtl_event *event, uint64_t value)
++{
++}
++
++void
++mtl_legacy_command_buffer_encode_signal_event(
++   mtl_legacy_command_buffer *command_buffer, mtl_event *event, uint64_t value)
++{
++}
++
++void
++mtl_legacy_command_buffer_commit(mtl_legacy_command_buffer *command_buffer)
++{
++}
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -50,6 +50,22 @@ kk_cmd_release_resources(struct kk_device *dev, struct kk_cmd_buffer *cmd)
+    }
+    util_dynarray_clear(&cmd->submit_cmd_bufs);
+ 
++   /* Same for the legacy acceleration-structure passes. Releasing a committed
++    * legacy command buffer is safe — Metal keeps it alive until it retires — and
++    * releasing an uncommitted one (a command buffer recorded and then reset
++    * without ever being submitted) simply drops it. */
++   util_dynarray_foreach(&cmd->as_passes, struct kk_as_pass, pass) {
++      mtl_release(pass->cmd_buf);
++      mtl_release(pass->event);
++   }
++   util_dynarray_clear(&cmd->as_passes);
++
++   if (cmd->as_open.cmd_buf != NULL) {
++      mtl_release(cmd->as_open.cmd_buf);
++      mtl_release(cmd->as_open.event);
++      cmd->as_open = (struct kk_as_pass){0};
++   }
++
+    /* Release all BOs used as descriptor buffers for submissions */
+    util_dynarray_foreach(&cmd->large_bos, struct kk_bo *, bo) {
+       kk_destroy_bo(dev, *bo);
+@@ -86,6 +102,7 @@ kk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
+ 
+    kk_cmd_release_resources(dev, cmd);
+    util_dynarray_fini(&cmd->submit_cmd_bufs);
++   util_dynarray_fini(&cmd->as_passes);
+    util_dynarray_fini(&cmd->large_bos);
+ 
+    vk_free(&pool->vk.alloc, cmd);
+@@ -145,6 +162,7 @@ kk_create_cmd_buffer(struct vk_command_pool *vk_pool,
+    }
+ 
+    cmd->submit_cmd_bufs = UTIL_DYNARRAY_INIT;
++   cmd->as_passes = UTIL_DYNARRAY_INIT;
+    cmd->large_bos = UTIL_DYNARRAY_INIT;
+ 
+    cmd->vk.dynamic_graphics_state.vi = &cmd->state.gfx._dynamic_vi;
+@@ -184,6 +202,10 @@ kk_reset_cmd_buffer_internal(struct kk_cmd_buffer *cmd)
+     * Call twice since post_gfx will be moved to pre_gfx but not ended. */
+    cs_end(cmd);
+    cs_end(cmd);
++   /* kk_cmd_release_resources() releases the open pass too, so this is only for
++    * the event signal, which keeps a released-without-submitting pass and a
++    * submitted one identical in shape. */
++   cs_end_acceleration_structure_pass(cmd);
+    kk_cmd_release_resources(dev, cmd);
+ 
+    kk_reset_encoder_state(cmd->pre_gfx);
+@@ -238,6 +260,10 @@ kk_EndCommandBuffer(VkCommandBuffer commandBuffer)
+    /* Call twice since post_gfx will be moved to pre_gfx but not ended. */
+    cs_end(cmd);
+    cs_end(cmd);
++   /* After the cs_end()s: a legacy pass's ::mtl4_prefix was fixed when it opened,
++    * so an MTL4 command buffer closed here still lands after it, which is where
++    * it belongs. */
++   cs_end_acceleration_structure_pass(cmd);
+ 
+    return vk_command_buffer_end(&cmd->vk);
+ }
+@@ -385,6 +411,100 @@ kk_stop_encoder(struct kk_cmd_buffer *cmd, struct kk_encoder_state *es)
+    es->cmd_buf = NULL;
+ }
+ 
++/* Number of MTL4 command buffers already closed and queued for submission. A
++ * legacy acceleration-structure pass records this at the moment it opens, and
++ * kk_queue_submit uses it to decide how much of the MTL4 stream must retire
++ * before the pass runs. */
++static uint32_t
++kk_mtl4_cmd_buf_count(struct kk_cmd_buffer *cmd)
++{
++   return util_dynarray_num_elements(&cmd->submit_cmd_bufs,
++                                     mtl_command_buffer *);
++}
++
++void
++cs_end_acceleration_structure_pass(struct kk_cmd_buffer *cmd)
++{
++   if (cmd->as_open.cmd_buf == NULL)
++      return;
++
++   /* After the last encoder has ended, so that the GPU signals once the whole
++    * pass has run rather than at some point inside it. */
++   mtl_legacy_command_buffer_encode_signal_event(
++      cmd->as_open.cmd_buf, cmd->as_open.event, KK_AS_PASS_EVENT_DONE);
++
++   util_dynarray_append_typed(&cmd->as_passes, struct kk_as_pass,
++                              cmd->as_open);
++   cmd->as_open = (struct kk_as_pass){0};
++}
++
++mtl_acceleration_structure_encoder *
++cs_get_acceleration_structure(struct kk_cmd_buffer *cmd)
++{
++   struct kk_device *dev = kk_cmd_buffer_device(cmd);
++
++   /* Not an assert: a device that never enabled VK_KHR_acceleration_structure
++    * has no legacy queue, and reaching here means the application built an
++    * acceleration structure without the extension that defines them. */
++   if (dev->as_queue == NULL)
++      return NULL;
++
++   /* Acceleration-structure commands are outside-render-pass-only in Vulkan, and
++    * the pass accounting below depends on that: cs_end() would otherwise tear
++    * down a live render encoder. */
++   assert(cmd->gfx.encoder == NULL);
++
++   /* An open pass can only be extended while nothing else has been recorded
++    * since it opened. Its position in the stream is ::mtl4_prefix, fixed then, so
++    * any MTL4 encoder started or command buffer closed since would have to run
++    * before a pass that must actually run after it. */
++   if (cmd->as_open.cmd_buf != NULL &&
++       (cmd->pre_gfx->encoder != NULL || cmd->post_gfx->encoder != NULL ||
++        kk_mtl4_cmd_buf_count(cmd) != cmd->as_open.mtl4_prefix))
++      cs_end_acceleration_structure_pass(cmd);
++
++   if (cmd->as_open.cmd_buf == NULL) {
++      /* Close the open MTL4 encoder so its command buffer is counted into the
++       * prefix. Twice, for the same reason every other flush site does it. */
++      cs_end(cmd);
++      cs_end(cmd);
++
++      mtl_event *event = mtl_new_event(dev->mtl_handle);
++      mtl_legacy_command_buffer *cmd_buf =
++         event ? mtl_legacy_command_queue_new_command_buffer(dev->as_queue)
++               : NULL;
++
++      if (cmd_buf == NULL) {
++         mtl_release(event);
++         return NULL;
++      }
++
++      mtl_legacy_command_buffer_use_residency_set(cmd_buf,
++                                                  dev->residency_set.handle);
++
++      /* Before the first encoder exists: a legacy command buffer orders event
++       * operations against its encoders by call order, so a wait added later
++       * would wait after the work instead of before it. */
++      mtl_legacy_command_buffer_encode_wait_for_event(cmd_buf, event,
++                                                      KK_AS_PASS_EVENT_READY);
++
++      cmd->as_open = (struct kk_as_pass){
++         .cmd_buf = cmd_buf,
++         .event = event,
++         .mtl4_prefix = kk_mtl4_cmd_buf_count(cmd),
++      };
++   }
++
++   return mtl_new_acceleration_structure_command_encoder(cmd->as_open.cmd_buf);
++}
++
++void
++cs_end_acceleration_structure(mtl_acceleration_structure_encoder *encoder)
++{
++   mtl_end_acceleration_structure_encoding(encoder);
++   mtl_release(encoder);
++}
++
+ void
+ cs_end(struct kk_cmd_buffer *cmd)
+ {
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -218,6 +218,45 @@ struct kk_encoder_state {
+    struct util_dynarray ts_resolves;
+ };
+ 
++/* The two values of a pass's ordering event. Fixed, because the event is created
++ * fresh for each pass. */
++#define KK_AS_PASS_EVENT_READY 1u
++#define KK_AS_PASS_EVENT_DONE  2u
++
++/* One legacy acceleration-structure pass: a pre-Metal-4 MTLCommandBuffer holding
++ * one MTLAccelerationStructureCommandEncoder per build, plus the MTLEvent that
++ * splices it into the Metal 4 stream.
++ *
++ * WHY A SEPARATE COMMAND BUFFER AT ALL. On a GPU where Metal emulates ray
++ * tracing — every Apple GPU below Apple9, including the M2 — the only
++ * acceleration-structure builder that produces a structure anything can
++ * intersect is the legacy -[MTLCommandBuffer accelerationStructureCommandEncoder]
++ * one. That encoder cannot be obtained from an MTL4CommandBuffer, so the build
++ * has to leave kk's Metal 4 stream and come back. See kk_ray_tracing.c.
++ *
++ * HOW IT IS ORDERED. ::mtl4_prefix is the number of MTL4 command buffers already
++ * closed into kk_cmd_buffer::submit_cmd_bufs when the pass opened, i.e. the ones
++ * that must retire before it runs. At submit time kk_queue_submit commits that
++ * many, signals ::event to KK_AS_PASS_EVENT_READY, commits the pass, waits for
++ * KK_AS_PASS_EVENT_DONE, and only then commits the rest. Correctness of the two
++ * dependencies that matter falls out of this: a TLAS build sees the compute
++ * dispatch that converted its instance array (that dispatch is in the prefix),
++ * and a ray query sees the TLAS (its dispatch is after the wait). BLAS-before-
++ * TLAS inside one pass comes from using one encoder per build, since encoders in
++ * a legacy command buffer are strictly ordered.
++ *
++ * WHY THE EVENT IS PER-PASS AND CREATED AT RECORD TIME. A legacy command buffer
++ * orders -encodeWaitForEvent: against its encoders by call order, so the wait has
++ * to be encoded before the first encoder exists — at record time, when no queue
++ * and therefore no shared counter is in sight. A fresh event per pass makes the
++ * values constant instead.
++ */
++struct kk_as_pass {
++   mtl_legacy_command_buffer *cmd_buf;
++   mtl_event *event;
++   uint32_t mtl4_prefix;
++};
++
+ struct kk_cmd_buffer {
+    struct vk_command_buffer vk;
+ 
+@@ -246,6 +285,14 @@ struct kk_cmd_buffer {
+ 
+    struct util_dynarray submit_cmd_bufs;
+ 
++   /* Closed legacy acceleration-structure passes (struct kk_as_pass), in encode
++    * order, and the one still open for recording — ::cmd_buf NULL when there is
++    * none. Both stay empty for every command buffer that does not build an
++    * acceleration structure through the legacy encoder, which is all of them on
++    * hardware where the Metal 4 builder works. */
++   struct util_dynarray as_passes;
++   struct kk_as_pass as_open;
++
+    /* Owned large BOs */
+    struct util_dynarray large_bos;
+ 
+@@ -295,6 +342,20 @@ void cs_start_render(struct kk_cmd_buffer *cmd);
+ mtl_render_encoder *cs_get_render(struct kk_cmd_buffer *cmd);
+ mtl_compute_encoder *cs_get_compute(struct kk_cmd_buffer *cmd, bool pre_gfx);
+ void cs_end(struct kk_cmd_buffer *cmd);
++
++/* A fresh legacy acceleration-structure encoder, opening a new pass if the
++ * current one can no longer be extended. NULL if this device has no legacy
++ * acceleration-structure queue, in which case the caller must not build.
++ *
++ * Every caller must end the encoder it is handed with
++ * cs_end_acceleration_structure() before asking for another, and must not have a
++ * render pass open — Vulkan forbids acceleration-structure commands inside one,
++ * and the pass accounting relies on that. */
++mtl_acceleration_structure_encoder *
++cs_get_acceleration_structure(struct kk_cmd_buffer *cmd);
++void cs_end_acceleration_structure(mtl_acceleration_structure_encoder *encoder);
++/* Close the open pass, if any. Idempotent. */
++void cs_end_acceleration_structure_pass(struct kk_cmd_buffer *cmd);
+ void kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd,
+                                         uint64_t addr);
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -344,6 +344,35 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
+       dev->has_queue = true;
+    }
+ 
++   /* The legacy acceleration-structure queue, but only for a device that both
++    * needs it and could use it. `enabled_extensions` is the honest gate: without
++    * VK_KHR_acceleration_structure no acceleration structure can be created, so
++    * every application that never ray traces pays nothing. */
++   if (pdev->rt.legacy_builder &&
++       dev->vk.enabled_extensions.KHR_acceleration_structure) {
++      dev->as_queue = mtl_new_legacy_command_queue(dev->mtl_handle);
++      if (dev->as_queue == NULL) {
++         result = vk_error(dev, VK_ERROR_INITIALIZATION_FAILED);
++         goto fail_mem_cache;
++      }
++      /* The one residency set kk keeps, on both queues: MEASURED sufficient for a
++       * legacy acceleration-structure build to see heap-placed geometry and its
++       * destination structure, with no -useResource: anywhere
++       * (crates/aemulator-hvf/kosmickrisp/mtl-legacy-as-probe.m). */
++      mtl_legacy_command_queue_add_residency_set(dev->as_queue,
++                                                 dev->residency_set.handle);
++   }
++
++   if (kk_rt_debug()) {
++      mesa_logi("kk ray tracing: VkDevice %p legacy acceleration-structure "
++                "queue %s (device wants the legacy builder: %s, "
++                "VK_KHR_acceleration_structure enabled: %s)",
++                (void *)dev, dev->as_queue ? "created" : "NOT created",
++                pdev->rt.legacy_builder ? "yes" : "no",
++                dev->vk.enabled_extensions.KHR_acceleration_structure ? "yes"
++                                                                     : "no");
++   }
++
+    result = kk_device_init_meta(dev);
+    if (result != VK_SUCCESS)
+       goto fail_mem_cache;
+@@ -372,6 +401,14 @@ fail_query_table:
+ fail_meta:
+    kk_device_finish_meta(dev);
+ fail_mem_cache:
++   /* Before the residency set it was added to, and NULL for the devices that
++    * never made one. */
++   if (dev->as_queue != NULL) {
++      mtl_legacy_command_queue_remove_residency_set(dev->as_queue,
++                                                    dev->residency_set.handle);
++      mtl_release(dev->as_queue);
++      dev->as_queue = NULL;
++   }
+    if (dev->has_queue) {
+       kk_queue_finish(dev, &dev->queue);
+       dev->has_queue = false;
+@@ -416,6 +453,15 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+    if (dev->heap)
+       kk_destroy_bo(dev, dev->heap);
+ 
++   /* Before the residency set it was added to, and NULL for the devices that
++    * never made one. */
++   if (dev->as_queue != NULL) {
++      mtl_legacy_command_queue_remove_residency_set(dev->as_queue,
++                                                    dev->residency_set.handle);
++      mtl_release(dev->as_queue);
++      dev->as_queue = NULL;
++   }
++
+    if (dev->has_queue) {
+       kk_queue_finish(dev, &dev->queue);
+       dev->has_queue = false;
+diff --git a/src/kosmickrisp/vulkan/kk_device.h b/src/kosmickrisp/vulkan/kk_device.h
+--- a/src/kosmickrisp/vulkan/kk_device.h
++++ b/src/kosmickrisp/vulkan/kk_device.h
+@@ -104,6 +104,19 @@ struct kk_device {
+    bool has_queue;
+    struct kk_queue queue;
+ 
++   /* The pre-Metal-4 MTLCommandQueue that legacy acceleration-structure passes
++    * are committed on, ordered against ::queue by MTLEvent. See kk_ray_tracing.c
++    * for why the legacy builder is needed at all and struct kk_as_pass for how
++    * the two queues interleave.
++    *
++    * NULL whenever it is not needed: on hardware where the Metal 4 builder works,
++    * and for any device that did not enable VK_KHR_acceleration_structure, since
++    * without that extension no acceleration structure can be created. Made at
++    * vkCreateDevice rather than lazily, so that command-buffer recording stays
++    * free of a cross-thread first-use race and so that failing to make it is an
++    * ordinary device-creation failure instead of a mid-frame one. */
++   mtl_legacy_command_queue *as_queue;
++
+    struct vk_meta_device meta;
+ 
+    /* Geomtry heap */
+diff --git a/src/kosmickrisp/vulkan/kk_queue.c b/src/kosmickrisp/vulkan/kk_queue.c
+--- a/src/kosmickrisp/vulkan/kk_queue.c
++++ b/src/kosmickrisp/vulkan/kk_queue.c
+@@ -38,8 +38,14 @@ rerecord_cmd_buffer(struct kk_cmd_buffer *cmd)
+    vk_cmd_queue_execute(&cmd->vk.cmd_queue, kk_cmd_buffer_to_handle(cmd),
+                         &dev->vk.dispatch_table);
+ 
++   /* Exactly what kk_EndCommandBuffer does, and for the same reasons — this is a
++    * replay of the recorded commands, so nothing has ended the encoders or closed
++    * the last legacy acceleration-structure pass. Without the pass close, a
++    * resubmitted command buffer would silently drop its final
++    * acceleration-structure builds. */
+    cs_end(cmd);
+    cs_end(cmd);
++   cs_end_acceleration_structure_pass(cmd);
+ 
+    /* Need to ensure the new buffers allocated at record are resident. */
+    kk_device_make_resources_resident(dev);
+@@ -90,18 +96,50 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
+          util_dynarray_begin(&cmd_buffer->submit_cmd_bufs);
+       uint32_t count = util_dynarray_num_elements(&cmd_buffer->submit_cmd_bufs,
+                                                   mtl_command_buffer *);
++      const uint32_t as_pass_count =
++         util_dynarray_num_elements(&cmd_buffer->as_passes, struct kk_as_pass);
+ 
+       if (cmd_buffer->drawable) {
+          mtl_command_queue_wait_for_drawable(queue->mtl_handle,
+                                              cmd_buffer->drawable);
+       }
+ 
+-      /* Metal complains with empty submissions. */
+-      if (count > 0u) {
++      /* One handler per command buffer, on the options object the commits below
++       * all share — so splitting a command buffer's MTL4 stream around a legacy
++       * pass does not register any more of them than a single commit would. */
++      if (count > 0u || as_pass_count > 0u) {
+          mtl_commit_options_add_feedback_handler(queue->commit_options,
+                                                  commit_callback, dev);
+-         mtl_command_queue_commit(queue->mtl_handle, cmds, count,
+-                                  queue->commit_options);
++      }
++
++      /* Legacy acceleration-structure passes, spliced back into the MTL4 stream
++       * at the point they were recorded. See struct kk_as_pass. Nothing here runs
++       * for a command buffer that has none, which is every command buffer on
++       * hardware where the Metal 4 builder works. */
++      uint32_t committed = 0u;
++      util_dynarray_foreach(&cmd_buffer->as_passes, struct kk_as_pass, pass) {
++         const uint32_t upto = MIN2(pass->mtl4_prefix, count);
++
++         /* Metal complains with empty submissions. */
++         if (upto > committed) {
++            mtl_command_queue_commit(queue->mtl_handle, cmds + committed,
++                                     upto - committed, queue->commit_options);
++            committed = upto;
++         }
++
++         /* Signalled only once everything the pass must follow is on the queue,
++          * so that the pass's own -encodeWaitForEvent: really does hold it back.
++          * Both queue operations are ordered against this queue's commits. */
++         mtl_signal_event(queue->mtl_handle, pass->event,
++                          KK_AS_PASS_EVENT_READY);
++         mtl_legacy_command_buffer_commit(pass->cmd_buf);
++         mtl_wait_for_event(queue->mtl_handle, pass->event,
++                            KK_AS_PASS_EVENT_DONE);
++      }
++
++      if (count > committed) {
++         mtl_command_queue_commit(queue->mtl_handle, cmds + committed,
++                                  count - committed, queue->commit_options);
+       }
+ 
+       if (cmd_buffer->drawable) {

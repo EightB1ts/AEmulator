@@ -1,5 +1,4 @@
 diff --git a/src/kosmickrisp/bridge/meson.build b/src/kosmickrisp/bridge/meson.build
-index 8cbfbc9..e53f34f 100644
 --- a/src/kosmickrisp/bridge/meson.build
 +++ b/src/kosmickrisp/bridge/meson.build
 @@ -10,6 +10,7 @@ mtl_bridge_files = files(
@@ -20,10 +19,9 @@ index 8cbfbc9..e53f34f 100644
      'stubs/mtl_buffer.c',
 diff --git a/src/kosmickrisp/bridge/mtl_acceleration_structure.h b/src/kosmickrisp/bridge/mtl_acceleration_structure.h
 new file mode 100644
-index 0000000..e05793d
 --- /dev/null
 +++ b/src/kosmickrisp/bridge/mtl_acceleration_structure.h
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,238 @@
 +/*
 + * Copyright 2025 LunarG, Inc.
 + * Copyright 2025 Google LLC
@@ -45,9 +43,23 @@ index 0000000..e05793d
 + */
 +#define MTL_BUFFER_RANGE_WHOLE ((uint64_t)-1)
 +
++/* One span of buffer bytes, named twice.
++ *
++ * ::address and ::length_B are the Metal 4 naming and the only one Vulkan gives
++ * us directly. ::buffer and ::offset_B are the same bytes named the way the
++ * pre-Metal-4 descriptors insist on them, and are filled in by resolving the
++ * address through kk_device_resolve_buffer_range() — see kk_device_address.h for
++ * why that resolution is possible at all. A range whose ::address is 0 is
++ * absent; a range with a nonzero ::address but a NULL ::buffer has simply not
++ * been resolved, which is a programming error on the legacy path and ignored on
++ * the Metal 4 one.
++ */
 +struct mtl_buffer_range {
 +   uint64_t address;
 +   uint64_t length_B;
++
++   mtl_buffer *buffer;
++   uint64_t offset_B;
 +};
 +
 +enum mtl_acceleration_structure_geometry_type {
@@ -108,7 +120,7 @@ index 0000000..e05793d
 +   uint64_t refit_scratch_buffer_size_B;
 +};
 +
-+/* Descriptors. Both are retained; release them with mtl_release(). */
++/* Descriptors. All are retained; release them with mtl_release(). */
 +mtl_acceleration_structure_descriptor *
 +mtl_new_primitive_acceleration_structure_descriptor(
 +   const struct mtl_acceleration_structure_geometry *geometries,
@@ -116,6 +128,26 @@ index 0000000..e05793d
 +
 +mtl_acceleration_structure_descriptor *
 +mtl_new_instance_acceleration_structure_descriptor(
++   const struct mtl_instance_acceleration_structure_geometry *geometry,
++   enum mtl_acceleration_structure_usage usage);
++
++/* The same two descriptors in their pre-Metal-4 form, reading ::buffer and
++ * ::offset_B out of every mtl_buffer_range instead of ::address and ::length_B.
++ * These are what the emulated builder on an Apple8 GPU accepts; see
++ * kk_ray_tracing.c for why that matters and mtl-legacy-as-probe.m for the
++ * measurements that pinned down their exact requirements.
++ *
++ * The instance flavour is MTLIndirectInstanceAccelerationStructureDescriptor
++ * with a nil instanceCountBuffer, so ::instance_count is the count. MEASURED to
++ * intersect correctly that way, which is what makes it unnecessary for the
++ * caller to find four GPU-writable bytes to hold a count it already knows. */
++mtl_acceleration_structure_descriptor *
++mtl_new_legacy_primitive_acceleration_structure_descriptor(
++   const struct mtl_acceleration_structure_geometry *geometries,
++   uint32_t geometry_count, enum mtl_acceleration_structure_usage usage);
++
++mtl_acceleration_structure_descriptor *
++mtl_new_legacy_instance_acceleration_structure_descriptor(
 +   const struct mtl_instance_acceleration_structure_geometry *geometry,
 +   enum mtl_acceleration_structure_usage usage);
 +
@@ -181,13 +213,58 @@ index 0000000..e05793d
 +   mtl_acceleration_structure *acceleration_structure,
 +   struct mtl_buffer_range destination);
 +
++/* ---------------------------------------------------------------------------
++ * The legacy encoder.
++ *
++ * Unlike Metal 4, where acceleration-structure commands live on the compute
++ * encoder, the pre-Metal-4 model has its own encoder class, obtained from a
++ * legacy MTLCommandBuffer. Commands on ONE such encoder have no documented
++ * ordering with respect to each other, but encoders within one command buffer
++ * are strictly ordered — so a caller that needs a TLAS build to see its BLAS
++ * builds gets that by using one encoder per build, which is what
++ * kk_acceleration_structure.c does.
++ *
++ * Retained; end it with mtl_end_acceleration_structure_encoding() and then
++ * mtl_release() it, exactly like the compute and render encoders.
++ * ------------------------------------------------------------------------- */
++mtl_acceleration_structure_encoder *
++mtl_new_acceleration_structure_command_encoder(
++   mtl_legacy_command_buffer *command_buffer);
++
++void mtl_end_acceleration_structure_encoding(
++   mtl_acceleration_structure_encoder *encoder);
++
++void mtl_legacy_build_acceleration_structure(
++   mtl_acceleration_structure_encoder *encoder,
++   mtl_acceleration_structure *acceleration_structure,
++   mtl_acceleration_structure_descriptor *descriptor,
++   struct mtl_buffer_range scratch);
++
++void mtl_legacy_refit_acceleration_structure(
++   mtl_acceleration_structure_encoder *encoder,
++   mtl_acceleration_structure *source,
++   mtl_acceleration_structure_descriptor *descriptor,
++   mtl_acceleration_structure *destination, struct mtl_buffer_range scratch);
++
++void mtl_legacy_copy_acceleration_structure(
++   mtl_acceleration_structure_encoder *encoder,
++   mtl_acceleration_structure *source, mtl_acceleration_structure *destination);
++
++void mtl_legacy_copy_and_compact_acceleration_structure(
++   mtl_acceleration_structure_encoder *encoder,
++   mtl_acceleration_structure *source, mtl_acceleration_structure *destination);
++
++void mtl_legacy_write_compacted_acceleration_structure_size(
++   mtl_acceleration_structure_encoder *encoder,
++   mtl_acceleration_structure *acceleration_structure,
++   struct mtl_buffer_range destination);
++
 +#endif /* MTL_ACCELERATION_STRUCTURE_H */
 diff --git a/src/kosmickrisp/bridge/mtl_acceleration_structure.m b/src/kosmickrisp/bridge/mtl_acceleration_structure.m
 new file mode 100644
-index 0000000..8f21ad9
 --- /dev/null
 +++ b/src/kosmickrisp/bridge/mtl_acceleration_structure.m
-@@ -0,0 +1,288 @@
+@@ -0,0 +1,522 @@
 +/*
 + * Copyright 2025 LunarG, Inc.
 + * Copyright 2025 Google LLC
@@ -199,6 +276,8 @@ index 0000000..8f21ad9
 +#include <Metal/MTL4AccelerationStructure.h>
 +#include <Metal/MTL4ComputeCommandEncoder.h>
 +#include <Metal/MTLAccelerationStructure.h>
++#include <Metal/MTLAccelerationStructureCommandEncoder.h>
++#include <Metal/MTLCommandBuffer.h>
 +#include <Metal/MTLDevice.h>
 +#include <Metal/MTLHeap.h>
 +
@@ -300,6 +379,134 @@ index 0000000..8f21ad9
 +         mtl_to_buffer_range(geometry->instance_descriptors);
 +      descriptor.instanceDescriptorStride = geometry->instance_descriptor_stride_B;
 +      descriptor.instanceCount = geometry->instance_count;
++      descriptor.instanceDescriptorType =
++         (MTLAccelerationStructureInstanceDescriptorType)geometry->descriptor_type;
++      descriptor.instanceTransformationMatrixLayout =
++         (MTLMatrixLayout)geometry->transform_layout;
++      descriptor.usage = (MTLAccelerationStructureUsage)usage;
++
++      return descriptor;
++   }
++}
++
++/* ---------------------------------------------------------------------------
++ * The legacy descriptors. Same inputs, but every buffer is named
++ * (id<MTLBuffer>, offset) instead of a GPU address.
++ * ------------------------------------------------------------------------- */
++
++static MTLAccelerationStructureGeometryDescriptor *
++mtl_new_legacy_geometry_descriptor(
++   const struct mtl_acceleration_structure_geometry *geometry)
++{
++   MTLAccelerationStructureGeometryDescriptor *descriptor = nil;
++
++   if (geometry->type == MTL_ACCELERATION_STRUCTURE_GEOMETRY_TYPE_TRIANGLES) {
++      MTLAccelerationStructureTriangleGeometryDescriptor *triangles =
++         [MTLAccelerationStructureTriangleGeometryDescriptor new];
++
++      triangles.vertexBuffer = (id<MTLBuffer>)geometry->triangles.vertex.buffer;
++      triangles.vertexBufferOffset = geometry->triangles.vertex.offset_B;
++      triangles.vertexFormat = (MTLAttributeFormat)geometry->triangles.vertex_format;
++      triangles.vertexStride = geometry->triangles.vertex_stride_B;
++      triangles.triangleCount = geometry->triangles.triangle_count;
++
++      if (geometry->triangles.index.buffer) {
++         triangles.indexBuffer = (id<MTLBuffer>)geometry->triangles.index.buffer;
++         triangles.indexBufferOffset = geometry->triangles.index.offset_B;
++         triangles.indexType = (MTLIndexType)geometry->triangles.index_type;
++      }
++
++      if (geometry->triangles.transform.buffer) {
++         triangles.transformationMatrixBuffer =
++            (id<MTLBuffer>)geometry->triangles.transform.buffer;
++         triangles.transformationMatrixBufferOffset =
++            geometry->triangles.transform.offset_B;
++         triangles.transformationMatrixLayout =
++            (MTLMatrixLayout)geometry->triangles.transform_layout;
++      }
++
++      descriptor = triangles;
++   } else {
++      MTLAccelerationStructureBoundingBoxGeometryDescriptor *boxes =
++         [MTLAccelerationStructureBoundingBoxGeometryDescriptor new];
++
++      boxes.boundingBoxBuffer =
++         (id<MTLBuffer>)geometry->bounding_boxes.bounding_box.buffer;
++      boxes.boundingBoxBufferOffset =
++         geometry->bounding_boxes.bounding_box.offset_B;
++      boxes.boundingBoxStride = geometry->bounding_boxes.bounding_box_stride_B;
++      boxes.boundingBoxCount = geometry->bounding_boxes.bounding_box_count;
++
++      descriptor = boxes;
++   }
++
++   descriptor.opaque = geometry->opaque;
++   descriptor.allowDuplicateIntersectionFunctionInvocation =
++      geometry->allow_duplicate_intersection_function_invocation;
++   descriptor.intersectionFunctionTableOffset =
++      geometry->intersection_function_table_offset;
++
++   if (geometry->primitive_data.buffer) {
++      descriptor.primitiveDataBuffer =
++         (id<MTLBuffer>)geometry->primitive_data.buffer;
++      descriptor.primitiveDataBufferOffset = geometry->primitive_data.offset_B;
++      descriptor.primitiveDataStride = geometry->primitive_data_stride_B;
++      descriptor.primitiveDataElementSize = geometry->primitive_data_element_size_B;
++   }
++
++   return descriptor;
++}
++
++mtl_acceleration_structure_descriptor *
++mtl_new_legacy_primitive_acceleration_structure_descriptor(
++   const struct mtl_acceleration_structure_geometry *geometries,
++   uint32_t geometry_count, enum mtl_acceleration_structure_usage usage)
++{
++   @autoreleasepool {
++      MTLPrimitiveAccelerationStructureDescriptor *descriptor =
++         [MTLPrimitiveAccelerationStructureDescriptor new];
++
++      NSMutableArray<MTLAccelerationStructureGeometryDescriptor *> *array =
++         [[[NSMutableArray alloc] initWithCapacity:geometry_count] autorelease];
++
++      for (uint32_t i = 0u; i < geometry_count; ++i) {
++         MTLAccelerationStructureGeometryDescriptor *geometry =
++            [mtl_new_legacy_geometry_descriptor(&geometries[i]) autorelease];
++         [array addObject:geometry];
++      }
++
++      descriptor.geometryDescriptors = array;
++      descriptor.usage = (MTLAccelerationStructureUsage)usage;
++
++      return descriptor;
++   }
++}
++
++mtl_acceleration_structure_descriptor *
++mtl_new_legacy_instance_acceleration_structure_descriptor(
++   const struct mtl_instance_acceleration_structure_geometry *geometry,
++   enum mtl_acceleration_structure_usage usage)
++{
++   @autoreleasepool {
++      /* The *indirect* descriptor, because kk's conversion kernel writes
++       * MTLIndirectAccelerationStructureInstanceDescriptors — each one carries
++       * the referenced structure's MTLResourceID, so there is no
++       * -instancedAccelerationStructures array to build. It is also the class
++       * -accelerationStructureSizesWithDescriptor: accepts, which is why the
++       * sizing descriptor below can stay as it is. */
++      MTLIndirectInstanceAccelerationStructureDescriptor *descriptor =
++         [MTLIndirectInstanceAccelerationStructureDescriptor new];
++
++      descriptor.instanceDescriptorBuffer =
++         (id<MTLBuffer>)geometry->instance_descriptors.buffer;
++      descriptor.instanceDescriptorBufferOffset =
++         geometry->instance_descriptors.offset_B;
++      descriptor.instanceDescriptorStride = geometry->instance_descriptor_stride_B;
++      descriptor.maxInstanceCount = geometry->instance_count;
++      /* instanceCountBuffer stays nil: MEASURED (mtl-legacy-as-probe.m) to build
++       * a structure that intersects correctly, using maxInstanceCount as the
++       * count. The alternative would be a GPU-visible uint32 the caller has to
++       * allocate and write, for a number it knows at record time. */
 +      descriptor.instanceDescriptorType =
 +         (MTLAccelerationStructureInstanceDescriptorType)geometry->descriptor_type;
 +      descriptor.instanceTransformationMatrixLayout =
@@ -476,8 +683,111 @@ index 0000000..8f21ad9
 +                                          toBuffer:mtl_to_buffer_range(destination)];
 +   }
 +}
++
++/* ---------------------------------------------------------------------------
++ * The legacy encoder.
++ * ------------------------------------------------------------------------- */
++
++mtl_acceleration_structure_encoder *
++mtl_new_acceleration_structure_command_encoder(
++   mtl_legacy_command_buffer *command_buffer)
++{
++   @autoreleasepool {
++      id<MTLCommandBuffer> cmd_buf = (id<MTLCommandBuffer>)command_buffer;
++      return [[cmd_buf accelerationStructureCommandEncoder] retain];
++   }
++}
++
++void
++mtl_end_acceleration_structure_encoding(
++   mtl_acceleration_structure_encoder *encoder)
++{
++   @autoreleasepool {
++      id<MTLAccelerationStructureCommandEncoder> enc =
++         (id<MTLAccelerationStructureCommandEncoder>)encoder;
++      [enc endEncoding];
++   }
++}
++
++void
++mtl_legacy_build_acceleration_structure(
++   mtl_acceleration_structure_encoder *encoder,
++   mtl_acceleration_structure *acceleration_structure,
++   mtl_acceleration_structure_descriptor *descriptor,
++   struct mtl_buffer_range scratch)
++{
++   @autoreleasepool {
++      id<MTLAccelerationStructureCommandEncoder> enc =
++         (id<MTLAccelerationStructureCommandEncoder>)encoder;
++      [enc buildAccelerationStructure:(id<MTLAccelerationStructure>)
++                                        acceleration_structure
++                          descriptor:(MTLAccelerationStructureDescriptor *)descriptor
++                       scratchBuffer:(id<MTLBuffer>)scratch.buffer
++                 scratchBufferOffset:scratch.offset_B];
++   }
++}
++
++void
++mtl_legacy_refit_acceleration_structure(
++   mtl_acceleration_structure_encoder *encoder,
++   mtl_acceleration_structure *source,
++   mtl_acceleration_structure_descriptor *descriptor,
++   mtl_acceleration_structure *destination, struct mtl_buffer_range scratch)
++{
++   @autoreleasepool {
++      id<MTLAccelerationStructureCommandEncoder> enc =
++         (id<MTLAccelerationStructureCommandEncoder>)encoder;
++      [enc refitAccelerationStructure:(id<MTLAccelerationStructure>)source
++                          descriptor:(MTLAccelerationStructureDescriptor *)descriptor
++                         destination:(id<MTLAccelerationStructure>)destination
++                       scratchBuffer:(id<MTLBuffer>)scratch.buffer
++                 scratchBufferOffset:scratch.offset_B];
++   }
++}
++
++void
++mtl_legacy_copy_acceleration_structure(
++   mtl_acceleration_structure_encoder *encoder,
++   mtl_acceleration_structure *source, mtl_acceleration_structure *destination)
++{
++   @autoreleasepool {
++      id<MTLAccelerationStructureCommandEncoder> enc =
++         (id<MTLAccelerationStructureCommandEncoder>)encoder;
++      [enc copyAccelerationStructure:(id<MTLAccelerationStructure>)source
++             toAccelerationStructure:(id<MTLAccelerationStructure>)destination];
++   }
++}
++
++void
++mtl_legacy_copy_and_compact_acceleration_structure(
++   mtl_acceleration_structure_encoder *encoder,
++   mtl_acceleration_structure *source, mtl_acceleration_structure *destination)
++{
++   @autoreleasepool {
++      id<MTLAccelerationStructureCommandEncoder> enc =
++         (id<MTLAccelerationStructureCommandEncoder>)encoder;
++      [enc copyAndCompactAccelerationStructure:(id<MTLAccelerationStructure>)source
++                      toAccelerationStructure:(id<MTLAccelerationStructure>)
++                                                 destination];
++   }
++}
++
++void
++mtl_legacy_write_compacted_acceleration_structure_size(
++   mtl_acceleration_structure_encoder *encoder,
++   mtl_acceleration_structure *acceleration_structure,
++   struct mtl_buffer_range destination)
++{
++   @autoreleasepool {
++      id<MTLAccelerationStructureCommandEncoder> enc =
++         (id<MTLAccelerationStructureCommandEncoder>)encoder;
++      [enc writeCompactedAccelerationStructureSize:
++              (id<MTLAccelerationStructure>)acceleration_structure
++                                         toBuffer:(id<MTLBuffer>)destination.buffer
++                                           offset:destination.offset_B];
++   }
++}
 diff --git a/src/kosmickrisp/bridge/mtl_bridge.h b/src/kosmickrisp/bridge/mtl_bridge.h
-index 2e5f83e..657347c 100644
 --- a/src/kosmickrisp/bridge/mtl_bridge.h
 +++ b/src/kosmickrisp/bridge/mtl_bridge.h
 @@ -21,6 +21,7 @@
@@ -489,7 +799,6 @@ index 2e5f83e..657347c 100644
  #include "mtl_buffer.h"
  #include "mtl_command_buffer.h"
 diff --git a/src/kosmickrisp/bridge/mtl_types.h b/src/kosmickrisp/bridge/mtl_types.h
-index 76256c2..a8bd160 100644
 --- a/src/kosmickrisp/bridge/mtl_types.h
 +++ b/src/kosmickrisp/bridge/mtl_types.h
 @@ -47,6 +47,8 @@ typedef void mtl_argument_table_descriptor;
@@ -571,10 +880,9 @@ index 76256c2..a8bd160 100644
     MTL_MATH_MODE_RELAXED = 1,
 diff --git a/src/kosmickrisp/bridge/stubs/mtl_acceleration_structure.c b/src/kosmickrisp/bridge/stubs/mtl_acceleration_structure.c
 new file mode 100644
-index 0000000..e61e76c
 --- /dev/null
 +++ b/src/kosmickrisp/bridge/stubs/mtl_acceleration_structure.c
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,183 @@
 +/*
 + * Copyright 2025 LunarG, Inc.
 + * Copyright 2025 Google LLC
@@ -689,9 +997,77 @@ index 0000000..e61e76c
 +   struct mtl_buffer_range destination)
 +{
 +}
++
++mtl_acceleration_structure_descriptor *
++mtl_new_legacy_primitive_acceleration_structure_descriptor(
++   const struct mtl_acceleration_structure_geometry *geometries,
++   uint32_t geometry_count, enum mtl_acceleration_structure_usage usage)
++{
++   return NULL;
++}
++
++mtl_acceleration_structure_descriptor *
++mtl_new_legacy_instance_acceleration_structure_descriptor(
++   const struct mtl_instance_acceleration_structure_geometry *geometry,
++   enum mtl_acceleration_structure_usage usage)
++{
++   return NULL;
++}
++
++mtl_acceleration_structure_encoder *
++mtl_new_acceleration_structure_command_encoder(
++   mtl_legacy_command_buffer *command_buffer)
++{
++   return NULL;
++}
++
++void
++mtl_end_acceleration_structure_encoding(
++   mtl_acceleration_structure_encoder *encoder)
++{
++}
++
++void
++mtl_legacy_build_acceleration_structure(
++   mtl_acceleration_structure_encoder *encoder,
++   mtl_acceleration_structure *acceleration_structure,
++   mtl_acceleration_structure_descriptor *descriptor,
++   struct mtl_buffer_range scratch)
++{
++}
++
++void
++mtl_legacy_refit_acceleration_structure(
++   mtl_acceleration_structure_encoder *encoder,
++   mtl_acceleration_structure *source,
++   mtl_acceleration_structure_descriptor *descriptor,
++   mtl_acceleration_structure *destination, struct mtl_buffer_range scratch)
++{
++}
++
++void
++mtl_legacy_copy_acceleration_structure(
++   mtl_acceleration_structure_encoder *encoder,
++   mtl_acceleration_structure *source, mtl_acceleration_structure *destination)
++{
++}
++
++void
++mtl_legacy_copy_and_compact_acceleration_structure(
++   mtl_acceleration_structure_encoder *encoder,
++   mtl_acceleration_structure *source, mtl_acceleration_structure *destination)
++{
++}
++
++void
++mtl_legacy_write_compacted_acceleration_structure_size(
++   mtl_acceleration_structure_encoder *encoder,
++   mtl_acceleration_structure *acceleration_structure,
++   struct mtl_buffer_range destination)
++{
++}
 diff --git a/src/kosmickrisp/libkk/kk_acceleration_structure.cl b/src/kosmickrisp/libkk/kk_acceleration_structure.cl
 new file mode 100644
-index 0000000..39b5a40
 --- /dev/null
 +++ b/src/kosmickrisp/libkk/kk_acceleration_structure.cl
 @@ -0,0 +1,89 @@
@@ -786,7 +1162,6 @@ index 0000000..39b5a40
 +}
 diff --git a/src/kosmickrisp/libkk/kk_acceleration_structure.h b/src/kosmickrisp/libkk/kk_acceleration_structure.h
 new file mode 100644
-index 0000000..b376b3a
 --- /dev/null
 +++ b/src/kosmickrisp/libkk/kk_acceleration_structure.h
 @@ -0,0 +1,45 @@
@@ -836,7 +1211,6 @@ index 0000000..b376b3a
 +
 +#endif /* LIBKK_ACCELERATION_STRUCTURE_H */
 diff --git a/src/kosmickrisp/libkk/meson.build b/src/kosmickrisp/libkk/meson.build
-index 04e1752..407ab20 100644
 --- a/src/kosmickrisp/libkk/meson.build
 +++ b/src/kosmickrisp/libkk/meson.build
 @@ -3,6 +3,7 @@
@@ -849,10 +1223,9 @@ index 04e1752..407ab20 100644
    'kk_query.cl',
 diff --git a/src/kosmickrisp/vulkan/kk_acceleration_structure.c b/src/kosmickrisp/vulkan/kk_acceleration_structure.c
 new file mode 100644
-index 0000000..e6c8b4a
 --- /dev/null
 +++ b/src/kosmickrisp/vulkan/kk_acceleration_structure.c
-@@ -0,0 +1,763 @@
+@@ -0,0 +1,1085 @@
 +/*
 + * Copyright 2025 LunarG, Inc.
 + * Copyright 2025 Google LLC
@@ -874,6 +1247,7 @@ index 0000000..e6c8b4a
 +
 +#include "libkk_shaders.h"
 +
++#include "util/log.h"
 +#include "util/u_math.h"
 +
 +/* Metal wants a non-zero buffer address in every descriptor it inspects, but a
@@ -892,6 +1266,69 @@ index 0000000..e6c8b4a
 +{
 +   return align64(instance_count * KK_MTL_AS_INSTANCE_SIZE_B,
 +                  KK_AS_SCRATCH_ALIGNMENT);
++}
++
++/* Which of Metal's two acceleration-structure builders this device uses.
++ *
++ * The Metal 4 one is the natural choice for a Metal 4 driver and the only one
++ * that takes GPU addresses directly. It is also the one that, on every Apple GPU
++ * below Apple9, silently produces a structure that intersects nothing — the
++ * hardware has no ray-tracing units, Metal emulates them, and the emulated
++ * builder lives behind the legacy encoder. kk_ray_tracing.c has the measurements
++ * and decides; this just reads the verdict, and also confirms the device really
++ * has the legacy queue, since without VK_KHR_acceleration_structure enabled it
++ * does not. */
++static bool
++kk_as_use_legacy(struct kk_device *dev)
++{
++   return kk_device_physical(dev)->rt.legacy_builder && dev->as_queue != NULL;
++}
++
++/* Name one span of bytes the way the legacy descriptors want it, from the GPU
++ * address the Vulkan builder gave us. A zero address means the range is absent,
++ * which is how "not indexed", "no transform" and "no per-primitive data" are
++ * spelled, and resolves to an absent range rather than a failure.
++ *
++ * False means a nonzero address belongs to no allocation this device knows about
++ * — an invalid VkDeviceAddress, or an address inside a sparse buffer, which
++ * kk_device_address.h explains it deliberately cannot resolve. */
++static bool
++kk_as_resolve(struct kk_device *dev, struct mtl_buffer_range *range)
++{
++   range->buffer = NULL;
++   range->offset_B = 0u;
++
++   if (range->address == 0u)
++      return true;
++
++   struct kk_addr_ref ref;
++   if (!kk_device_resolve_buffer_range(dev, *range, &ref))
++      return false;
++
++   range->buffer = ref.buffer;
++   range->offset_B = ref.offset_B;
++   return true;
++}
++
++/* Loud, but once: an unresolvable address means either the application passed an
++ * invalid one or kk grew a kind of allocation the address map does not cover.
++ * Either way the build below is skipped, and a skipped build is a structure that
++ * intersects nothing — exactly the failure mode this whole path exists to remove,
++ * so it must not be silent. */
++static void
++kk_as_report_unresolved(uint64_t address)
++{
++   static bool reported = false;
++
++   if (reported)
++      return;
++   reported = true;
++
++   mesa_loge("kk: acceleration-structure build skipped, device address 0x%llx "
++             "is in no allocation this device can resolve to an MTLBuffer. The "
++             "structure is left unbuilt and will intersect nothing. See "
++             "kk_device_address.h.",
++             (unsigned long long)address);
 +}
 +
 +static enum mtl_attribute_format
@@ -1110,17 +1547,66 @@ index 0000000..e6c8b4a
 +   }
 +}
 +
++/* Give every buffer in one filled-in geometry its legacy (MTLBuffer, offset)
++ * naming. False if any address that will actually be read cannot be resolved.
++ *
++ * A geometry with no primitives reads nothing, so its vertex and index addresses
++ * are not required to resolve — which matters, because an application is allowed
++ * to hand us primitiveCount 0 with whatever it likes in vertexData, and the
++ * generic "malformed build info" geometry kk_as_fill_geometry emits is exactly
++ * that shape.
++ */
++static bool
++kk_as_resolve_geometry(struct kk_device *dev,
++                       struct mtl_acceleration_structure_geometry *geometry,
++                       uint64_t *unresolved_out)
++{
++   struct mtl_buffer_range *required[3];
++   uint32_t required_count = 0u;
++
++   if (geometry->type == MTL_ACCELERATION_STRUCTURE_GEOMETRY_TYPE_TRIANGLES) {
++      if (geometry->triangles.triangle_count > 0u) {
++         required[required_count++] = &geometry->triangles.vertex;
++         required[required_count++] = &geometry->triangles.index;
++         required[required_count++] = &geometry->triangles.transform;
++      }
++   } else if (geometry->bounding_boxes.bounding_box_count > 0u) {
++      required[required_count++] = &geometry->bounding_boxes.bounding_box;
++   }
++
++   if (!kk_as_resolve(dev, &geometry->primitive_data)) {
++      *unresolved_out = geometry->primitive_data.address;
++      return false;
++   }
++
++   for (uint32_t i = 0u; i < required_count; ++i) {
++      if (!kk_as_resolve(dev, required[i])) {
++         *unresolved_out = required[i]->address;
++         return false;
++      }
++   }
++
++   return true;
++}
++
 +/* Build the Metal descriptor for one Vulkan build info.
 + *
 + * For a top-level build, `instance_descriptor_addr` must already point at the
 + * converted MTLIndirectAccelerationStructureInstanceDescriptor array (see
 + * kk_as_convert_instances). Pass 0 when only sizes are wanted.
++ *
++ * `legacy` selects the pre-Metal-4 descriptor classes, which name buffers by
++ * object and offset instead of by GPU address; those get resolved here, and a
++ * failure to resolve returns NULL rather than a descriptor with a nil buffer in
++ * it. Ignored when `for_size_query` is set, since a size query reads no buffer.
 + */
 +static mtl_acceleration_structure_descriptor *
-+kk_as_new_descriptor(const VkAccelerationStructureBuildGeometryInfoKHR *info,
++kk_as_new_descriptor(struct kk_device *dev,
++                     const VkAccelerationStructureBuildGeometryInfoKHR *info,
 +                     const VkAccelerationStructureBuildRangeInfoKHR *ranges,
 +                     const uint32_t *max_primitive_counts,
-+                     uint64_t instance_descriptor_addr, bool for_size_query)
++                     uint64_t instance_descriptor_addr, bool for_size_query,
++                     bool legacy)
 +{
 +   const enum mtl_acceleration_structure_usage usage = kk_as_usage(info->flags);
 +
@@ -1146,6 +1632,11 @@ index 0000000..e6c8b4a
 +         .instance_count = instance_count,
 +         .descriptor_type =
 +            MTL_ACCELERATION_STRUCTURE_INSTANCE_DESCRIPTOR_TYPE_INDIRECT,
++         /* Row-major, so the row-major 3x4 the conversion kernel copies out of
++          * VkTransformMatrixKHR lands verbatim. MEASURED to be honoured on this
++          * GPU with a non-identity transform, by both builders, despite the
++          * private -supportsRayTracingMatrixLayout answering NO — see
++          * kk_ray_tracing.c and mtl-rt-matrix-layout.m. */
 +         .transform_layout = MTL_MATRIX_LAYOUT_ROW_MAJOR,
 +      };
 +
@@ -1154,13 +1645,28 @@ index 0000000..e6c8b4a
 +            &geometry, usage);
 +      }
 +
-+      return mtl_new_instance_acceleration_structure_descriptor(&geometry,
-+                                                                usage);
++      if (!legacy) {
++         return mtl_new_instance_acceleration_structure_descriptor(&geometry,
++                                                                   usage);
++      }
++
++      if (instance_count > 0u &&
++          !kk_as_resolve(dev, &geometry.instance_descriptors)) {
++         kk_as_report_unresolved(geometry.instance_descriptors.address);
++         return NULL;
++      }
++
++      return mtl_new_legacy_instance_acceleration_structure_descriptor(&geometry,
++                                                                       usage);
 +   }
 +
-+   if (info->geometryCount == 0u)
-+      return mtl_new_primitive_acceleration_structure_descriptor(NULL, 0u,
-+                                                                 usage);
++   if (info->geometryCount == 0u) {
++      return legacy && !for_size_query
++                ? mtl_new_legacy_primitive_acceleration_structure_descriptor(
++                     NULL, 0u, usage)
++                : mtl_new_primitive_acceleration_structure_descriptor(NULL, 0u,
++                                                                      usage);
++   }
 +
 +   struct mtl_acceleration_structure_geometry *geometries =
 +      calloc(info->geometryCount, sizeof(*geometries));
@@ -1177,9 +1683,24 @@ index 0000000..e6c8b4a
 +                          ranges ? &ranges[i] : NULL, count);
 +   }
 +
++   const bool legacy_build = legacy && !for_size_query;
++
++   if (legacy_build) {
++      for (uint32_t i = 0u; i < info->geometryCount; ++i) {
++         uint64_t unresolved = 0u;
++         if (!kk_as_resolve_geometry(dev, &geometries[i], &unresolved)) {
++            kk_as_report_unresolved(unresolved);
++            free(geometries);
++            return NULL;
++         }
++      }
++   }
++
 +   mtl_acceleration_structure_descriptor *descriptor =
-+      mtl_new_primitive_acceleration_structure_descriptor(
-+         geometries, info->geometryCount, usage);
++      legacy_build ? mtl_new_legacy_primitive_acceleration_structure_descriptor(
++                        geometries, info->geometryCount, usage)
++                   : mtl_new_primitive_acceleration_structure_descriptor(
++                        geometries, info->geometryCount, usage);
 +
 +   free(geometries);
 +
@@ -1275,6 +1796,12 @@ index 0000000..e6c8b4a
 +   /* Not a buffer address: Metal identifies an acceleration structure by
 +    * MTLResourceID, and that is the value a top-level build has to find in the
 +    * instance array. Vulkan treats this as opaque. */
++   if (kk_rt_debug()) {
++      mesa_logi("kk ray tracing: acceleration structure %p device address "
++                "0x%llx",
++                (void *)as, (unsigned long long)as->gpu_resource_id);
++   }
++
 +   return as->gpu_resource_id;
 +}
 +
@@ -1291,8 +1818,8 @@ index 0000000..e6c8b4a
 +   pSizeInfo->updateScratchSize = 0u;
 +   pSizeInfo->buildScratchSize = 0u;
 +
-+   mtl_acceleration_structure_descriptor *descriptor =
-+      kk_as_new_descriptor(pBuildInfo, NULL, pMaxPrimitiveCounts, 0u, true);
++   mtl_acceleration_structure_descriptor *descriptor = kk_as_new_descriptor(
++      dev, pBuildInfo, NULL, pMaxPrimitiveCounts, 0u, true, false);
 +   if (descriptor == NULL)
 +      return;
 +
@@ -1354,6 +1881,8 @@ index 0000000..e6c8b4a
 +   const VkAccelerationStructureBuildRangeInfoKHR *const *ppBuildRangeInfos)
 +{
 +   VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
++   struct kk_device *dev = kk_cmd_buffer_device(cmd);
++   const bool legacy = kk_as_use_legacy(dev);
 +
 +   for (uint32_t i = 0u; i < infoCount; ++i) {
 +      const VkAccelerationStructureBuildGeometryInfoKHR *info = &pInfos[i];
@@ -1380,19 +1909,26 @@ index 0000000..e6c8b4a
 +                                 instance_count);
 +      }
 +
-+      mtl_acceleration_structure_descriptor *descriptor =
-+         kk_as_new_descriptor(info, ranges, NULL, scratch_addr, false);
++      mtl_acceleration_structure_descriptor *descriptor = kk_as_new_descriptor(
++         dev, info, ranges, NULL, scratch_addr, false, legacy);
++
++      if (kk_rt_debug()) {
++         mesa_logi("kk ray tracing: build %s, %s builder, %u geometr%s, "
++                   "%u primitive%s, scratch 0x%llx, descriptor %s",
++                   kk_as_is_top_level(info) ? "TLAS" : "BLAS",
++                   legacy ? "legacy" : "MTL4", info->geometryCount,
++                   info->geometryCount == 1u ? "y" : "ies",
++                   info->geometryCount ? ranges[0].primitiveCount : 0u,
++                   (info->geometryCount && ranges[0].primitiveCount == 1u) ? ""
++                                                                          : "s",
++                   (unsigned long long)scratch_addr,
++                   descriptor ? "ok" : "REFUSED");
++      }
++
 +      if (descriptor == NULL)
 +         continue;
 +
-+      mtl_compute_encoder *encoder = cs_get_compute(cmd, !cmd->gfx.encoder);
-+
-+      /* The conversion dispatch above writes the very buffer the build is
-+       * about to read. */
-+      mtl_barrier_after_encoder_stages(encoder, MTL_STAGE_DISPATCH,
-+                                       MTL_STAGE_ACCELERATION_STRUCTURE);
-+
-+      const struct mtl_buffer_range scratch = {
++      struct mtl_buffer_range scratch = {
 +         .address = scratch_addr + instance_scratch_B,
 +         .length_B = MTL_BUFFER_RANGE_WHOLE,
 +      };
@@ -1400,6 +1936,46 @@ index 0000000..e6c8b4a
 +      const bool update =
 +         info->mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR &&
 +         src != NULL && src->mtl_handle != NULL;
++
++      if (legacy) {
++         /* One encoder per build. Commands within a single legacy
++          * acceleration-structure encoder have no documented ordering; encoders
++          * within one command buffer do, so this is what makes a TLAS build in
++          * the same pass see the BLAS builds ahead of it. No barriers: the
++          * conversion dispatch above is in an earlier MTL4 command buffer and the
++          * pass's event orders the two (struct kk_as_pass). */
++         if (!kk_as_resolve(dev, &scratch)) {
++            kk_as_report_unresolved(scratch.address);
++            mtl_release(descriptor);
++            continue;
++         }
++
++         mtl_acceleration_structure_encoder *encoder =
++            cs_get_acceleration_structure(cmd);
++         if (encoder == NULL) {
++            mtl_release(descriptor);
++            continue;
++         }
++
++         if (update) {
++            mtl_legacy_refit_acceleration_structure(
++               encoder, src->mtl_handle, descriptor, dst->mtl_handle, scratch);
++         } else {
++            mtl_legacy_build_acceleration_structure(encoder, dst->mtl_handle,
++                                                    descriptor, scratch);
++         }
++
++         cs_end_acceleration_structure(encoder);
++         mtl_release(descriptor);
++         continue;
++      }
++
++      mtl_compute_encoder *encoder = cs_get_compute(cmd, !cmd->gfx.encoder);
++
++      /* The conversion dispatch above writes the very buffer the build is
++       * about to read. */
++      mtl_barrier_after_encoder_stages(encoder, MTL_STAGE_DISPATCH,
++                                       MTL_STAGE_ACCELERATION_STRUCTURE);
 +
 +      if (update) {
 +         mtl_refit_acceleration_structure(encoder, src->mtl_handle, descriptor,
@@ -1424,10 +2000,31 @@ index 0000000..e6c8b4a
 +   VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
 +   VK_FROM_HANDLE(kk_acceleration_structure, src, pInfo->src);
 +   VK_FROM_HANDLE(kk_acceleration_structure, dst, pInfo->dst);
++   struct kk_device *dev = kk_cmd_buffer_device(cmd);
 +
 +   if (src == NULL || dst == NULL || src->mtl_handle == NULL ||
 +       dst->mtl_handle == NULL)
 +      return;
++
++   if (kk_as_use_legacy(dev)) {
++      /* Same encoder as the builds, so that a copy of a structure built earlier
++       * in this command buffer sees the build. */
++      mtl_acceleration_structure_encoder *as_encoder =
++         cs_get_acceleration_structure(cmd);
++      if (as_encoder == NULL)
++         return;
++
++      if (pInfo->mode == VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR) {
++         mtl_legacy_copy_and_compact_acceleration_structure(
++            as_encoder, src->mtl_handle, dst->mtl_handle);
++      } else {
++         mtl_legacy_copy_acceleration_structure(as_encoder, src->mtl_handle,
++                                                dst->mtl_handle);
++      }
++
++      cs_end_acceleration_structure(as_encoder);
++      return;
++   }
 +
 +   mtl_compute_encoder *encoder = cs_get_compute(cmd, !cmd->gfx.encoder);
 +
@@ -1446,6 +2043,97 @@ index 0000000..e6c8b4a
 +                                    MTL_STAGE_ALL);
 +}
 +
++/* vkCmdWriteAccelerationStructuresPropertiesKHR on the legacy builder.
++ *
++ * Structured as three phases rather than one loop, because each phase lives on a
++ * different Metal encoder and a phase boundary costs a legacy pass: seed every
++ * report slot on the MTL4 compute encoder, write every compacted size in ONE
++ * legacy pass, then mark every query available on the MTL4 encoder that follows
++ * it. Availability last is what makes a host reader that waits on availability
++ * see the compacted sizes rather than only the seeds.
++ */
++static void
++kk_as_write_properties_legacy(
++   struct kk_cmd_buffer *cmd, struct kk_query_pool *pool,
++   uint32_t accelerationStructureCount,
++   const VkAccelerationStructureKHR *pAccelerationStructures,
++   VkQueryType queryType, uint32_t firstQuery)
++{
++   struct kk_device *dev = kk_cmd_buffer_device(cmd);
++
++   /* Phase 1: the values kk knows at record time. For a compacted-size query
++    * this is the seed the MTL4 path also writes, and for the same reason — see
++    * the comment in kk_CmdWriteAccelerationStructuresPropertiesKHR. */
++   for (uint32_t i = 0u; i < accelerationStructureCount; ++i) {
++      VK_FROM_HANDLE(kk_acceleration_structure, as, pAccelerationStructures[i]);
++      const uint64_t dst_addr =
++         kk_query_pool_report_addr(dev, pool, firstQuery + i);
++
++      if (as == NULL || as->mtl_handle == NULL)
++         continue;
++
++      switch (queryType) {
++      case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR:
++      case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SIZE_KHR:
++      case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_SIZE_KHR:
++         libkk_write_u64(cmd, kk_grid_1d(1u), !cmd->gfx.encoder, dst_addr,
++                         as->size_B);
++         break;
++
++      case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_BOTTOM_LEVEL_POINTERS_KHR:
++         libkk_write_u64(cmd, kk_grid_1d(1u), !cmd->gfx.encoder, dst_addr, 0u);
++         break;
++
++      default:
++         break;
++      }
++   }
++
++   /* Phase 2: the one thing only the acceleration-structure encoder can do. */
++   if (queryType == VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR) {
++      for (uint32_t i = 0u; i < accelerationStructureCount; ++i) {
++         VK_FROM_HANDLE(kk_acceleration_structure, as,
++                        pAccelerationStructures[i]);
++
++         if (as == NULL || as->mtl_handle == NULL)
++            continue;
++
++         struct mtl_buffer_range destination = {
++            .address = kk_query_pool_report_addr(dev, pool, firstQuery + i),
++            .length_B = sizeof(uint64_t),
++         };
++
++         if (!kk_as_resolve(dev, &destination)) {
++            kk_as_report_unresolved(destination.address);
++            continue;
++         }
++
++         mtl_acceleration_structure_encoder *encoder =
++            cs_get_acceleration_structure(cmd);
++         if (encoder == NULL)
++            break;
++
++         mtl_legacy_write_compacted_acceleration_structure_size(
++            encoder, as->mtl_handle, destination);
++         cs_end_acceleration_structure(encoder);
++      }
++   }
++
++   /* Phase 3. */
++   for (uint32_t i = 0u; i < accelerationStructureCount; ++i) {
++      VK_FROM_HANDLE(kk_acceleration_structure, as, pAccelerationStructures[i]);
++      const uint32_t query = firstQuery + i;
++
++      if (as == NULL || as->mtl_handle == NULL)
++         continue;
++
++      kk_cmd_write(cmd, (struct libkk_imm_write){
++                           .address = kk_query_pool_available_addr(pool, query),
++                           .value = 1u,
++                        });
++   }
++}
++
 +VKAPI_ATTR void VKAPI_CALL
 +kk_CmdWriteAccelerationStructuresPropertiesKHR(
 +   VkCommandBuffer commandBuffer, uint32_t accelerationStructureCount,
@@ -1455,6 +2143,13 @@ index 0000000..e6c8b4a
 +   VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
 +   VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
 +   struct kk_device *dev = kk_cmd_buffer_device(cmd);
++
++   if (kk_as_use_legacy(dev)) {
++      kk_as_write_properties_legacy(cmd, pool, accelerationStructureCount,
++                                    pAccelerationStructures, queryType,
++                                    firstQuery);
++      return;
++   }
 +
 +   mtl_compute_encoder *encoder = cs_get_compute(cmd, !cmd->gfx.encoder);
 +   mtl_barrier_after_encoder_stages(encoder, MTL_STAGE_ACCELERATION_STRUCTURE,
@@ -1618,7 +2313,6 @@ index 0000000..e6c8b4a
 +}
 diff --git a/src/kosmickrisp/vulkan/kk_acceleration_structure.h b/src/kosmickrisp/vulkan/kk_acceleration_structure.h
 new file mode 100644
-index 0000000..c6544e4
 --- /dev/null
 +++ b/src/kosmickrisp/vulkan/kk_acceleration_structure.h
 @@ -0,0 +1,55 @@
@@ -1678,7 +2372,6 @@ index 0000000..c6544e4
 +
 +#endif /* KK_ACCELERATION_STRUCTURE_H */
 diff --git a/src/kosmickrisp/vulkan/kk_buffer.c b/src/kosmickrisp/vulkan/kk_buffer.c
-index 54a6be2..a3508ad 100644
 --- a/src/kosmickrisp/vulkan/kk_buffer.c
 +++ b/src/kosmickrisp/vulkan/kk_buffer.c
 @@ -155,10 +155,12 @@ kk_bind_buffer_memory(struct kk_device *dev, const VkBindBufferMemoryInfo *info)
@@ -1697,7 +2390,6 @@ index 54a6be2..a3508ad 100644
         * pointer, use the mapped buffer directly and retain a reference */
        buffer->mtl_handle = mem->bo->map;
 diff --git a/src/kosmickrisp/vulkan/kk_buffer.h b/src/kosmickrisp/vulkan/kk_buffer.h
-index 1d97446..5b89a76 100644
 --- a/src/kosmickrisp/vulkan/kk_buffer.h
 +++ b/src/kosmickrisp/vulkan/kk_buffer.h
 @@ -18,6 +18,15 @@
@@ -1717,7 +2409,6 @@ index 1d97446..5b89a76 100644
  
  VK_DEFINE_NONDISP_HANDLE_CASTS(kk_buffer, vk.base, VkBuffer,
 diff --git a/src/kosmickrisp/vulkan/kk_buffer_view.c b/src/kosmickrisp/vulkan/kk_buffer_view.c
-index c67ac82..197cfa0 100644
 --- a/src/kosmickrisp/vulkan/kk_buffer_view.c
 +++ b/src/kosmickrisp/vulkan/kk_buffer_view.c
 @@ -49,6 +49,29 @@ kk_get_buffer_format_features(struct kk_physical_device *pdev,
@@ -1751,7 +2442,6 @@ index c67ac82..197cfa0 100644
  }
  
 diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
-index f7da7bf..e9d4ac3 100644
 --- a/src/kosmickrisp/vulkan/kk_physical_device.c
 +++ b/src/kosmickrisp/vulkan/kk_physical_device.c
 @@ -138,6 +138,47 @@ kk_get_device_extensions(const struct kk_instance *instance,
@@ -1848,7 +2538,6 @@ index f7da7bf..e9d4ac3 100644
        .robustStorageBufferAccessSizeAlignment = KK_SSBO_BOUNDS_CHECK_ALIGNMENT,
        .robustUniformBufferAccessSizeAlignment = KK_MIN_UBO_ALIGNMENT,
 diff --git a/src/kosmickrisp/vulkan/kk_query_pool.c b/src/kosmickrisp/vulkan/kk_query_pool.c
-index f8c35af..be15ad0 100644
 --- a/src/kosmickrisp/vulkan/kk_query_pool.c
 +++ b/src/kosmickrisp/vulkan/kk_query_pool.c
 @@ -35,6 +35,11 @@ kk_reports_per_query(struct kk_query_pool *pool)
@@ -1925,7 +2614,6 @@ index f8c35af..be15ad0 100644
  
     if (pCreateInfo->flags & VK_QUERY_POOL_CREATE_RESET_BIT_KHR)
 diff --git a/src/kosmickrisp/vulkan/kk_query_pool.h b/src/kosmickrisp/vulkan/kk_query_pool.h
-index 2fe4c76..042252d 100644
 --- a/src/kosmickrisp/vulkan/kk_query_pool.h
 +++ b/src/kosmickrisp/vulkan/kk_query_pool.h
 @@ -49,6 +49,16 @@ struct kk_query_pool {
@@ -1946,7 +2634,6 @@ index 2fe4c76..042252d 100644
 +
  #endif /* KK_QUERY_POOL_H */
 diff --git a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
-index 22e248c..8df0ecd 100644
 --- a/src/kosmickrisp/vulkan/meson.build
 +++ b/src/kosmickrisp/vulkan/meson.build
 @@ -50,6 +50,8 @@ idep_kk_device_dispatch_table = declare_dependency(

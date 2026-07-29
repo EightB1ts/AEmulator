@@ -22,7 +22,7 @@
     "deviceType": 1,
     "deviceTypeName": "VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU",
     "deviceName": "Apple M2",
-    "pipelineCacheUUID": "04776bee521bf78149b5915b57339677",
+    "pipelineCacheUUID": "67612fe6fe95dd7b8f6bae1b2e62fbfb",
     "limits": {
       "maxImageDimension1D": 16384,
       "maxImageDimension2D": 16384,
@@ -173,7 +173,7 @@
   },
   "idProperties": {
     "deviceUUID": "60030000010000000000000000000000",
-    "driverUUID": "c08f40db21ae3128b7fefc0f0e3f2eb7",
+    "driverUUID": "27620ec27fb734b0a5c68b14ffea0f24",
     "deviceLUID": "0000000000000000",
     "deviceNodeMask": 0,
     "deviceLUIDValid": false
@@ -186,7 +186,7 @@
   },
   "vulkan11Properties": {
     "deviceUUID": "60030000010000000000000000000000",
-    "driverUUID": "c08f40db21ae3128b7fefc0f0e3f2eb7",
+    "driverUUID": "27620ec27fb734b0a5c68b14ffea0f24",
     "deviceLUID": "0000000000000000",
     "deviceNodeMask": 0,
     "deviceLUIDValid": false,
@@ -365,7 +365,7 @@
     "variableMultisampleRate": false,
     "inheritedQueries": true
   },
-  "deviceExtensionCount": 141,
+  "deviceExtensionCount": 144,
   "deviceExtensions": [
     {
       "name": "VK_AMD_shader_image_load_store_lod",
@@ -624,6 +624,10 @@
       "specVersion": 1
     },
     {
+      "name": "VK_KHR_acceleration_structure",
+      "specVersion": 13
+    },
+    {
       "name": "VK_KHR_bind_memory2",
       "specVersion": 1
     },
@@ -646,6 +650,10 @@
     {
       "name": "VK_KHR_dedicated_allocation",
       "specVersion": 3
+    },
+    {
+      "name": "VK_KHR_deferred_host_operations",
+      "specVersion": 4
     },
     {
       "name": "VK_KHR_depth_stencil_resolve",
@@ -794,6 +802,10 @@
     {
       "name": "VK_KHR_push_descriptor",
       "specVersion": 2
+    },
+    {
+      "name": "VK_KHR_ray_query",
+      "specVersion": 1
     },
     {
       "name": "VK_KHR_relaxed_block_layout",
@@ -1050,7 +1062,7 @@
     "why": "vkGetPipelineCacheData is a RAW PASSTHROUGH in gfxstream (no on_vkGetPipelineCacheData in VkDecoderGlobalState; VkDecoder.cpp:4403 calls the driver). Mesa builds this 32-byte VkPipelineCacheHeaderVersionOne from the real vendorID (bytes 8..12), deviceID (12..16) and pipelineCacheUUID (16..32), so any guest app recovers all three from a cache blob no matter what the properties call reported. Phase 4.9 rewrites bytes 8..32 outbound and back inbound; after that, the *AgreesWithProperties flags below must read false.",
     "totalCacheDataSize": 36,
     "bytesCaptured": 32,
-    "first32BytesHex": "20000000010000006b1000006400000004776bee521bf78149b5915b57339677",
+    "first32BytesHex": "20000000010000006b1000006400000067612fe6fe95dd7b8f6bae1b2e62fbfb",
     "decoded": {
       "headerSize_bytes0_4": 32,
       "headerVersion_bytes4_8": 1,
@@ -1058,7 +1070,7 @@
       "vendorID_bytes8_12_hex": "0x0000106b",
       "deviceID_bytes12_16": 100,
       "deviceID_bytes12_16_hex": "0x00000064",
-      "pipelineCacheUUID_bytes16_32": "04776bee521bf78149b5915b57339677"
+      "pipelineCacheUUID_bytes16_32": "67612fe6fe95dd7b8f6bae1b2e62fbfb"
     },
     "leak": {
       "vendorIDAgreesWithProperties": true,
