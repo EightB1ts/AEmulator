@@ -8,7 +8,7 @@
      # Instance extensions
      "VK_KHR_get_physical_device_properties2",
      "VK_KHR_external_semaphore_capabilities",
-@@ -88,9 +89,182 @@
+@@ -88,9 +89,221 @@
      "VK_KHR_shader_terminate_invocation",
      "VK_KHR_synchronization2",
      "VK_KHR_zero_initialize_workgroup_memory",
@@ -28,14 +28,21 @@
 +    # checked individually against this generator before landing.
 +    #
 +    # DELIBERATELY ABSENT — do NOT "fix" these by adding them:
-+    #   ray tracing / video / *AMDX* / provisional beta-guarded extensions — a beta guard compiles
-+    #                                   the bodies OUT while the size table still sizes them, which
-+    #                                   silently re-creates the exact gap this list exists to close.
++    #   video / *AMDX* / provisional beta-guarded extensions — a beta guard compiles the bodies OUT
++    #                                   while the size table still sizes them, which silently
++    #                                   re-creates the exact gap this list exists to close.
++    #   VK_KHR_ray_tracing_pipeline     NOT beta-guarded, and it would probably decode — but no host
++    #                                   driver here implements it (KosmicKrisp does acceleration
++    #                                   structures + ray QUERY only), so advertising it would hand
++    #                                   the guest an extension whose vkCreateRayTracingPipelinesKHR
++    #                                   has nowhere to go. Add it when the driver grows it, not
++    #                                   before. Its shader-group / SBT types are all owned by the
++    #                                   extension itself, so it needs no REQUIRED_TYPES work.
 +    #
 +    # Those remain in VkDecoderCerealGap.inc on purpose and stay hidden from the guest. That is
 +    # why gap ∩ host does not reach zero, and why kCerealGapExtensionsKeptAnyway cannot be emptied.
 +    #
-+    # The four extensions this comment used to deny-list are now DECODED, each by teaching the
++    # The extensions this comment used to deny-list are now DECODED, each by teaching the
 +    # generator the thing it actually lacked rather than by hiding the extension:
 +    #   VK_EXT_multi_draw               real stride support in the type model and every emitter
 +    #                                   (VulkanType.getStrideExpression + emit_stride_normalization).
@@ -45,6 +52,11 @@
 +    #   VK_KHR_push_descriptor          PARTIAL: the non-template entry point decodes; the
 +    #                                   WithTemplate one is registry-undescribable and its decoder
 +    #                                   refuses to dispatch rather than corrupting the stream.
++    #   ray tracing (the three names    `T* const*` support in iterateVulkanType and every emitter
++    #   below)                          (VulkanType.isArrayOfPointers / onPointerArray), plus
++    #                                   REQUIRED_TYPES for the two VkDeviceOrHostAddress unions.
++    #                                   See the block comment on those two entries: the sortorder="1"
++    #                                   attribute on the RT extensions is what made them special.
 +    "VK_AMD_shader_image_load_store_lod",
 +    "VK_EXT_attachment_feedback_loop_dynamic_state",
 +    "VK_EXT_attachment_feedback_loop_layout",
@@ -82,6 +94,27 @@
 +    "VK_GOOGLE_user_type",
 +    "VK_KHR_16bit_storage",
 +    "VK_KHR_8bit_storage",
++    # RAY TRACING — acceleration structures + ray query. Two generator capabilities had to exist
++    # first, and both are in this codegen patch series:
++    #   (1) `T* const*` marshalling (patch 0003). Three RT parameters are arrays OF POINTERS:
++    #       VkAccelerationStructureBuildGeometryInfoKHR::ppGeometries,
++    #       vkCmdBuildAccelerationStructuresKHR::ppBuildRangeInfos and
++    #       vkCmdBuildAccelerationStructuresIndirectKHR::ppMaxPrimitiveCounts. Before 0003,
++    #       iterateVulkanType() returned False for pointer-to-const-pointer that was not an array of
++    #       strings, so those members were silently DROPPED from the stream — which is worse than a
++    #       compile error, because ppGeometries is where the geometry actually lives.
++    #   (2) REQUIRED_TYPES for VkDeviceOrHostAddressKHR / VkDeviceOrHostAddressConstKHR. See the
++    #       note on those two entries; it is reg.py's declare-once rule again, but reached through
++    #       vk.xml's sortorder attribute rather than through extension numbering.
++    #
++    # VK_KHR_deferred_host_operations is listed because VK_KHR_acceleration_structure *depends* on it
++    # (vk.xml: depends="...+VK_KHR_deferred_host_operations") and every AS entry point takes a
++    # VkDeferredOperationKHR. Listing acceleration_structure without it would advertise an extension
++    # whose dependency the guest is still denied.
++    #
++    # NOT included: VK_KHR_ray_tracing_pipeline — see the deny-list note above.
++    "VK_KHR_acceleration_structure",
++    "VK_KHR_deferred_host_operations",
 +    "VK_KHR_depth_stencil_resolve",
 +    "VK_KHR_device_group",
 +    "VK_KHR_draw_indirect_count",
@@ -111,6 +144,12 @@
 +    #                                         that is wrong) and then refuses to dispatch instead of
 +    #                                         handing a 1-byte buffer to the host driver.
 +    "VK_KHR_push_descriptor",
++    # Ray query. Purely additive over VK_KHR_acceleration_structure: one feature struct
++    # (VkPhysicalDeviceRayQueryFeaturesKHR), no commands and no new types, so it costs nothing to
++    # decode. It is listed separately from acceleration_structure because it is the extension the
++    # GUEST actually enables to use rayQueryEXT in a shader, and if this name were missing the host
++    # would keep hiding it in VkDecoderCerealGap.inc even though the driver implements it.
++    "VK_KHR_ray_query",
 +    "VK_KHR_relaxed_block_layout",
 +    "VK_KHR_sampler_mirror_clamp_to_edge",
 +    "VK_KHR_separate_depth_stencil_layouts",
@@ -191,7 +230,7 @@
      "VK_EXT_image_robustness",
      "VK_EXT_inline_uniform_block",
      "VK_EXT_pipeline_creation_cache_control",
-@@ -175,6 +349,13 @@
+@@ -175,6 +388,13 @@
  }
  
  
@@ -205,7 +244,7 @@
  REQUIRED_TYPES = {
      "int",
      "uint16_t",
-@@ -182,6 +363,13 @@
+@@ -182,6 +402,52 @@
      "double",
      "VkPresentScalingFlagsEXT",
      "VkPresentGravityFlagsEXT",
@@ -216,10 +255,49 @@
 +    # serializer (VkViewportCoordinateSwizzleNV, VkCoverageModulationModeNV, VkCoverageReductionModeNV,
 +    # VkConservativeRasterizationModeEXT, VkProvokingVertexModeEXT, VkLineRasterizationModeEXT).
 +    "VkViewportSwizzleNV",
++    # AEMULATOR: the two unions every acceleration-structure geometry struct is built out of
++    # (VkAccelerationStructureGeometry{Triangles,Aabbs,Instances}DataKHR all embed one, as do
++    # VkAccelerationStructureBuildGeometryInfoKHR::scratchData and the copy-to/from-memory infos).
++    #
++    # This is reg.py's declare-once rule again, but it does NOT look like the VkViewportSwizzleNV
++    # case, and the difference is worth writing down because it cost a session to find.
++    # VK_KHR_acceleration_structure is extension 151 and its FIRST <require> block names both unions
++    # (vk.xml ~23247), so by extension number it is the owner and nothing should be missing. But
++    # vk.xml gives the ray-tracing extensions `sortorder="1"`, and reg.py sorts features by
++    # sortorder BEFORE number (reg.py: `self.sortorder = int(elem.get('sortorder', 0))`). So
++    # acceleration_structure is processed AFTER every sortorder-0 extension, and the declare-once
++    # rule hands the unions to the first sortorder-0 extension that requires them instead:
++    #     VkDeviceOrHostAddressConstKHR -> VK_NV_ray_tracing_motion_blur  (extension 328)
++    #     VkDeviceOrHostAddressKHR      -> VK_EXT_opacity_micromap        (extension 397)
++    # Neither is in SUPPORTED_FEATURES, so both unions reached only the size table while the LISTED
++    # extension's serializers called marshal_/unmarshal_/reservedunmarshal_/deepcopy_/transform_*
++    # on them: 44 undeclared-identifier errors across four generated files, and zero of them
++    # anywhere near the ppGeometries work.
++    #
++    # The sibling union VkAccelerationStructureGeometryDataKHR is generated correctly, which is what
++    # makes the failure confusing — it is required by acceleration_structure and by nothing earlier,
++    # so the declare-once rule does land it on the listed feature.
++    "VkDeviceOrHostAddressKHR",
++    "VkDeviceOrHostAddressConstKHR",
++    # Same sortorder trap, third victim, and this one arrives through a COMMAND PARAMETER rather
++    # than through a <require> list. vk.xml names VkAccelerationStructureBuildSizesInfoKHR in exactly
++    # one <require> block — VK_KHR_acceleration_structure's (~23282) — so grepping the requires makes
++    # it look owned by a listed feature. But reg.py's generateFeature() also pulls in every type used
++    # by a required COMMAND, and VK_NV_partitioned_acceleration_structure (extension 571, sortorder 0,
++    # therefore processed BEFORE sortorder-1 acceleration_structure) requires
++    # vkGetPartitionedAccelerationStructuresBuildSizesNV, whose pSizeInfo is a
++    # VkAccelerationStructureBuildSizesInfoKHR*. So the declare-once rule assigns it to the NV
++    # extension, and vkGetAccelerationStructureBuildSizesKHR's decoder loses its serializers.
++    #
++    # HOW TO FIND THE NEXT ONE, instead of reading 8 clang errors at a time: generate, then list
++    # every marshal_/unmarshal_/reservedunmarshal_/deepcopy_/transform_* symbol that is CALLED in the
++    # generated .cpp but DEFINED nowhere in the generated tree. That set is exactly the set of types
++    # that need to be named here.
++    "VkAccelerationStructureBuildSizesInfoKHR",
  }
  
  copyrightHeader = """// Copyright (C) 2018 The Android Open Source Project
-@@ -276,6 +464,12 @@
+@@ -276,6 +542,12 @@
          self.codegen = cereal.CodeGen()
          self.featureSupported = False
          self.supportedModules = None
@@ -232,7 +310,7 @@
  
          self.guestBaseLibDirPrefix = "aemu/base"
          self.baseLibDirPrefix = "aemu/base"
-@@ -785,6 +979,8 @@
+@@ -785,6 +1057,8 @@
              if self.featureName == supportedFeature:
                  self.featureSupported = True
  
@@ -241,7 +319,7 @@
          if self.featureSupported == False and UNSUPPORTED_FEATURE_MODULES:
              self.featureSupported = True
              self.supportedModules = UNSUPPORTED_FEATURE_MODULES
-@@ -815,6 +1011,7 @@
+@@ -815,6 +1089,7 @@
              return
  
          self.featureSupported = False
@@ -249,12 +327,12 @@
  
          self.typeInfo.onEndFeature()
  
-@@ -837,8 +1034,30 @@
+@@ -837,8 +1112,30 @@
              return
  
          self.typeInfo.onGenType(typeinfo, name, alias)
 -        self.forEachWrapper(lambda w: w.onGenType(typeinfo, name, alias), self.supportedModules)
- 
++
 +        # reg.py declares every type EXACTLY ONCE, under the FIRST feature that <require>s it. A
 +        # supported extension can therefore reference a type owned by an UNSUPPORTED one — e.g.
 +        # VK_EXT_extended_dynamic_state3's vkCmdSetViewportSwizzleNV takes a
@@ -275,7 +353,7 @@
 +        modules = self.supportedModules
 +        if not self.featureListed and name in REQUIRED_TYPES:
 +            modules = None
-+
+ 
 +        self.forEachWrapper(lambda w: w.onGenType(typeinfo, name, alias), modules)
 +
      def genStruct(self, typeinfo, typeName, alias):

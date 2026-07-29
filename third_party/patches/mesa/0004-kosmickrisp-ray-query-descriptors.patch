@@ -1,0 +1,217 @@
+diff --git a/src/kosmickrisp/vulkan/kk_descriptor_set.c b/src/kosmickrisp/vulkan/kk_descriptor_set.c
+index 570d4ee..f92082e 100644
+--- a/src/kosmickrisp/vulkan/kk_descriptor_set.c
++++ b/src/kosmickrisp/vulkan/kk_descriptor_set.c
+@@ -7,6 +7,7 @@
+ 
+ #include "kk_descriptor_set.h"
+ 
++#include "kk_acceleration_structure.h"
+ #include "kk_bo.h"
+ #include "kk_buffer.h"
+ #include "kk_buffer_view.h"
+@@ -217,6 +218,31 @@ write_buffer_view_desc(struct kk_descriptor_set *set,
+    write_desc(set, binding, elem, &desc, sizeof(desc));
+ }
+ 
++/* VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR.
++ *
++ * The slot holds the MTLResourceID and nothing else, because the ray query
++ * lowering hands the shader this slot's address and MSL loads the
++ * raytracing::acceleration_structure straight out of it. VK_NULL_HANDLE writes
++ * a zero id, which is what nullDescriptor asks for; Metal treats a zero handle
++ * as an empty structure, so a query against it misses rather than faults.
++ *
++ * Residency is already handled: kk_CreateAccelerationStructureKHR puts a
++ * standalone MTLAccelerationStructure in the device residency set, and a heap
++ * suballocation rides on its heap's membership. Nothing per-descriptor to do.
++ */
++static void
++write_acceleration_structure_desc(struct kk_descriptor_set *set,
++                                  const VkAccelerationStructureKHR handle,
++                                  uint32_t binding, uint32_t elem)
++{
++   struct kk_acceleration_structure_descriptor desc = {};
++   if (handle != VK_NULL_HANDLE) {
++      VK_FROM_HANDLE(kk_acceleration_structure, as, handle);
++      desc.as_gpu_resource_id = as->gpu_resource_id;
++   }
++   write_desc(set, binding, elem, &desc, sizeof(desc));
++}
++
+ static void
+ write_inline_uniform_data(struct kk_descriptor_set *set,
+                           const VkWriteDescriptorSetInlineUniformBlock *info,
+@@ -282,6 +308,21 @@ kk_UpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
+          }
+          break;
+ 
++      case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR: {
++         const VkWriteDescriptorSetAccelerationStructureKHR *write_as =
++            vk_find_struct_const(write->pNext,
++                                 WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR);
++         if (write_as == NULL)
++            break;
++         assert(write_as->accelerationStructureCount == write->descriptorCount);
++         for (uint32_t j = 0; j < write_as->accelerationStructureCount; j++) {
++            write_acceleration_structure_desc(
++               set, write_as->pAccelerationStructures[j], write->dstBinding,
++               write->dstArrayElement + j);
++         }
++         break;
++      }
++
+       case VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK: {
+          const VkWriteDescriptorSetInlineUniformBlock *write_inline =
+             vk_find_struct_const(write->pNext,
+@@ -393,6 +434,21 @@ kk_push_descriptor_set_update(struct kk_push_descriptor_set *push_set,
+          }
+          break;
+ 
++      case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR: {
++         const VkWriteDescriptorSetAccelerationStructureKHR *write_as =
++            vk_find_struct_const(write->pNext,
++                                 WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR);
++         if (write_as == NULL)
++            break;
++         assert(write_as->accelerationStructureCount == write->descriptorCount);
++         for (uint32_t j = 0; j < write_as->accelerationStructureCount; j++) {
++            write_acceleration_structure_desc(
++               &set, write_as->pAccelerationStructures[j], write->dstBinding,
++               write->dstArrayElement + j);
++         }
++         break;
++      }
++
+       default:
+          break;
+       }
+@@ -767,6 +823,16 @@ kk_descriptor_set_write_template(
+          }
+          break;
+ 
++      case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR:
++         for (uint32_t j = 0; j < entry->array_count; j++) {
++            const VkAccelerationStructureKHR *as =
++               data + entry->offset + j * entry->stride;
++
++            write_acceleration_structure_desc(set, *as, entry->binding,
++                                              entry->array_element + j);
++         }
++         break;
++
+       case VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK:
+          write_desc(set, entry->binding, entry->array_element,
+                     data + entry->offset, entry->array_count);
+diff --git a/src/kosmickrisp/vulkan/kk_descriptor_set_layout.c b/src/kosmickrisp/vulkan/kk_descriptor_set_layout.c
+index 6e6db1a..a58b402 100644
+--- a/src/kosmickrisp/vulkan/kk_descriptor_set_layout.c
++++ b/src/kosmickrisp/vulkan/kk_descriptor_set_layout.c
+@@ -53,6 +53,14 @@ kk_descriptor_stride_align_for_type(
+       *stride = *alignment = sizeof(struct kk_buffer_address);
+       break;
+ 
++   case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR:
++      /* One MTLResourceID. The ray query lowering takes the address of this
++       * slot, so the alignment has to be the natural 8 — MSL loads the
++       * acceleration structure object straight out of it. */
++      *stride = *alignment =
++         sizeof(struct kk_acceleration_structure_descriptor);
++      break;
++
+    case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+    case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+       *stride = *alignment = 0; /* These don't take up buffer space */
+diff --git a/src/kosmickrisp/vulkan/kk_descriptor_types.h b/src/kosmickrisp/vulkan/kk_descriptor_types.h
+index 5296366..37a9832 100644
+--- a/src/kosmickrisp/vulkan/kk_descriptor_types.h
++++ b/src/kosmickrisp/vulkan/kk_descriptor_types.h
+@@ -32,6 +32,25 @@ struct kk_storage_image_descriptor {
+ static_assert(sizeof(struct kk_storage_image_descriptor) == 8,
+               "kk_storage_image_descriptor has no holes");
+ 
++/* VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR.
++ *
++ * Metal names an acceleration structure by MTLResourceID, exactly like a
++ * texture, so the descriptor is the same 8 bytes as a storage image. What
++ * differs is how the shader consumes it: a texture is fetched by the argument
++ * table, while MSL only builds a raytracing::acceleration_structure by
++ * dereferencing a device pointer to the resource id. So the ray query lowering
++ * hands the shader the ADDRESS of this slot rather than its contents, and
++ * nir_to_msl's kk_acceleration_structure() does the load. Keep it 8 bytes: the
++ * MSL side reinterprets the slot as the structure object itself, and a wider
++ * descriptor would put padding where Metal expects the handle.
++ */
++struct kk_acceleration_structure_descriptor {
++   uint64_t as_gpu_resource_id;
++};
++
++static_assert(sizeof(struct kk_acceleration_structure_descriptor) == 8,
++              "kk_acceleration_structure_descriptor has no holes");
++
+ /* This has to match nir_address_format_64bit_bounded_global */
+ struct kk_buffer_address {
+    uint64_t base_addr;
+diff --git a/src/kosmickrisp/vulkan/kk_nir_lower_descriptors.c b/src/kosmickrisp/vulkan/kk_nir_lower_descriptors.c
+index 49f40a4..e8a9fe5 100644
+--- a/src/kosmickrisp/vulkan/kk_nir_lower_descriptors.c
++++ b/src/kosmickrisp/vulkan/kk_nir_lower_descriptors.c
+@@ -219,6 +219,37 @@ load_descriptor(nir_builder *b, unsigned num_components, unsigned bit_size,
+    }
+ }
+ 
++/* The ADDRESS of a descriptor slot, rather than its contents.
++ *
++ * Only VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR needs this. Every other
++ * descriptor is a value the shader loads and uses, but MSL has no way to build
++ * a raytracing::acceleration_structure out of a MTLResourceID held in a
++ * register — the only constructor is a dereference of a device pointer to the
++ * id (see kk_acceleration_structure() in nir_to_msl.c). So the shader carries
++ * the slot address and does the load itself, which also means the descriptor
++ * can be rewritten between dispatches without recompiling.
++ */
++static nir_def *
++load_descriptor_addr(nir_builder *b, uint32_t set, uint32_t binding,
++                     nir_def *index, const struct lower_descriptors_ctx *ctx)
++{
++   const struct kk_descriptor_set_binding_layout *binding_layout =
++      get_binding_layout(set, binding, ctx);
++
++   assert(binding_layout->stride > 0);
++
++   if (ctx->clamp_desc_array_bounds)
++      index =
++         nir_umin(b, index, nir_imm_int(b, binding_layout->array_size - 1));
++
++   nir_def *offset =
++      nir_iadd_imm(b, nir_imul_imm(b, index, binding_layout->stride),
++                   binding_layout->offset);
++
++   return nir_iadd(b, load_descriptor_set_addr(b, set, ctx),
++                   nir_u2u64(b, offset));
++}
++
+ static bool
+ is_idx_intrin(nir_intrinsic_instr *intrin)
+ {
+@@ -247,6 +278,11 @@ load_descriptor_for_idx_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
+    uint32_t binding = nir_intrinsic_binding(intrin);
+    index = nir_iadd(b, index, intrin->src[0].ssa);
+ 
++   /* Acceleration structures want the slot address, everything else the slot. */
++   if (nir_intrinsic_desc_type(intrin) ==
++       nir_descriptor_type_acceleration_structure)
++      return load_descriptor_addr(b, set, binding, index, ctx);
++
+    return load_descriptor(b, 4, 32, set, binding, index, 0, ctx);
+ }
+ 
+@@ -265,6 +301,8 @@ try_lower_load_vulkan_descriptor(nir_builder *b, nir_intrinsic_instr *intrin,
+    }
+ 
+    nir_def *desc = load_descriptor_for_idx_intrin(b, idx_intrin, ctx);
++   assert(desc->num_components == intrin->def.num_components &&
++          desc->bit_size == intrin->def.bit_size);
+ 
+    nir_def_rewrite_uses(&intrin->def, desc);
+ 

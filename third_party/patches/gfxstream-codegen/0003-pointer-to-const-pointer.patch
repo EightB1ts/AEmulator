@@ -1,0 +1,677 @@
+--- a/scripts/cereal/common/codegen.py
++++ b/scripts/cereal/common/codegen.py
+@@ -655,6 +655,41 @@
+     def generalStrideAccess(self, vulkanType, parentVarName="parent"):
+         return self.makeStrideAccess(vulkanType, parentVarName)
+ 
++    # The INNER length of a `T* const*` array — how many elements each pointer points at — resolved
++    # the same way a `len` is: the expression may name another member of the same struct, or another
++    # parameter of the same command, or be neither (a literal "1", or "pInfos[i].geometryCount",
++    # which is a subscript into a sibling parameter and is already valid C where it is emitted).
++    #
++    # `loopVar` names the generated outer loop variable, because an inner length is allowed to
++    # depend on the outer index. Returns None when the array is not a marshalable array of
++    # pointers, which is what makes iterateVulkanType refuse it.
++    def makeInnerLengthAccess(self, vulkanType, parentVarName="parent", loopVar=None):
++        if loopVar is None:
++            lenExpr = vulkanType.getInnerLengthExpression()
++        else:
++            lenExpr = vulkanType.getInnerLengthExpression(loopVar)
++
++        if lenExpr is None:
++            return None
++
++        if isinstance(vulkanType.parent, VulkanCompoundType):
++            if vulkanType.parent.getMember(lenExpr):
++                return "%s->%s" % (parentVarName, lenExpr)
++            return lenExpr
++
++        if isinstance(vulkanType.parent, VulkanAPI):
++            lenExprInfo = vulkanType.parent.getParameter(lenExpr)
++            if lenExprInfo is None:
++                return lenExpr
++            deref = "*" if lenExprInfo.pointerIndirectionLevels > 0 else ""
++            return "(%s(%s))" % (deref, lenExpr)
++
++        return lenExpr
++
++    def generalInnerLengthAccess(self, vulkanType, parentVarName="parent", loopVar=None):
++        return self.makeInnerLengthAccess(
++            vulkanType, parentVarName=parentVarName, loopVar=loopVar)
++
+     def vkApiCall(self, api, customPrefix="", globalStatePrefix="", customParameters=None, checkForDeviceLost=False, checkForOutOfMemory=False):
+         callLhs = None
+ 
+--- a/scripts/cereal/common/vulkantypes.py
++++ b/scripts/cereal/common/vulkantypes.py
+@@ -284,8 +284,66 @@
+     "vkCmdBindVertexBuffers.local_pBuffers",
+     "vkCmdClearColorImage.pColor",
+     "vkCmdClearColorImage.local_pColor",
++}
++
++# -------------------------------------------------------------------------------------------------
++# AEMULATOR: `T* const*` — an ARRAY OF POINTERS, not a pointer to an array.
++#
++# iterateVulkanType() used to refuse this shape outright
++#     if not vulkanType.isArrayOfStrings():
++#         if vulkanType.isPointerToConstPointer:
++#             return False
++# so every emitter skipped the member in silence: the encoder wrote no bytes for it, the decoder
++# read none, and the host handed the driver an uninitialized pointer. That is exactly the shape of
++#     VkAccelerationStructureBuildGeometryInfoKHR::ppGeometries      (len="geometryCount,1")
++#     vkCmdBuildAccelerationStructuresKHR::ppBuildRangeInfos         (len="infoCount")
++#     vkBuildAccelerationStructuresKHR::ppBuildRangeInfos            (len="infoCount")
++#     vkCmdBuildAccelerationStructuresIndirectKHR::ppMaxPrimitiveCounts
++#     VkMicromapBuildInfoEXT::ppUsageCounts                          (len="usageCountsCount,1")
++# which is why ray tracing could not reach the guest no matter what was added to SUPPORTED_FEATURES:
++# the blocker was the type model, not the feature allow-list.
++#
++# TWO LENGTHS. The OUTER length is the ordinary `len` — how many POINTERS the array holds. The INNER
++# length is how many elements EACH of those pointers points at, and vk.xml spells it as the SECOND
++# component of `len` when it bothers to: len="geometryCount,1" means one element per pointer.
++# (len="enabledLayerCount,null-terminated" is the string-array spelling of the same idea, and keeps
++# its own handler: onStringArray.)
++#
++# For the acceleration-structure BUILD commands the registry states only the outer length and leaves
++# the inner one to prose — "ppBuildRangeInfos[i] must be a valid pointer to an array of
++# pInfos[i].geometryCount VkAccelerationStructureBuildRangeInfoKHR structures". A registry-driven
++# generator cannot discover that, so it is stated here, once, for every emitter to share. `%s` is
++# substituted with the name of the generated OUTER loop variable, because an inner length is allowed
++# to depend on the outer index — and for these commands it does.
++#
++# Keyed by VulkanType.getFullName(), i.e. "<command or struct>.<parameter or member>".
++POINTER_ARRAY_INNER_LENGTHS = {
++    "vkCmdBuildAccelerationStructuresKHR.ppBuildRangeInfos": "pInfos[%s].geometryCount",
++    "vkBuildAccelerationStructuresKHR.ppBuildRangeInfos": "pInfos[%s].geometryCount",
++    "vkCmdBuildAccelerationStructuresIndirectKHR.ppMaxPrimitiveCounts":
++        "pInfos[%s].geometryCount",
++    # SPELL IT TWICE. The guest encoder does not marshal the caller's array: EncodingParameters
++    # deepcopies every input parameter into `local_<name>` and hands THAT to counting, transform and
++    # reservedmarshal. Those passes therefore see a VulkanType whose paramName — and so whose
++    # getFullName() — is the local_ spelling, and an entry keyed only on the original name leaves
++    # them emitting `(void)local_ppBuildRangeInfos;` while deepcopy alone does the right thing:
++    # the encoder would reserve a packet, write nothing into the tail of it, and desynchronize the
++    # host. STRUCT_MEMBER_IGNORE_OPTIONAL carries both spellings for the same reason.
++    #
++    # The length expressions stay in terms of the ORIGINAL parameters, which is this generator's own
++    # convention for lengths in the local_ passes (see the generated `i < (uint32_t)((infoCount))`
++    # in a local_ marshal loop) and is correct either way: deepcopy copies geometryCount verbatim.
++    "vkCmdBuildAccelerationStructuresKHR.local_ppBuildRangeInfos": "pInfos[%s].geometryCount",
++    "vkBuildAccelerationStructuresKHR.local_ppBuildRangeInfos": "pInfos[%s].geometryCount",
++    "vkCmdBuildAccelerationStructuresIndirectKHR.local_ppMaxPrimitiveCounts":
++        "pInfos[%s].geometryCount",
+ }
+ 
++# The loop variables the array-of-pointers emitters generate. Named here rather than spelled in each
++# emitter because POINTER_ARRAY_INNER_LENGTHS' expressions are written in terms of the outer one.
++POINTER_ARRAY_OUTER_LOOP_VAR = "i"
++POINTER_ARRAY_INNER_LOOP_VAR = "j"
++
+ # Holds information about a Vulkan type instance (i.e., not a type definition).
+ # Type instances are used as struct field definitions or function parameters,
+ # to be later fed to code generation.
+@@ -308,6 +366,10 @@
+         # packed at sizeof(T) in the caller's memory: consecutive elements are `stride` BYTES
+         # apart. It names another parameter (or struct member) holding that byte distance.
+         self.strideExpr: Optional[str] = None
++        # SECOND component of the `len` attribute. For a `T* const*` array that is the number of
++        # elements behind EACH pointer (len="geometryCount,1"); for an array of strings it is the
++        # literal "null-terminated". See POINTER_ARRAY_INNER_LENGTHS and getInnerLengthExpression().
++        self.innerLenExpr: Optional[str] = None
+         self.isOptional: bool = False
+         self.optionalStr: Optional[str] = None  # Value of the `optional` attribute in the spec
+ 
+@@ -372,6 +434,63 @@
+     def isArrayOfStrings(self):
+         return self.isPointerToConstPointer and (self.typeName == "char")
+ 
++    # AEMULATOR: is this a `T* const*` array of pointers whose SHAPE this generator understands?
++    #
++    # Deliberately excluded, each because the shape is real but the CONTENT is not describable:
++    #   char  — that is isArrayOfStrings(), which has its own handler.
++    #   void  — VkCudaLaunchInfoNV::pParams is `const void* const*`; the elements have no size in
++    #           the registry, so there is nothing to marshal. Still refused, as before.
++    #   handles — no such member exists today, and a boxed-handle array of pointers would need the
++    #           handle-mapping machinery threaded through both levels. Refused rather than guessed.
++    # See POINTER_ARRAY_INNER_LENGTHS for the whole story.
++    def isArrayOfPointers(self):
++        return self.isPointerToConstPointer and \
++               self.pointerIndirectionLevels == 2 and \
++               self.typeName not in ["char", "void"] and \
++               self.staticArrExpr == "" and \
++               self.lenExpr is not None and \
++               not self.isHandleType()
++
++    # Elements behind EACH inner pointer, as a C expression, or None when nothing states it.
++    #
++    # `loopVar` is the name of the generated OUTER loop variable: an inner length may legitimately
++    # depend on the outer index, and for the acceleration-structure build commands it does
++    # (ppBuildRangeInfos[i] holds pInfos[i].geometryCount elements).
++    def getInnerLengthExpression(self, loopVar=POINTER_ARRAY_OUTER_LOOP_VAR):
++        if not self.isArrayOfPointers():
++            return None
++        override = POINTER_ARRAY_INNER_LENGTHS.get(self.getFullName())
++        if override is not None:
++            return (override % loopVar) if "%s" in override else override
++        if self.innerLenExpr is None or self.innerLenExpr == "null-terminated":
++            return None
++        return self.innerLenExpr
++
++    # Marshalable == BOTH levels have a length. An array of pointers whose inner length nothing
++    # states is still refused by iterateVulkanType exactly as before, and that is deliberate:
++    # guessing "1" would put the wrong number of bytes on the wire and desynchronize every packet
++    # after it, which is strictly worse than not serving the extension at all.
++    def isMarshalableArrayOfPointers(self):
++        return self.getInnerLengthExpression() is not None
++
++    # The type of ONE element of the outer array: `const T* const*` -> `const T*`.
++    #
++    # getForValueAccess() cannot be used for this: it decrements the indirection level but leaves
++    # isPointerToConstPointer set, and makeCTypeDecl would then spell the result `const T* const*`
++    # all over again.
++    def getForInnerPointerAccess(self):
++        res = self.getCopy()
++        res.isPointerToConstPointer = False
++        res.pointerIndirectionLevels = self.pointerIndirectionLevels - 1
++        # The inner pointer's own length is the INNER length, which callers pass explicitly; leaving
++        # the outer `len` attached would make generalLengthAccess() answer for the wrong level.
++        res.lenExpr = None
++        res.innerLenExpr = None
++        res.strideExpr = None
++        res.isOptional = False
++        res.optionalStr = None
++        return res
++
+     def primEncodingSize(self):
+         return self.primitiveEncodingSize
+ 
+@@ -701,6 +820,11 @@
+     if tag.attrib.get("len") is not None:
+         lengths = tag.attrib.get("len").split(",")
+         res.lenExpr = lengths[0]
++        # AEMULATOR: a second component describes the level BELOW. For `T* const*` it is the number
++        # of elements behind each pointer; for `char* const*` it is "null-terminated". Everything
++        # past the second is ignored, as nothing in the registry has three.
++        if len(lengths) > 1:
++            res.innerLenExpr = lengths[1].strip()
+ 
+     # Process the stride expression. Only ever set alongside `len`; see getStrideExpression().
+     if tag.attrib.get("stride") is not None:
+@@ -1157,13 +1281,36 @@
+ # General function to iterate over a vulkan type and call code that processes
+ # each of its sub-components, if any.
+ def iterateVulkanType(typeInfo: VulkanTypeInfo, vulkanType: VulkanType, forEachType):
+-    if not vulkanType.isArrayOfStrings():
+-        if vulkanType.isPointerToConstPointer:
+-            return False
+-
+-    if vulkanType.shouldSkip():
++    if vulkanType.shouldSkip():
+         return False
++
++    # AEMULATOR: `T* const*`. An array of STRINGS is one special case of that shape and keeps its
++    # own handler (onStringArray, which leans on the null terminator to find the inner length); the
++    # general case is an array of POINTERS and goes to onPointerArray, which walks BOTH levels.
++    #
++    # Anything whose inner length nothing states is still refused here, and returning False is the
++    # right answer: the member is then skipped by every emitter consistently, which loses data but
++    # keeps the packet boundary intact. See POINTER_ARRAY_INNER_LENGTHS.
++    if vulkanType.isPointerToConstPointer and not vulkanType.isArrayOfStrings():
++        if not vulkanType.isMarshalableArrayOfPointers():
++            return False
+ 
++        forEachType.registerTypeInfo(typeInfo)
++
++        # The OUTER pointer may be optional (ppGeometries is: optional="true,false"), and that is
++        # the ordinary pointer-check word every other optional pointer already writes.
++        needCheck = vulkanType.isOptionalPointer()
++
++        if needCheck:
++            forEachType.onCheck(vulkanType)
++
++        forEachType.onPointerArray(vulkanType)
++
++        if needCheck:
++            forEachType.endCheck(vulkanType)
++
++        return True
++
+     forEachType.registerTypeInfo(typeInfo)
+ 
+     needCheck = vulkanType.isOptionalPointer()
+@@ -1252,7 +1399,33 @@
+         return "(%s*)((%s*)(%s) + (%s) * (%s))" % (
+             elemType, byteType, access, loopVar, strideAccess)
+ 
++    # AEMULATOR: the two levels of a `T* const*` array, resolved in ONE place so that marshal,
++    # reservedunmarshal, deepcopy, transform and counting cannot drift apart on what they are.
++    #
++    #   outerVar / innerVar    the generated loop variable names (see POINTER_ARRAY_*_LOOP_VAR)
++    #   innerLenAccess         elements behind EACH pointer, as a C expression; may use outerVar
++    #   elemPtrDecl            C spelling of one OUTER element:  const T*
++    #   elemPtrDeclNonConst                                      T*
++    #   elemDeclNonConst       C spelling of one INNER element:  T
++    #   isCompound             whether the elements need a generated per-struct call
++    def pointerArrayLevels(self, vulkanType, parentVarName=None):
++        outerVar = POINTER_ARRAY_OUTER_LOOP_VAR
++        elemPtrType = vulkanType.getForInnerPointerAccess()
++        return {
++            "outerVar": outerVar,
++            "innerVar": POINTER_ARRAY_INNER_LOOP_VAR,
++            "innerLenAccess": self.cgen.generalInnerLengthAccess(
++                vulkanType, parentVarName=parentVarName, loopVar=outerVar),
++            "elemPtrType": elemPtrType,
++            "elemPtrDecl": self.cgen.makeCTypeDecl(elemPtrType, useParamName=False),
++            "elemPtrDeclNonConst": self.cgen.makeCTypeDecl(
++                elemPtrType.getForNonConstAccess(), useParamName=False),
++            "elemDeclNonConst": self.cgen.makeCTypeDecl(
++                elemPtrType.getForValueAccess().getForNonConstAccess(), useParamName=False),
++            "isCompound": self.typeInfo.isCompoundType(vulkanType.typeName),
++        }
+ 
++
+ # Every (arrayParam, strideParam) pair this command's registry entry marks with `stride`.
+ #
+ # Both must be real parameters of the command: the decoders normalize the stride ARGUMENT after
+--- a/scripts/cereal/counting.py
++++ b/scripts/cereal/counting.py
+@@ -377,10 +377,58 @@
+         self.cgen.beginFor("uint32_t i = 0", "i < %s" % lenAccess, "++i")
+         self.cgen.stmt("size_t l = %s[i] ? strlen(%s[i]) : 0" % (access, access))
+         self.genCount("sizeof(uint32_t) + (%s[i] ? strlen(%s[i]) : 0)" % (access, access))
++        self.cgen.endFor()
++        if lenAccessGuard is not None:
++            self.cgen.endIf()
++
++    # AEMULATOR: `T* const*`. Counting has to agree with reservedmarshal's WRITE pass to the byte
++    # or the encoder overruns its own reserved packet, so this mirrors that loop structure exactly:
++    # outer `len` pointers, inner `len` elements each, nothing else on the wire.
++    def onPointerArray(self, vulkanType):
++        access = self.exprAccessor(vulkanType)
++        lenAccess = self.lenAccessor(vulkanType)
++        lenAccessGuard = self.lenAccessorGuard(vulkanType)
++        levels = self.pointerArrayLevels(vulkanType, parentVarName=self.toCountVar)
++
++        outerVar = levels["outerVar"]
++        innerVar = levels["innerVar"]
++        innerLen = levels["innerLenAccess"]
++
++        self.cgen.beginBlock()
++
++        if lenAccessGuard is not None:
++            self.cgen.beginIf(lenAccessGuard)
++
++        self.cgen.beginFor("uint32_t %s = 0" % outerVar,
++                           "%s < (uint32_t)%s" % (outerVar, lenAccess),
++                           "++%s" % outerVar)
++
++        if levels["isCompound"]:
++            self.cgen.beginFor("uint32_t %s = 0" % innerVar,
++                               "%s < (uint32_t)%s" % (innerVar, innerLen),
++                               "++%s" % innerVar)
++            self.cgen.funcCall(None, self.prefix + vulkanType.typeName,
++                               [self.featureBitsVar, self.rootTypeVar,
++                                "(%s)(%s[%s] + %s)" % (
++                                    levels["elemPtrDecl"], access, outerVar, innerVar),
++                                self.countVar])
++            self.cgen.endFor()
++        elif self.typeInfo.isNonAbiPortableType(vulkanType.typeName):
++            self.cgen.beginFor("uint32_t %s = 0" % innerVar,
++                               "%s < (uint32_t)%s" % (innerVar, innerLen),
++                               "++%s" % innerVar)
++            self.genPrimitiveStreamCall(levels["elemPtrType"].getForValueAccess())
++            self.cgen.endFor()
++        else:
++            self.genCount("%s * sizeof(%s)" % (innerLen, levels["elemDeclNonConst"]))
++
+         self.cgen.endFor()
++
+         if lenAccessGuard is not None:
+             self.cgen.endIf()
+ 
++        self.cgen.endBlock()
++
+     def onStaticArr(self, vulkanType):
+         access = self.exprValueAccessor(vulkanType)
+         lenAccess = self.lenAccessor(vulkanType)
+--- a/scripts/cereal/deepcopy.py
++++ b/scripts/cereal/deepcopy.py
+@@ -181,6 +181,77 @@
+ 
+         self.cgen.endIf()
+ 
++    # AEMULATOR: `T* const*`. The copy owns BOTH levels out of the pool — an outer array of `len`
++    # pointers, then one packed inner array per pointer — so that the copy outlives the caller's
++    # memory the way every other deepcopy'd array does. Inner lengths come from the same expression
++    # the marshalers use, which is what keeps a deepcopy'd struct marshalable.
++    def onPointerArray(self, vulkanType):
++        accessLhs = self.exprAccessorLhs(vulkanType)
++        accessRhs = self.exprAccessorRhs(vulkanType)
++        lenAccessLhs = self.lenAccessorLhs(vulkanType)
++        lenAccessGuardLhs = self.lenAccessorGuardLhs(vulkanType)
++        levels = self.pointerArrayLevels(vulkanType, parentVarName=self.inputVars[0])
++
++        outerVar = levels["outerVar"]
++        innerVar = levels["innerVar"]
++        innerLen = levels["innerLenAccess"]
++
++        self.cgen.beginBlock()
++        self.cgen.stmt("%s = nullptr" % accessRhs)
++
++        if lenAccessGuardLhs is not None:
++            self.cgen.beginIf(lenAccessGuardLhs)
++
++        self.cgen.beginIf(accessLhs)
++        # NON-const cast, like onCompoundType's: the destination may be a `T**` local (the guest
++        # encoder declares its local copies with getForNonConstAccess) as easily as a
++        # `const T* const*` struct member, and only the non-const spelling converts to both.
++        self.cgen.stmt("%s = (%s*)%s->alloc(%s * sizeof(%s))" % (
++            accessRhs, levels["elemPtrDeclNonConst"], self.poolVarName,
++            lenAccessLhs, levels["elemPtrDecl"]))
++
++        self.cgen.beginFor("uint32_t %s = 0" % outerVar,
++                           "%s < (uint32_t)%s" % (outerVar, lenAccessLhs),
++                           "++%s" % outerVar)
++
++        srcVar = self.cgen.var()
++        dstVar = self.cgen.var()
++        self.cgen.stmt("%s %s = %s[%s]" % (
++            levels["elemPtrDecl"], srcVar, accessLhs, outerVar))
++        self.cgen.stmt("%s %s = nullptr" % (levels["elemPtrDeclNonConst"], dstVar))
++
++        self.cgen.beginIf(srcVar)
++        self.cgen.stmt("%s = (%s)%s->alloc(%s * sizeof(%s))" % (
++            dstVar, levels["elemPtrDeclNonConst"], self.poolVarName,
++            innerLen, levels["elemDeclNonConst"]))
++
++        if levels["isCompound"]:
++            self.cgen.beginFor("uint32_t %s = 0" % innerVar,
++                               "%s < (uint32_t)%s" % (innerVar, innerLen),
++                               "++%s" % innerVar)
++            self.cgen.funcCall(None, self.prefix + vulkanType.typeName,
++                               [self.poolVarName, self.rootVarName,
++                                "(%s)(%s + %s)" % (levels["elemPtrDecl"], srcVar, innerVar),
++                                "(%s)(%s + %s)" % (
++                                    levels["elemPtrDeclNonConst"], dstVar, innerVar)])
++            self.cgen.endFor()
++        else:
++            self.cgen.stmt("memcpy((void*)%s, (const void*)%s, %s * sizeof(%s))" % (
++                dstVar, srcVar, innerLen, levels["elemDeclNonConst"]))
++
++        self.cgen.endIf()
++
++        self.cgen.stmt("((%s*)(%s))[%s] = %s" % (
++            levels["elemPtrDecl"], accessRhs, outerVar, dstVar))
++
++        self.cgen.endFor()
++        self.cgen.endIf()
++
++        if lenAccessGuardLhs is not None:
++            self.cgen.endIf()
++
++        self.cgen.endBlock()
++
+     def onStaticArr(self, vulkanType):
+         accessLhs = self.exprAccessorValueLhs(vulkanType)
+         accessRhs = self.exprAccessorValueRhs(vulkanType)
+--- a/scripts/cereal/handlemap.py
++++ b/scripts/cereal/handlemap.py
+@@ -101,6 +101,11 @@
+     def onStringArray(self, vulkanType):
+         pass
+ 
++    # AEMULATOR: `T* const*`. isArrayOfPointers() refuses handle types outright, so an array of
++    # pointers never contains a handle to map. Should one ever appear, teach that predicate first.
++    def onPointerArray(self, vulkanType):
++        pass
++
+     def onStaticArr(self, vulkanType):
+         if not self.isHandleFunc(vulkanType):
+             return
+--- a/scripts/cereal/marshaling.py
++++ b/scripts/cereal/marshaling.py
+@@ -469,6 +469,77 @@
+ 
+             self.cgen.stmt("%s->loadStringArrayInPlace(%s&%s)" % (self.streamVarName, castExpr, access))
+ 
++    # AEMULATOR: `T* const*`. Byte-for-byte the same wire format as
++    # VulkanReservedMarshalingCodegen.onPointerArray (read its comment — it holds the reasoning);
++    # this pair just moves the bytes through VulkanStream instead of a reserved pointer.
++    def onPointerArray(self, vulkanType):
++        access = self.exprAccessor(vulkanType)
++        lenAccess = self.lenAccessor(vulkanType)
++        lenAccessGuard = self.lenAccessorGuard(vulkanType)
++        levels = self.pointerArrayLevels(vulkanType, parentVarName=self.inputVarName)
++
++        outerVar = levels["outerVar"]
++        innerVar = levels["innerVar"]
++        innerLen = levels["innerLenAccess"]
++        hostAllocates = self.direction == "read" and self.dynAlloc
++
++        self.cgen.beginBlock()
++
++        if self.direction == "read":
++            self.cgen.stmt("%s = nullptr" % access)
++
++        if lenAccessGuard is not None:
++            self.cgen.beginIf(lenAccessGuard)
++
++        if hostAllocates:
++            self.cgen.stmt("%s->alloc((void**)&%s, %s * sizeof(%s))" % (
++                self.streamVarName, access, lenAccess, levels["elemPtrDecl"]))
++
++        self.cgen.beginFor("uint32_t %s = 0" % outerVar,
++                           "%s < (uint32_t)%s" % (outerVar, lenAccess),
++                           "++%s" % outerVar)
++
++        if hostAllocates:
++            elemVar = self.cgen.var()
++            self.cgen.stmt("%s %s = nullptr" % (levels["elemPtrDeclNonConst"], elemVar))
++            self.cgen.stmt("%s->alloc((void**)&%s, %s * sizeof(%s))" % (
++                self.streamVarName, elemVar, innerLen, levels["elemDeclNonConst"]))
++        else:
++            elemVar = "%s[%s]" % (access, outerVar)
++
++        elemCast = levels["elemPtrDecl"] if self.direction == "write" \
++            else levels["elemPtrDeclNonConst"]
++
++        if levels["isCompound"]:
++            self.cgen.beginFor("uint32_t %s = 0" % innerVar,
++                               "%s < (uint32_t)%s" % (innerVar, innerLen),
++                               "++%s" % innerVar)
++            self.cgen.funcCall(None, self.marshalPrefix + vulkanType.typeName,
++                               [self.streamVarName, self.rootTypeVarName,
++                                "(%s)(%s + %s)" % (elemCast, elemVar, innerVar)])
++            self.cgen.endFor()
++        elif self.typeInfo.isNonAbiPortableType(vulkanType.typeName):
++            self.cgen.beginFor("uint32_t %s = 0" % innerVar,
++                               "%s < (uint32_t)%s" % (innerVar, innerLen),
++                               "++%s" % innerVar)
++            self.genPrimitiveStreamCall(levels["elemPtrType"].getForValueAccess(),
++                                        "%s[%s]" % (elemVar, innerVar))
++            self.cgen.endFor()
++        else:
++            self.genStreamCall(levels["elemPtrType"], elemVar,
++                               "%s * sizeof(%s)" % (innerLen, levels["elemDeclNonConst"]))
++
++        if hostAllocates:
++            self.cgen.stmt("((%s*)(%s))[%s] = %s" % (
++                levels["elemPtrDecl"], access, outerVar, elemVar))
++
++        self.cgen.endFor()
++
++        if lenAccessGuard is not None:
++            self.cgen.endIf()
++
++        self.cgen.endBlock()
++
+     def onStaticArr(self, vulkanType):
+         access = self.exprValueAccessor(vulkanType)
+         lenAccess = self.lenAccessor(vulkanType)
+--- a/scripts/cereal/reservedmarshaling.py
++++ b/scripts/cereal/reservedmarshaling.py
+@@ -606,6 +606,101 @@
+ 
+             self.cgen.stmt("%s->loadStringArrayInPlaceWithStreamPtr(%s&%s, %s)" % (self.streamVarName, castExpr, access, self.ptrVar))
+ 
++    # AEMULATOR: `T* const*` — see POINTER_ARRAY_INNER_LENGTHS in common/vulkantypes.py for why
++    # this shape needed teaching at all.
++    #
++    # WIRE FORMAT
++    # -----------
++    #     for each of the OUTER `len` pointers:
++    #         the INNER `len` elements it points at, each serialized exactly as a lone T would be
++    # and nothing else. Neither count travels: both are ordinary length expressions that the two
++    # sides evaluate from already-decoded siblings (geometryCount / infoCount / pInfos[i]...),
++    # exactly as every other array in this generator does. Writer and reader therefore emit the
++    # SAME loop bounds from the SAME source, which is the property that keeps the stream in sync.
++    #
++    # A count on the wire was tried on paper and rejected: it would let the encoder describe an
++    # inner array SHORTER than the one the host driver is going to read, because the driver reads
++    # pInfos[i].geometryCount elements whatever the wire says. The allocation must be sized by the
++    # expression the driver uses, so making the wire authoritative would buy a desync-proof stream
++    # at the price of a short buffer — a worse bug, and a silent one.
++    #
++    # The reader ALLOCATES BOTH LEVELS itself (`len` pointers, then one packed buffer per pointer)
++    # and never dereferences anything the guest sent. The outer pointer's nullability rides on the
++    # ordinary optional-pointer check word emitted by iterateVulkanType; the INNER pointers are
++    # dereferenced unguarded, which is what the registry asks for (ppGeometries is
++    # optional="true,false": the outer may be null, each inner may not).
++    def onPointerArray(self, vulkanType):
++        access = self.exprAccessor(vulkanType)
++        lenAccess = self.lenAccessor(vulkanType)
++        lenAccessGuard = self.lenAccessorGuard(vulkanType)
++        levels = self.pointerArrayLevels(vulkanType, parentVarName=self.inputVarName)
++
++        outerVar = levels["outerVar"]
++        innerVar = levels["innerVar"]
++        innerLen = levels["innerLenAccess"]
++        hostAllocates = self.direction == "read" and self.dynAlloc
++
++        self.cgen.beginBlock()
++
++        if self.direction == "read":
++            # Must precede the length guard: if the guard is false nothing below runs, and the
++            # decoded parameter would otherwise be handed to the driver uninitialized.
++            self.cgen.stmt("%s = nullptr" % access)
++
++        if lenAccessGuard is not None:
++            self.cgen.beginIf(lenAccessGuard)
++
++        if hostAllocates:
++            # sizeof the POINTER, not sizeof(T): this is the outer array.
++            self.cgen.stmt("%s->alloc((void**)&%s, %s * sizeof(%s))" % (
++                self.streamVarName, access, lenAccess, levels["elemPtrDecl"]))
++
++        self.cgen.beginFor("uint32_t %s = 0" % outerVar,
++                           "%s < (uint32_t)%s" % (outerVar, lenAccess),
++                           "++%s" % outerVar)
++
++        if hostAllocates:
++            elemVar = self.cgen.var()
++            self.cgen.stmt("%s %s = nullptr" % (levels["elemPtrDeclNonConst"], elemVar))
++            self.cgen.stmt("%s->alloc((void**)&%s, %s * sizeof(%s))" % (
++                self.streamVarName, elemVar, innerLen, levels["elemDeclNonConst"]))
++        else:
++            elemVar = "%s[%s]" % (access, outerVar)
++
++        elemCast = levels["elemPtrDecl"] if self.direction == "write" \
++            else levels["elemPtrDeclNonConst"]
++
++        if levels["isCompound"]:
++            self.cgen.beginFor("uint32_t %s = 0" % innerVar,
++                               "%s < (uint32_t)%s" % (innerVar, innerLen),
++                               "++%s" % innerVar)
++            self.cgen.funcCall(None, self.marshalPrefix + vulkanType.typeName,
++                               [self.streamVarName, self.rootTypeVarName,
++                                "(%s)(%s + %s)" % (elemCast, elemVar, innerVar),
++                                self.ptrVar])
++            self.cgen.endFor()
++        elif self.typeInfo.isNonAbiPortableType(vulkanType.typeName):
++            self.cgen.beginFor("uint32_t %s = 0" % innerVar,
++                               "%s < (uint32_t)%s" % (innerVar, innerLen),
++                               "++%s" % innerVar)
++            self.genPrimitiveStreamCall(levels["elemPtrType"].getForValueAccess(),
++                                        "%s[%s]" % (elemVar, innerVar))
++            self.cgen.endFor()
++        else:
++            self.genStreamCall(levels["elemPtrType"], elemVar,
++                               "%s * sizeof(%s)" % (innerLen, levels["elemDeclNonConst"]))
++
++        if hostAllocates:
++            self.cgen.stmt("((%s*)(%s))[%s] = %s" % (
++                levels["elemPtrDecl"], access, outerVar, elemVar))
++
++        self.cgen.endFor()
++
++        if lenAccessGuard is not None:
++            self.cgen.endIf()
++
++        self.cgen.endBlock()
++
+     def onStaticArr(self, vulkanType):
+         access = self.exprValueAccessor(vulkanType)
+         lenAccess = self.lenAccessor(vulkanType)
+--- a/scripts/cereal/testing.py
++++ b/scripts/cereal/testing.py
+@@ -186,6 +186,11 @@
+ 
+         self.cgen.endIf()
+ 
++    # AEMULATOR: `T* const*`. This module is not registered by cerealgenerator; the handler exists
++    # so the iterator interface stays complete.
++    def onPointerArray(self, vulkanType):
++        pass
++
+     def onStringArray(self, vulkanType):
+         accessLhs = self.exprAccessorLhs(vulkanType)
+         accessRhs = self.exprAccessorRhs(vulkanType)
+--- a/scripts/cereal/transform.py
++++ b/scripts/cereal/transform.py
+@@ -190,7 +190,45 @@
+ 
+     def onStringArray(self, vulkanType):
+         pass
++
++    # AEMULATOR: `T* const*`. Same walk as onCompoundType, one level deeper. Non-compound element
++    # types have no generated transform, so nothing is emitted for them.
++    def onPointerArray(self, vulkanType):
++        if not self.typeInfo.isCompoundType(vulkanType.typeName):
++            return
++
++        access = self.exprAccessor(vulkanType)
++        lenAccess = self.lenAccessor(vulkanType)
++        lenAccessGuard = self.lenAccessorGuard(vulkanType)
++        levels = self.pointerArrayLevels(vulkanType, parentVarName=self.inputVar)
++
++        outerVar = levels["outerVar"]
++        innerVar = levels["innerVar"]
++        innerLen = levels["innerLenAccess"]
++
++        if lenAccessGuard is not None:
++            self.cgen.beginIf(lenAccessGuard)
++
++        self.cgen.beginIf(access)
++        self.cgen.beginFor("uint32_t %s = 0" % outerVar,
++                           "%s < (uint32_t)%s" % (outerVar, lenAccess),
++                           "++%s" % outerVar)
++        self.cgen.beginIf("%s[%s]" % (access, outerVar))
++        self.cgen.beginFor("uint32_t %s = 0" % innerVar,
++                           "%s < (uint32_t)%s" % (innerVar, innerLen),
++                           "++%s" % innerVar)
++        self.cgen.funcCall(None, self.prefix + vulkanType.typeName,
++                           [self.resourceTrackerVarName,
++                            "(%s)(%s[%s] + %s)" % (
++                                levels["elemPtrDeclNonConst"], access, outerVar, innerVar)])
++        self.cgen.endFor()
++        self.cgen.endIf()
++        self.cgen.endFor()
++        self.cgen.endIf()
+ 
++        if lenAccessGuard is not None:
++            self.cgen.endIf()
++
+     def onStaticArr(self, vulkanType):
+         pass
+ 

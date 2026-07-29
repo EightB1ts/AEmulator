@@ -1751,23 +1751,58 @@ index c67ac82..197cfa0 100644
  }
  
 diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
-index f7da7bf..fe38907 100644
+index f7da7bf..e9d4ac3 100644
 --- a/src/kosmickrisp/vulkan/kk_physical_device.c
 +++ b/src/kosmickrisp/vulkan/kk_physical_device.c
-@@ -138,6 +138,12 @@ kk_get_device_extensions(const struct kk_instance *instance,
+@@ -138,6 +138,47 @@ kk_get_device_extensions(const struct kk_instance *instance,
        .EXT_vertex_attribute_divisor = true,
  
        /* Optional extensions */
 +      /* Ray tracing. Metal 4 exposes acceleration structure build/refit/copy
-+       * on the compute encoder, so this is a real implementation rather than a
-+       * software BVH. VK_KHR_acceleration_structure requires
-+       * VK_KHR_deferred_host_operations, which the vulkan runtime provides. */
++       * on the compute encoder. VK_KHR_acceleration_structure requires
++       * VK_KHR_deferred_host_operations, which the vulkan runtime provides.
++       *
++       * VK_KHR_ray_query rides on the same structures: Metal's
++       * raytracing::intersection_query is an inline query object with the same
++       * shape as a Vulkan rayQueryEXT, so the NIR rq_* intrinsics translate
++       * one-to-one in nir_to_msl.c. There is no ray tracing PIPELINE here —
++       * Metal has no shader binding table — so VK_KHR_ray_tracing_pipeline
++       * stays off.
++       *
++       * MEASURED CAVEAT — Apple M2, macOS 27.0 (26A5388g). A structure built
++       * through -[MTL4ComputeCommandEncoder buildAccelerationStructure:...]
++       * intersects nothing on this GPU: every query reports
++       * CommittedIntersectionNone. Metal API validation
++       * (METAL_DEVICE_WRAPPER_TYPE=1) says why in as many words:
++       *
++       *    _validateRTDescriptorCompatibility: failed assertion
++       *    `Acceleration Structure Descriptor Validation
++       *     this device does not support Metal 4 ray tracing.'
++       *
++       * The identical BLAS+TLAS built through the legacy
++       * MTLAccelerationStructureCommandEncoder does intersect, and traces
++       * correctly from either encoder, so it is the MTL4 *build* that is
++       * unsupported and not the traversal, the descriptors or the MSL. Nothing
++       * public reports it: supportsRaytracing and
++       * supportsFamily:MTLGPUFamilyMetal4 are both YES here, and the build
++       * command raises no error and no commit feedback. What the device lacks
++       * is hardware ray tracing, which arrives with Apple9 —
++       * mtl_device_get_gpu_apple_family() answers 8 on an M2. Below Apple9
++       * Metal emulates ray tracing (its private -requiresRaytracingEmulation
++       * answers YES) and the emulated builder is reachable only from the legacy
++       * encoder.
++       *
++       * So on Apple8 and earlier a ray query compiles, dispatches and misses.
++       * The names stay advertised because the guest-side plumbing is being
++       * built against them and the shader path is exercised by them; gate on
++       * the Apple family before believing a hit. */
 +      .KHR_acceleration_structure = true,
 +      .KHR_deferred_host_operations = true,
++      .KHR_ray_query = true,
        .KHR_calibrated_timestamps = true,
        .KHR_maintenance7 = true,
        .KHR_maintenance8 = true,
-@@ -375,6 +381,15 @@ kk_get_device_features(
+@@ -375,6 +416,22 @@ kk_get_device_features(
        .presentWait2 = true,
  #endif
  
@@ -1780,10 +1815,17 @@ index f7da7bf..fe38907 100644
 +      .accelerationStructureHostCommands = false,
 +      .descriptorBindingAccelerationStructureUpdateAfterBind = true,
 +
++      /* VK_KHR_ray_query. Enables the RayQueryKHR SPIR-V capability (the
++       * vk_physical_device spirv-caps generator derives it from this bool) and
++       * VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR. Position fetch is a
++       * separate extension and stays off: MSL cannot recover the original
++       * triangle vertices from a built MTLAccelerationStructure. */
++      .rayQuery = true,
++
        /* VK_KHR_robustness2 */
        .robustBufferAccess2 = true,
        .robustImageAccess2 = true,
-@@ -813,6 +828,21 @@ kk_get_device_properties(const struct kk_physical_device *pdev,
+@@ -813,6 +870,21 @@ kk_get_device_properties(const struct kk_physical_device *pdev,
        .provokingVertexModePerPipeline = true,
        .transformFeedbackPreservesTriangleFanProvokingVertex = true,
  

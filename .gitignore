@@ -8,8 +8,10 @@ Cargo.lock.bak
 # Run logs. Nothing in this tree authors a `.log`; every one is emulator/build output.
 *.log
 
-# Test-workload APKs — fetched, not authored (3DMarkandroid is 335 MB).
+# Test-workload APKs — fetched, not authored (3DMarkandroid is 335 MB). `.xapk` is the APKPure
+# split-APK bundle (a zip of APKs), same provenance and same reason not to commit it.
 *.apk
+*.xapk
 
 # Built / downloaded disk images and firmware (never commit multi-GB blobs)
 *.img

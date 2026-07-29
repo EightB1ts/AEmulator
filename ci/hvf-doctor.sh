@@ -67,6 +67,14 @@ FIX=0
 
 if [ -t 1 ]; then C_G=$'\033[32m'; C_R=$'\033[31m'; C_Y=$'\033[33m'; C_B=$'\033[1m'; C_0=$'\033[0m'
 else C_G=; C_R=; C_Y=; C_B=; C_0=; fi
+# ONE cleanup trap for the whole script. Two different steps below need scratch files, and each
+# having its own `trap … EXIT` means the second silently REPLACES the first and leaks its files —
+# and, under `set -u`, a trap that fires before the variables it names are assigned dies with
+# "unbound variable" instead of cleaning up. Steps call scratch() and the list grows.
+CLEANUP_FILES=""
+cleanup() { [ -n "$CLEANUP_FILES" ] && rm -f $CLEANUP_FILES; return 0; }
+trap cleanup EXIT
+scratch() { _t="$(mktemp)"; CLEANUP_FILES="$CLEANUP_FILES $_t"; printf '%s' "$_t"; }
 step() { printf '\n%s==>%s %s%s%s\n' "$C_B" "$C_0" "$C_B" "$*" "$C_0"; }
 ok()   { printf '%s  ✓%s %s\n' "$C_G" "$C_0" "$*"; }
 warn() { printf '%s  ! %s%s\n' "$C_Y" "$*" "$C_0"; }
@@ -116,6 +124,136 @@ else
     the .inc, re-export third_party/patches/gfxstream/, and re-record the tree digest."
 fi
 
+step "cereal gap vs what KosmicKrisp actually advertises (the two lists are pinned independently)"
+# The step above proves the strip list matches the gfxstream pin. It says NOTHING about whether that
+# list intersects the extensions the HOST DRIVER advertises — and the intersection is where the harm
+# lives. The two inputs move for unrelated reasons:
+#
+#   TP_GFXSTREAM_SHA  decides which VkStructureTypes the cereal can decode  (VkDecoderCerealGap.inc)
+#   TP_MESA_SHA       decides which extensions KosmicKrisp advertises       (host-vulkan-identity.json)
+#
+# so bumping mesa alone can hand the renderer an extension the pinned cereal cannot handle, with
+# every other check in this script still green. That is a latent abort() of the entire VMM, minutes
+# into a boot, the first time a guest chains one of that extension's pNext structs — the exact
+# failure mode the .inc header describes. This step turns it into a doctor failure.
+#
+# It reproduces cerealGapHidesExtension() (VkDecoderGlobalState.cpp) rather than inventing a rule,
+# because that function is what the renderer runs. TWO hazards with opposite logic, both checked:
+#
+#   1. GAP        — name IS in kCerealGapExtensions: the cereal can SIZE its structs but not DECODE
+#                   them, so reservedunmarshal_extension_struct()'s default arm abort()s. Contained
+#                   by hiding the name from the guest, minus the kCerealGapExtensionsKeptAnyway
+#                   allowlist (which is a deliberate re-arming and so counts as hidden=false here).
+#   2. HORIZON    — name is in NEITHER list: the vendored registry the cereal was generated from has
+#                   never heard of it, so its structs are in neither switch and it aborts one step
+#                   EARLIER, inside goldfish_vk_extension_struct_size(). This is the hazard a strip
+#                   list is structurally blind to, and the one a mesa bump is most likely to create.
+#
+# A hit is not automatically a bug — it is an unreviewed capability loss. Every hidden name is real
+# guest capability gfxstream is silently throwing away, so each one has to be named in the deny-set
+# below with a reason. THAT LIST IS CURRENTLY EMPTY, and empty is the strong state: at the pinned
+# mesa + gfxstream pair, nothing the host advertises is undecodable. The live renderer prints the
+# same number on every boot — `[gfxstream] cereal gap: hiding 0 of 144 host device extensions` —
+# which is how this check was cross-validated against the thing it models rather than against itself.
+#
+# INPUT IS THE RECORDED GOLDEN, NOT A LIVE PROBE, so that this stays a text check with no GPU
+# dependency (and so it can run before the driver is built). A golden that no longer describes the
+# installed driver would silently weaken it to nothing, so the driver identity recorded IN the golden
+# is checked against TP_MESA_SHA first: re-recording is not optional after a mesa bump.
+IDENTITY="$HVF/gfxstream/evidence/host-vulkan-identity.json"
+GLOBALSTATE="$TP_GFXSTREAM_SRC/host/vulkan/VkDecoderGlobalState.cpp"
+[ -f "$IDENTITY" ] \
+    || fail "no host driver identity golden at $IDENTITY — record it:  bash crates/aemulator-hvf/kosmickrisp/run-gate.sh --dump-identity"
+[ -f "$GLOBALSTATE" ] || fail "no $GLOBALSTATE — the gfxstream source tree is not where paths.sh says"
+
+# The golden must describe the PINNED driver. KosmicKrisp reports its own git hash in driverInfo
+# ("Mesa 26.3.0-devel (git-4f4b73dfe5)"), so a prefix match against TP_MESA_SHA is an exact,
+# GPU-free staleness test — and it fails on precisely the event this whole step exists to catch.
+GOLDEN_DRIVERINFO="$(sed -n 's/.*"driverInfo"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$IDENTITY" | head -1)"
+GOLDEN_MESA_GIT="$(printf '%s' "$GOLDEN_DRIVERINFO" | sed -n 's/.*(git-\([0-9a-f]*\)).*/\1/p')"
+[ -n "$GOLDEN_MESA_GIT" ] \
+    || fail "could not read a (git-…) hash out of the golden's driverInfo (\"$GOLDEN_DRIVERINFO\") in
+    $IDENTITY — re-record it:  bash crates/aemulator-hvf/kosmickrisp/run-gate.sh --dump-identity"
+case "${TP_MESA_SHA:?TP_MESA_SHA is not set — third_party/MANIFEST.sh did not source}" in
+    "$GOLDEN_MESA_GIT"*) ok "golden describes the pinned driver ($GOLDEN_DRIVERINFO)" ;;
+    *) fail "the host driver identity golden is STALE. It records mesa git-$GOLDEN_MESA_GIT
+    (\"$GOLDEN_DRIVERINFO\") but TP_MESA_SHA is $TP_MESA_SHA. Every extension KosmicKrisp gained in
+    that bump is invisible to the intersection check below, which is the one thing that would have
+    caught the bump handing the pinned cereal a struct it cannot decode. Re-record it:
+    bash crates/aemulator-hvf/kosmickrisp/run-gate.sh --dump-identity" ;;
+esac
+
+# THE DENY-SET: host extensions we accept gfxstream hiding from the guest. One name per line, each
+# with the reason it is tolerable — an entry here is guest capability being thrown away, so it is a
+# review artifact, not a mute button. Empty today, and it should take evidence to make it non-empty.
+CG_DENY="$(scratch)"; CG_GAP="$(scratch)";   CG_REG="$(scratch)"; CG_KEPT="$(scratch)"
+CG_HOST="$(scratch)"; CG_HIDDEN="$(scratch)"; CG_NEW="$(scratch)"
+cat > "$CG_DENY" <<'DENY'
+DENY
+
+# Pull each table out of the SOURCE the renderer compiles. Quoted "VK_…" tokens only: the generated
+# .inc trails every entry with unquoted VK_STRUCTURE_TYPE_… comments naming the contributing types,
+# and matching those would silently inflate every list here into nonsense.
+cg_array() {  # <file> <array-identifier>
+    awk -v s="$2[] = {" 'index($0, s) {f=1; next} f && /^};/ {exit} f' "$1" \
+        | grep -oE '"VK_[A-Za-z0-9_]+"' | tr -d '"' | sort -u
+}
+cg_array "$CEREAL_INC"  kCerealGapExtensions      > "$CG_GAP"
+cg_array "$CEREAL_INC"  kCerealRegistryExtensions > "$CG_REG"
+cg_array "$GLOBALSTATE" kCerealGapExtensionsKeptAnyway > "$CG_KEPT"
+sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\(VK_[A-Za-z0-9_]*\)".*/\1/p' "$IDENTITY" | sort -u > "$CG_HOST"
+
+# An empty list here means a parse that silently stopped matching — which would make this step pass
+# unconditionally, i.e. exactly the "checker agrees with itself" failure the step above warns about.
+# Floors, not exact counts, so a legitimate regeneration does not have to touch this script.
+for _pair in "$CG_GAP:100:kCerealGapExtensions:$CEREAL_INC" \
+             "$CG_REG:400:kCerealRegistryExtensions:$CEREAL_INC" \
+             "$CG_KEPT:1:kCerealGapExtensionsKeptAnyway:$GLOBALSTATE" \
+             "$CG_HOST:50:deviceExtensions:$IDENTITY"; do
+    _f="${_pair%%:*}"; _rest="${_pair#*:}"; _min="${_rest%%:*}"; _rest="${_rest#*:}"
+    _name="${_rest%%:*}"; _src="${_rest#*:}"
+    _n="$(wc -l < "$_f" | tr -d ' ')"
+    [ "$_n" -ge "$_min" ] || fail "extracted only $_n names from $_name in $_src (expected >= $_min).
+    The extraction, not the tree, is what broke — and a silently-empty list would make this step
+    pass unconditionally. Fix cg_array()/the sed in this step before trusting a pass."
+done
+
+# hidden(name) == cerealGapHidesExtension(name), verbatim:
+#   !CerealRegistryKnowsExtension(name)  ||  (name in gap  &&  name not in keptAnyway)
+{
+    comm -23 "$CG_HOST" "$CG_REG"                              # hazard 2: beyond the registry horizon
+    comm -12 "$CG_HOST" "$CG_GAP" | comm -23 - "$CG_KEPT"      # hazard 1: in the gap, not allowlisted
+} | sort -u > "$CG_HIDDEN"
+comm -23 "$CG_HIDDEN" "$CG_DENY" > "$CG_NEW"
+
+CG_NHOST="$(wc -l < "$CG_HOST" | tr -d ' ')"
+CG_NHID="$(wc -l < "$CG_HIDDEN" | tr -d ' ')"
+if [ -s "$CG_NEW" ]; then
+    while IFS= read -r _e; do
+        [ -z "$_e" ] && continue
+        if grep -qxF "$_e" "$CG_REG"; then
+            printf '      %s  — in the cereal gap: sized but not decoded (reservedunmarshal abort)\n' "$_e" >&2
+        else
+            printf '      %s  — BEYOND THE REGISTRY HORIZON: not in the vendored registry at all\n' "$_e" >&2
+        fi
+    done < "$CG_NEW"
+    fail "KosmicKrisp advertises $(wc -l < "$CG_NEW" | tr -d ' ') device extension(s) (above) that this
+    gfxstream pin's cereal cannot decode and that are NOT in this step's documented deny-set. gfxstream
+    will hide each one from the guest, so this is not a crash today — it is silent, unreviewed loss of
+    guest capability, and a \"BEYOND THE REGISTRY HORIZON\" name is one guest ICD allow-list change away
+    from being a live abort() of the whole VMM inside goldfish_vk_extension_struct_size().
+    Pick one, deliberately:
+      * teach the cereal to decode it — add the owning feature to the codegen's SUPPORTED_FEATURES and
+        re-run third_party/regen-cereal.sh (a registry-horizon name may also need
+        third_party/downgrade-registry.py moved forward);
+      * or accept the loss — add the name to CG_DENY in this step WITH the reason, which is the whole
+        point of that list being here rather than inferred."
+fi
+# `grep -c` EXITS 1 on zero matches, so `$(grep -c … || echo 0)` prints the count AND the fallback —
+# "0\n0" in the empty-deny-set case that is the normal one. Count the filtered lines instead.
+CG_NDENY="$(grep '^VK_' "$CG_DENY" | wc -l | tr -d ' ')"
+ok "cereal gap ∩ host advertised = $CG_NHID of $CG_NHOST (deny-set: $CG_NDENY) — every extension KosmicKrisp advertises is decodable"
+
 step "gfxstream host renderer"
 [ -f "$TP_GFXSTREAM_DYLIB" ] \
     || fail "libgfxstream_backend.dylib not found at $TP_GFXSTREAM_DYLIB — build it:  third_party/bootstrap.sh gfxstream   (or point GFXSTREAM_BUILD_HOST at an existing build dir)"
@@ -160,8 +298,7 @@ abi_check() {
     fi
     ok "$_label: $(wc -l < "$TMP_NEEDS" | tr -d ' ') gfxstream symbols, all exported"
 }
-TMP_EXPORTS="$(mktemp)"; TMP_NEEDS="$(mktemp)"
-trap 'rm -f "$TMP_EXPORTS" "$TMP_NEEDS"' EXIT
+TMP_EXPORTS="$(scratch)"; TMP_NEEDS="$(scratch)"
 nm -gU "$TP_GFXSTREAM_DYLIB" 2>/dev/null \
     | awk '{print $NF}' | sed 's/^_//' | sort -u > "$TMP_EXPORTS"
 [ -s "$TMP_EXPORTS" ] || fail "could not read exported symbols from $TP_GFXSTREAM_DYLIB"

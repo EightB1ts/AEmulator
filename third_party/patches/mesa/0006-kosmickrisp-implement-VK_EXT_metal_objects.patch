@@ -1,0 +1,375 @@
+diff --git a/src/kosmickrisp/vulkan/kk_metal_objects.c b/src/kosmickrisp/vulkan/kk_metal_objects.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..0e224afe71f39093f4e8b6ca785cd23d4158cdf8
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/kk_metal_objects.c
+@@ -0,0 +1,340 @@
++/*
++ * Copyright 2025 LunarG, Inc.
++ * Copyright 2025 Google LLC
++ * SPDX-License-Identifier: MIT
++ */
++
++/*
++ * VK_EXT_metal_objects.
++ *
++ * KosmicKrisp is a Metal driver, so every Metal object this extension can hand
++ * out is already a named field of a KosmicKrisp struct. Nothing in this file
++ * creates, tracks, retains or frees anything; vkExportMetalObjectsEXT reads
++ * fields out. That is why the whole extension is one file with no state.
++ *
++ * Lifetime is *borrowed*, exactly as kk_GetMemoryMetalHandleEXT already
++ * documents for VK_EXT_external_memory_metal:
++ *
++ *    "Unless the app retains the handle object returned by the call, the
++ *     lifespan will be the same as the associated Vulkan object"
++ *
++ * The consequence is sharper here than under other Metal drivers. KosmicKrisp
++ * textures are placed into an MTLHeapTypePlacement heap (kk_alloc_bo ->
++ * mtl_new_heap), so after the owning VkImage/VkDeviceMemory is destroyed the
++ * heap range can be re-suballocated to an unrelated resource. A stale exported
++ * id<MTLTexture> therefore reads *someone else's pixels* rather than faulting.
++ * Consumers must [obj retain] and must keep the owning VkDeviceMemory alive.
++ *
++ * Hazard tracking is OFF. KK_MTL_RESOURCE_OPTIONS (kk_private.h) selects
++ * MTL_RESOURCE_TRACKING_MODE_UNTRACKED, so every exported buffer and texture is
++ * MTLHazardTrackingModeUntracked and Metal inserts *no* automatic barriers for
++ * it. Consumer code lifted from a hazard-tracked Metal driver will appear to
++ * work and then race under load. A consumer must order its own work against the
++ * driver's submissions explicitly; the natural channel is the MTLSharedEvent a
++ * VkSemaphore exports, signalled/waited by the driver's MTL4CommandQueue
++ * (mtl_command_queue_signal_event / _wait_for_event) on one side and by
++ * -[MTLCommandBuffer encodeSignalEvent:value:] on the other.
++ *
++ * Three of the extension's sub-structures are deliberately answered NULL. The
++ * reasoning for each is at its case label rather than here, because the three
++ * reasons are entirely different from one another and only one of them is a
++ * Metal limitation.
++ *
++ * Note this exports unconditionally rather than tracking whether the app
++ * chained VkExportMetalObjectCreateInfoEXT at creation time. Chaining it is a
++ * caller-side VU; exporting a superset of what was requested cannot violate it.
++ */
++
++#include "kk_buffer_view.h"
++#include "kk_device.h"
++#include "kk_device_memory.h"
++#include "kk_entrypoints.h"
++#include "kk_image.h"
++#include "kk_image_view.h"
++#include "kk_private.h"
++#include "kk_sync.h"
++
++#include "vk_semaphore.h"
++#include "vk_sync_binary.h"
++
++#include "vulkan/vulkan_metal.h"
++
++#ifdef VK_USE_PLATFORM_METAL_EXT
++
++/* VkImageAspectFlagBits -> plane index.
++ *
++ * Deliberately NOT kk_image_aspects_to_plane(): that helper asserts that the
++ * aspect is a single bit and is present in the image, and
++ * VkExportMetalTextureInfoEXT::plane is app-supplied. A malformed export
++ * request must return NULL, not abort a debug build.
++ */
++static uint8_t
++kk_export_plane_index(VkImageAspectFlagBits aspect)
++{
++   switch (aspect) {
++   case VK_IMAGE_ASPECT_PLANE_1_BIT:
++   case VK_IMAGE_ASPECT_MEMORY_PLANE_1_BIT_EXT:
++      return 1;
++   case VK_IMAGE_ASPECT_PLANE_2_BIT:
++   case VK_IMAGE_ASPECT_MEMORY_PLANE_2_BIT_EXT:
++      return 2;
++   default:
++      /* COLOR / DEPTH / STENCIL / PLANE_0 / MEMORY_PLANE_0, and anything
++       * unrecognised, resolve to plane 0.
++       *
++       * Depth and stencil intentionally collapse to the same object: Metal has
++       * one combined MTLPixelFormatDepth32Float_Stencil8 texture where Vulkan
++       * models two aspects, and there is no second object to hand out.
++       * VkExportMetalTextureInfoEXT has no way to express that. A consumer that
++       * wants stencil-only must derive it itself with
++       * -[MTLTexture newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8].
++       */
++      return 0;
++   }
++}
++
++static mtl_texture *
++kk_export_image_texture(const struct kk_image *image,
++                        VkImageAspectFlagBits aspect)
++{
++   const uint8_t plane = kk_export_plane_index(aspect);
++
++   if (plane >= image->plane_count)
++      return NULL;
++
++   /* Created in kk_image_plane_bind() by -[MTLHeap newTextureWithDescriptor:
++    * offset:] (tiled) or -[MTLBuffer newTextureWithDescriptor:offset:
++    * bytesPerRow:] (linear), or mtl_retain()ed from the swapchain image for WSI
++    * images.
++    *
++    * NULL until the image is bound: this field is populated by vkBind*Memory,
++    * not by vkCreateImage. Returning NULL rather than asserting is deliberate -
++    * the extension's VUs do not clearly forbid exporting an unbound image - but
++    * a caller must not read NULL as "this driver has no textures".
++    */
++   return image->planes[plane].mtl_handle;
++}
++
++static mtl_texture *
++kk_export_image_view_texture(const struct kk_image_view *view,
++                             VkImageAspectFlagBits aspect)
++{
++   const uint8_t plane = kk_export_plane_index(aspect);
++
++   if (plane >= view->plane_count)
++      return NULL;
++
++   /* Vulkan's implicit "one VkImageView, one MTLTexture" does not hold here.
++    * kk_image_view keeps up to five aliases of the same subresource and which
++    * of them exist is decided by VkImageViewCreateInfo::usage
++    * (kk_image_view.c): sampled only for SAMPLED|INPUT_ATTACHMENT, storage only
++    * for STORAGE, input/render only for COLOR|DEPTH_STENCIL_ATTACHMENT, subres
++    * only when reinterpreting a compressed format. A colour-attachment-only
++    * view therefore has no sampled alias at all, so returning that one field
++    * unconditionally would answer NULL for a perfectly valid view.
++    *
++    * Cascade, most-specific first. Every alias is a texture over the same
++    * memory, so any of them answers "the MTLTexture underlying this
++    * VkImageView"; they differ only in how much view state Metal needed baked
++    * into a distinct object. This is a policy choice, not a derivation - Vulkan
++    * gives no rule here - so it is documented rather than asserted.
++    *
++    * CAVEAT the caller must know: mtl_handle_input and mtl_handle_render are a
++    * plain mtl_retain() of the *image's* texture whenever the view needs
++    * neither a type nor a format change (kk_image_view.c) - the driver applies
++    * baseMipLevel/baseArrayLayer in the render pass attachment descriptor
++    * instead of in the texture object. So for an attachment-only view of a
++    * non-zero subresource the exported texture covers the whole image and the
++    * consumer must apply subresourceRange itself. For the common case (a
++    * full-extent colour attachment view, e.g. a swapchain image) they are the
++    * same thing. `input` is tried before `render` because when either a type or
++    * a format change was required `input` is a genuine texture view of
++    * view_layout, whereas `render` may be the bare image texture.
++    */
++   if (view->planes[plane].mtl_handle_sampled != NULL)
++      return view->planes[plane].mtl_handle_sampled;
++   if (view->planes[plane].mtl_handle_storage != NULL)
++      return view->planes[plane].mtl_handle_storage;
++   if (view->planes[plane].mtl_handle_input != NULL)
++      return view->planes[plane].mtl_handle_input;
++   if (view->planes[plane].mtl_handle_render != NULL)
++      return view->planes[plane].mtl_handle_render;
++   if (view->planes[plane].mtl_handle_subres != NULL)
++      return view->planes[plane].mtl_handle_subres;
++
++   /* Last resort: the image's own plane texture, which is what every alias
++    * above is derived from. Same whole-image caveat as the render/input retain
++    * case. This keeps the export total over bound images rather than leaking a
++    * driver-internal usage-bit detail out through a NULL. */
++   const struct kk_image *image =
++      container_of(view->vk.image, struct kk_image, vk);
++   const uint8_t image_plane = view->planes[plane].image_plane;
++   if (image_plane >= image->plane_count)
++      return NULL;
++
++   return image->planes[image_plane].mtl_handle;
++}
++
++static mtl_texture *
++kk_export_texture(const VkExportMetalTextureInfoEXT *info)
++{
++   /* Exactly one of image/imageView/bufferView is set
++    * (VUID-VkExportMetalTextureInfoEXT-image-06796). */
++   if (info->image != VK_NULL_HANDLE) {
++      VK_FROM_HANDLE(kk_image, image, info->image);
++      return kk_export_image_texture(image, info->plane);
++   }
++
++   if (info->imageView != VK_NULL_HANDLE) {
++      VK_FROM_HANDLE(kk_image_view, view, info->imageView);
++      return kk_export_image_view_texture(view, info->plane);
++   }
++
++   if (info->bufferView != VK_NULL_HANDLE) {
++      VK_FROM_HANDLE(kk_buffer_view, bview, info->bufferView);
++      return bview->mtl_texel_buffer_handle;
++   }
++
++   return NULL;
++}
++
++static mtl_shared_event *
++kk_export_shared_event(const VkExportMetalSharedEventInfoEXT *info)
++{
++   if (info->semaphore != VK_NULL_HANDLE) {
++      VK_FROM_HANDLE(vk_semaphore, sem, info->semaphore);
++      struct vk_sync *sync = vk_semaphore_get_active_sync(sem);
++
++      /* A binary semaphore is a vk_sync_binary wrapper whose embedded timeline
++       * is the kk_sync_type object that owns the MTLSharedEvent, so unwrap one
++       * level. vk_sync_binary_get_type() sizes the allocation as
++       * offsetof(vk_sync_binary, timeline) + kk_sync_type.size, so
++       * &binary->timeline really is the base of a struct kk_sync_timeline.
++       */
++      struct vk_sync_binary *binary = vk_sync_as_binary(sync);
++      if (binary != NULL)
++         sync = &binary->timeline;
++
++      /* An imported or otherwise foreign sync would not be ours to export. */
++      if (sync->type != &kk_sync_type)
++         return NULL;
++
++      return container_of(sync, struct kk_sync_timeline, base)->mtl_handle;
++   }
++
++   /* info->event. kk_event is a 32-bit word inside a kk_bo (kk_event.h),
++    * written by the GPU through libkk_imm_write and polled by
++    * vkGetEventStatus. There is no MTLSharedEvent anywhere in that
++    * construction, so there is nothing to return. Backing VkEvent with
++    * -[MTLDevice newSharedEvent] instead would mean reimplementing VkEvent:
++    * a slower VkEvent in exchange for an export nothing asks for.
++    */
++   return NULL;
++}
++
++VKAPI_ATTR void VKAPI_CALL
++kk_ExportMetalObjectsEXT(VkDevice device,
++                         VkExportMetalObjectsInfoEXT *pMetalObjectsInfo)
++{
++   VK_FROM_HANDLE(kk_device, dev, device);
++
++   /* The sub-structures are write-back outputs even though pNext is typed
++    * const; the extension defines them that way. */
++   vk_foreach_struct(ext, (void *)pMetalObjectsInfo->pNext) {
++      switch (ext->sType) {
++      case VK_STRUCTURE_TYPE_EXPORT_METAL_DEVICE_INFO_EXT: {
++         VkExportMetalDeviceInfoEXT *info = (VkExportMetalDeviceInfoEXT *)ext;
++         info->mtlDevice = dev->mtl_handle;
++         break;
++      }
++
++      case VK_STRUCTURE_TYPE_EXPORT_METAL_COMMAND_QUEUE_INFO_EXT: {
++         VkExportMetalCommandQueueInfoEXT *info =
++            (VkExportMetalCommandQueueInfoEXT *)ext;
++         /* NULL, and this is the one genuine Metal-model wall in the whole
++          * extension rather than a driver gap.
++          *
++          * kk_queue::mtl_handle comes from -[MTLDevice newMTL4CommandQueue]
++          * (bridge/mtl_command_queue.m), i.e. id<MTL4CommandQueue>. The SDK
++          * declares `@protocol MTL4CommandQueue <NSObject>` - it does not
++          * conform to MTLCommandQueue, which is what ::mtlCommandQueue is
++          * typed as. There is nothing type-correct to return.
++          *
++          * Substituting a fresh -[MTLDevice newCommandQueue] would compile and
++          * then silently break every submission-ordering guarantee a caller is
++          * entitled to assume from "the queue underlying this VkQueue", which
++          * is worse than answering nothing. A consumer that needs to order
++          * against Vulkan submissions can still do so on its own legacy queue
++          * via the MTLSharedEvent exported from a VkSemaphore.
++          */
++         info->mtlCommandQueue = NULL;
++         break;
++      }
++
++      case VK_STRUCTURE_TYPE_EXPORT_METAL_BUFFER_INFO_EXT: {
++         VkExportMetalBufferInfoEXT *info = (VkExportMetalBufferInfoEXT *)ext;
++         VK_FROM_HANDLE(kk_device_memory, mem, info->memory);
++         /* kk_bo::map is the whole-heap
++          * -[MTLHeap newBufferWithLength:options:offset:] from kk_alloc_bo(),
++          * or the -[MTLDevice newBufferWithBytesNoCopy:...] created for a
++          * VK_EXT_external_memory_host import. Either way a real id<MTLBuffer>
++          * covering the allocation.
++          *
++          * CAVEAT: for the kk_alloc_bo() path its .length is the heap-aligned
++          * size (mtl_heap_buffer_size_and_align_with_length, then align64),
++          * NOT VkMemoryAllocateInfo::allocationSize - a 64-byte allocation
++          * yields a 4096-byte MTLBuffer. VkExportMetalBufferInfoEXT carries no
++          * offset or size field to express that, so a consumer must size its
++          * accesses from the VkMemoryRequirements it already has and never from
++          * .length.
++          *
++          * Also note this is keyed on VkDeviceMemory, as the spec requires. A
++          * VkBuffer bound into that memory owns a *different*, suballocated
++          * MTLBuffer (kk_buffer::mtl_handle) which this does not return.
++          */
++         info->mtlBuffer =
++            (mem != NULL && mem->bo != NULL) ? mem->bo->map : NULL;
++         break;
++      }
++
++      case VK_STRUCTURE_TYPE_EXPORT_METAL_TEXTURE_INFO_EXT: {
++         VkExportMetalTextureInfoEXT *info = (VkExportMetalTextureInfoEXT *)ext;
++         info->mtlTexture = kk_export_texture(info);
++         break;
++      }
++
++      case VK_STRUCTURE_TYPE_EXPORT_METAL_IO_SURFACE_INFO_EXT: {
++         VkExportMetalIOSurfaceInfoEXT *info =
++            (VkExportMetalIOSurfaceInfoEXT *)ext;
++         /* NULL - and this one is blocked by KosmicKrisp's memory model, NOT by
++          * Metal. Metal does this perfectly well via
++          * -[MTLDevice newTextureWithDescriptor:iosurface:plane:].
++          *
++          * The obstruction is that that constructor is *device*-level and takes
++          * no heap or offset, so an IOSurface-backed texture cannot participate
++          * in the MTLHeapTypePlacement model everything in kk_bo depends on:
++          * kk_image_plane::addr (derived from the heap buffer's GPU address),
++          * kk_device_add_heap_to_residency_set(), and VkDeviceMemory binding
++          * would each need a parallel path. Every image here comes from
++          * -[MTLHeap newTextureWithDescriptor:offset:], and heap-placed
++          * textures carry no IOSurface. Supporting this is a real project, not
++          * a field read.
++          */
++         info->ioSurface = NULL;
++         break;
++      }
++
++      case VK_STRUCTURE_TYPE_EXPORT_METAL_SHARED_EVENT_INFO_EXT: {
++         VkExportMetalSharedEventInfoEXT *info =
++            (VkExportMetalSharedEventInfoEXT *)ext;
++         info->mtlSharedEvent = kk_export_shared_event(info);
++         break;
++      }
++
++      default:
++         break;
++      }
++   }
++}
++
++#endif /* VK_USE_PLATFORM_METAL_EXT */
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index fe3890761a21a1906edca17f11783d26c4455ec2..758b21645ffde05d6c49e96b3be3b0d287cd3a89 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -184,6 +184,12 @@ kk_get_device_extensions(const struct kk_instance *instance,
+       .EXT_image_2d_view_of_3d = true,
+       .EXT_load_store_op_none = true,
+       .EXT_memory_budget = true,
++#ifdef VK_USE_PLATFORM_METAL_EXT
++      /* kk_metal_objects.c compiles to nothing without this define, so the
++       * entrypoint would be the weak NULL stub. Advertise in lockstep with the
++       * implementation rather than unconditionally. */
++      .EXT_metal_objects = true,
++#endif
+       .EXT_multi_draw = true,
+       .EXT_mutable_descriptor_type = true,
+       .EXT_nested_command_buffer = true,
+diff --git a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
+index 8df0ecd95172a34372875aeff6fe08d4cf538fc6..2f245acf4e71f0e2487e4bd809628cbf791ddf93 100644
+--- a/src/kosmickrisp/vulkan/meson.build
++++ b/src/kosmickrisp/vulkan/meson.build
+@@ -90,6 +90,7 @@ kk_files = files(
+   'kk_image.c',
+   'kk_instance.h',
+   'kk_instance.c',
++  'kk_metal_objects.c',
+   'kk_nir_lower_descriptors.c',
+   'kk_nir_lower_multiview.c',
+   'kk_nir_lower_null_images.c',

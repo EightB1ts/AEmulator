@@ -1,0 +1,475 @@
+diff --git a/src/kosmickrisp/libkk/kk_copy.cl b/src/kosmickrisp/libkk/kk_copy.cl
+new file mode 100644
+index 0000000000000000000000000000000000000000..c56e1893d1b9a2aabc8d82ebbb7be9c49c0fdbca
+--- /dev/null
++++ b/src/kosmickrisp/libkk/kk_copy.cl
+@@ -0,0 +1,123 @@
++/*
++ * Copyright 2026 LunarG, Inc.
++ * Copyright 2026 Google LLC
++ * SPDX-License-Identifier: MIT
++ */
++#include "compiler/libcl/libcl_vk.h"
++
++/*
++ * Depth-aspect re-encoding for the emulated 24-bit depth formats.
++ *
++ * Apple GPUs have no 24-bit depth pixel format, so KosmicKrisp backs
++ * VK_FORMAT_D24_UNORM_S8_UINT with MTLPixelFormatDepth32Float_Stencil8 and
++ * VK_FORMAT_X8_D24_UNORM_PACK32 with MTLPixelFormatDepth32Float.  That is
++ * invisible for a VK_IMAGE_TILING_OPTIMAL image, whose layout is
++ * implementation-defined, but it is *not* invisible at the copy interfaces:
++ *
++ *   "Copying to or from the depth aspect of a VK_FORMAT_X8_D24_UNORM_PACK32
++ *    or VK_FORMAT_D24_UNORM_S8_UINT format is packed with one 32-bit word per
++ *    texel with the D24 value in the LSBs of the word, and undefined values
++ *    in the eight MSBs."
++ *
++ * MTLBlitOptionDepthFromDepthStencil hands us IEEE binary32 instead.  Both
++ * encodings are 4 bytes per texel, so these kernels only have to rewrite the
++ * value, not move anything: the buffer stride, the 2D image stride and the
++ * region extent are exactly what the Metal copy used.
++ */
++
++/*
++ * The two conversions, spelled out so that MTLMathModeFast (kk_device_lib.c
++ * compiles the precompiled library with fast math) cannot rewrite them into
++ * something lossy.
++ *
++ * Decode is pure integer arithmetic:
++ *     v / (2^24 - 1) = v * 2^-24 * (1 + 2^-24 + 2^-48 + ...)
++ *                    = ((v << 24) + v) * 2^-48 + O(2^-47 relative)
++ * The shift and add are exact in 64 bits, (float) rounds once, and the 2^-48
++ * scale is an exact power of two.  Written as floats instead, an optimiser is
++ * free to fold `lo + lo * 0x1p-24f` into `lo * (1.0f + 0x1p-24f)` == `lo`,
++ * which is v/2^24 -- a whole ULP wrong, and it breaks the round trip for half
++ * of all values.  (Measured: scratch exhaust.c under -ffast-math.)
++ *
++ * Encode is exact for every float in [0, 1]:
++ *     d * (2^24 - 1) = (d * 2^24) - d
++ * d * 2^24 is an exact power-of-two scaling; splitting it into integer part ai
++ * and fraction af is exact (Sterbenz), so the product is exactly ai + (af - d)
++ * with |af - d| < 1 and the rounding decision is a single comparison.
++ */
++#define KK_D24_MAX_U 16777215u
++
++static inline float
++kk_unorm24_to_float(uint v)
++{
++   ulong n = ((ulong)v << 24) + (ulong)v;
++   return (float)n * 0x1p-48f;
++}
++
++static inline uint
++kk_float_to_unorm24(float d)
++{
++   float a = d * 0x1p24f;
++   uint ai = (uint)a;
++   float af = a - (float)ai;
++   float r = af - d;
++
++   return ai + (r >= 0.5f ? 1u : 0u) - (r < -0.5f ? 1u : 0u);
++}
++
++/* Address of texel i of a width x height x depth region laid out in a buffer
++ * with the row and 2D-image strides the Metal copy was given. */
++static inline ulong
++kk_d24_texel_offset_B(uint i, uint width, uint height, uint row_stride_B,
++                      uint z_stride_B)
++{
++   uint x = i % width;
++   uint t = i / width;
++   uint y = t % height;
++   uint z = t / height;
++
++   return ((ulong)z * (ulong)z_stride_B) + ((ulong)y * (ulong)row_stride_B) +
++          ((ulong)x * 4ul);
++}
++
++/* In place over the destination of a vkCmdCopyImageToBuffer: float32 depth as
++ * Metal wrote it -> 24-bit unorm in the LSBs as Vulkan requires. */
++KERNEL(64)
++libkk_depth_f32_to_unorm24(global uchar *base, uint width, uint height,
++                           uint depth, uint row_stride_B, uint z_stride_B)
++{
++   uint i = cl_global_id.x;
++   if (i >= width * height * depth)
++      return;
++
++   global uint *p = (global uint *)(base + kk_d24_texel_offset_B(
++                                              i, width, height, row_stride_B,
++                                              z_stride_B));
++
++   /* Metal can only have produced [0, 1] here, but be explicit rather than
++    * relying on it -- kk_float_to_unorm24() is only exact on that domain. */
++   float d = fmin(fmax(as_float(*p), 0.0f), 1.0f);
++
++   *p = kk_float_to_unorm24(d);
++}
++
++/* Out of place, source is the application's buffer for vkCmdCopyBufferToImage
++ * (which must not be modified) and destination is driver scratch that the
++ * Metal copy then reads. */
++KERNEL(64)
++libkk_depth_unorm24_to_f32(global uchar *dst, global uchar *src, uint width,
++                           uint height, uint depth, uint row_stride_B,
++                           uint z_stride_B)
++{
++   uint i = cl_global_id.x;
++   if (i >= width * height * depth)
++      return;
++
++   ulong off =
++      kk_d24_texel_offset_B(i, width, height, row_stride_B, z_stride_B);
++
++   /* The eight MSBs are undefined on the Vulkan side; mask them off. */
++   uint v = *(global uint *)(src + off) & KK_D24_MAX_U;
++
++   *(global float *)(dst + off) = kk_unorm24_to_float(v);
++}
+diff --git a/src/kosmickrisp/libkk/meson.build b/src/kosmickrisp/libkk/meson.build
+index 407ab204808852f0b1dfc27a0514089fe992173b..b5c62eede0387a5d3f121ef9aa3db0e6552c7eb6 100644
+--- a/src/kosmickrisp/libkk/meson.build
++++ b/src/kosmickrisp/libkk/meson.build
+@@ -9,6 +9,13 @@ libkk_shader_files = files(
+   'kk_query.cl',
+   'kk_tessellation.cl',
+   'kk_tessellator.cl',
++  # Out of alphabetical order on purpose. Two independent downstream patches
++  # insert into this list, and third_party/bootstrap.sh proves each one is still
++  # applied by reverse-applying it, which needs three lines of unchanged context
++  # either side of its own insertion. Moving this line up next to
++  # 'kk_acceleration_structure.cl' lands it inside that patch's context and the
++  # whole series stops verifying. Append here instead; meson does not care.
++  'kk_copy.cl',
+ )
+ 
+ libkk_spv = custom_target(
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_copy.c b/src/kosmickrisp/vulkan/kk_cmd_copy.c
+index 2e76d14cc6122402f60e21c797b1aaf20e8baacd..16dae878267d412c56cde5e0eb0257b40263fbfc 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_copy.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_copy.c
+@@ -18,6 +18,30 @@
+ 
+ #include "util/format/u_format.h"
+ 
++/*
++ * The depth aspect of VK_FORMAT_D24_UNORM_S8_UINT / VK_FORMAT_X8_D24_UNORM_PACK32
++ * is exchanged with buffers as one 32-bit word per texel holding a 24-bit unorm
++ * value in the LSBs.  Apple GPUs have no 24-bit depth format, so kk_format.c
++ * backs both with MTLPixelFormatDepth32Float{,_Stencil8} and Metal's
++ * MTLBlitOptionDepthFromDepthStencil produces/consumes IEEE binary32 instead.
++ * The stride is identical (4 B/texel) so only the value needs re-encoding; see
++ * libkk/kk_copy.cl.
++ */
++static bool
++kk_copy_needs_d24_fixup(enum pipe_format plane_format,
++                        VkImageAspectFlags aspect_mask)
++{
++   if (aspect_mask != VK_IMAGE_ASPECT_DEPTH_BIT)
++      return false;
++
++   return plane_format == PIPE_FORMAT_Z24_UNORM_S8_UINT ||
++          plane_format == PIPE_FORMAT_Z24X8_UNORM;
++}
++
++/* Metal wants the source offset of a buffer->texture copy aligned; 256 is the
++ * largest minimumLinearTextureAlignmentForPixelFormat on any Apple GPU. */
++#define KK_D24_SCRATCH_ALIGN_B 256u
++
+ VKAPI_ATTR void VKAPI_CALL
+ kk_CmdCopyBuffer2(VkCommandBuffer commandBuffer,
+                   const VkCopyBufferInfo2 *pCopyBufferInfo)
+@@ -102,6 +126,48 @@ kk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
+       info.mtl_data.image = plane->mtl_handle;
+       size_t buffer_offset = region->bufferOffset;
+ 
++      /* The application buffer holds 24-bit unorm depth and must not be
++       * modified, so decode it into scratch and have Metal copy from there. */
++      if (kk_copy_needs_d24_fixup(plane->layout.format.pipe,
++                                  region->imageSubresource.aspectMask)) {
++         const uint32_t layers = vk_image_subresource_layer_count(
++            &image->vk, &region->imageSubresource);
++         const uint64_t total_B = (uint64_t)info.buffer_slice_size_B *
++                                  (uint64_t)layers *
++                                  (uint64_t)region->imageExtent.depth;
++         if (total_B > UINT32_MAX) {
++            vk_command_buffer_set_error(&cmd->vk,
++                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
++            return;
++         }
++
++         struct kk_ptr scratch =
++            kk_pool_alloc(cmd, total_B, KK_D24_SCRATCH_ALIGN_B);
++         if (unlikely(!scratch.gpu))
++            return;
++
++         const uint32_t texels = region->imageExtent.width *
++                                 region->imageExtent.height *
++                                 region->imageExtent.depth;
++         uint64_t src = buffer->vk.device_address + region->bufferOffset;
++         uint64_t dst = scratch.gpu;
++         for (uint32_t i = 0u; i < layers; ++i) {
++            libkk_depth_unorm24_to_f32(
++               cmd, kk_grid_1d(texels), true, dst, src,
++               region->imageExtent.width, region->imageExtent.height,
++               region->imageExtent.depth, info.mtl_data.buffer_stride_B,
++               info.mtl_data.buffer_2d_image_size_B);
++            src += info.buffer_slice_size_B;
++            dst += info.buffer_slice_size_B;
++         }
++
++         mtl_barrier_after_encoder_stages(encoder, MTL_STAGE_DISPATCH,
++                                          MTL_STAGE_BLIT);
++
++         info.mtl_data.buffer = scratch.buffer;
++         buffer_offset = scratch.offset;
++      }
++
+       kk_foreach_slice(slice, image, imageSubresource)
+       {
+          info.mtl_data.image_slice = slice;
+@@ -139,6 +205,33 @@ kk_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
+          mtl_copy_from_texture_to_buffer(encoder, &info.mtl_data);
+          buffer_offset += info.buffer_slice_size_B;
+       }
++
++      /* Metal just wrote float32 depth where Vulkan requires 24-bit unorm.
++       * Both are 4 B/texel, so re-encode the words the copy landed on, in
++       * place, without touching row padding. */
++      if (kk_copy_needs_d24_fixup(plane->layout.format.pipe,
++                                  region->imageSubresource.aspectMask)) {
++         const uint32_t texels = region->imageExtent.width *
++                                 region->imageExtent.height *
++                                 region->imageExtent.depth;
++
++         mtl_barrier_after_encoder_stages(encoder, MTL_STAGE_BLIT,
++                                          MTL_STAGE_DISPATCH);
++
++         uint64_t addr = buffer->vk.device_address + region->bufferOffset;
++         kk_foreach_slice(slice, image, imageSubresource)
++         {
++            libkk_depth_f32_to_unorm24(
++               cmd, kk_grid_1d(texels), true, addr, region->imageExtent.width,
++               region->imageExtent.height, region->imageExtent.depth,
++               info.mtl_data.buffer_stride_B,
++               info.mtl_data.buffer_2d_image_size_B);
++            addr += info.buffer_slice_size_B;
++         }
++
++         mtl_barrier_after_encoder_stages(encoder, MTL_STAGE_DISPATCH,
++                                          MTL_STAGE_BLIT);
++      }
+    }
+ }
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_format.c b/src/kosmickrisp/vulkan/kk_format.c
+index 6512a40d8ada6748b16bd2d2096b23b3b6ea2537..4033039eb16d2f6839a0b0a9ccb6e16f001ef555 100644
+--- a/src/kosmickrisp/vulkan/kk_format.c
++++ b/src/kosmickrisp/vulkan/kk_format.c
+@@ -334,6 +334,32 @@ static const struct kk_va_format kk_vf_formats[] = {
+    MTL_FMT_NATIVE(S8_UINT, MTL_FMT_M(8), MTL_FMT_TB_NONE),
+    MTL_FMT_NATIVE(Z32_FLOAT_S8X24_UINT, MTL_FMT_FMR(64), MTL_FMT_TB_NONE),
+    MTL_FMT_NATIVE(X32_S8X24_UINT, MTL_FMT_MR(64), MTL_FMT_TB_NONE),
++
++   /* Apple GPUs have no 24-bit depth: -[MTLDevice
++    * isDepth24Stencil8PixelFormatSupported] is NO, and MTLTextureDescriptor
++    * validation hard-aborts on MTLPixelFormatDepth24Unorm_Stencil8 (255).
++    * Substitute the 32-bit float depth formats, as MoltenVK does on the same
++    * silicon.  This is legal because a VK_IMAGE_TILING_OPTIMAL image has an
++    * implementation-defined layout -- Vulkan constrains the D24 encoding only
++    * at the copy interfaces, which kk_cmd_copy.c / kk_image.c convert
++    * explicitly.  Precision is strictly greater than a real D24 buffer, which
++    * the spec permits.
++    *
++    * is_native stays 1: it only suppresses the fragment *colour* output
++    * unswizzle in kk_shader.c, which never runs for a depth format, and the
++    * swizzle is the identity regardless.
++    */
++   MTL_FMT(Z24_UNORM_S8_UINT, Z32_FLOAT_S8X24_UINT, MTL_SWIZZLE_IDENTITY,
++           MTL_FMT_FMR(64), MTL_FMT_TB_NONE, true),
++   /* VK_FORMAT_X8_D24_UNORM_PACK32 */
++   MTL_FMT(Z24X8_UNORM, Z32_FLOAT, MTL_SWIZZLE_IDENTITY, MTL_FMT_FMR(32),
++           MTL_FMT_TB_NONE, true),
++   /* Stencil aspect of the above, via util_format_stencil_only() in
++    * kk_image_view.c.  MTLPixelFormatX24_Stencil8 (262) is
++    * API_DEPRECATED(macos(10.12, 27.0)) and unusable on Apple GPUs, so the
++    * stencil view of the substituted texture is X32_Stencil8 (261). */
++   MTL_FMT(X24S8_UINT, X32_S8X24_UINT, MTL_SWIZZLE_IDENTITY, MTL_FMT_MR(64),
++           MTL_FMT_TB_NONE, true),
+ };
+ 
+ #undef MTL_FMT_NATIVE
+diff --git a/src/kosmickrisp/vulkan/kk_image.c b/src/kosmickrisp/vulkan/kk_image.c
+index be224207300ba0f382cae186d9fda7531a55fcaa..64409333f04dd30283f8b947c4daa619eac80229 100644
+--- a/src/kosmickrisp/vulkan/kk_image.c
++++ b/src/kosmickrisp/vulkan/kk_image.c
+@@ -16,6 +16,8 @@
+ #include "kosmickrisp/bridge/mtl_bridge.h"
+ #include "kosmickrisp/bridge/vk_to_mtl_map.h"
+ 
++#include "util/u_math.h"
++
+ #include "vk_enum_defines.h"
+ #include "vk_enum_to_str.h"
+ #include "vk_format.h"
+@@ -977,6 +979,88 @@ struct kk_host_copy_info {
+    size_t buffer_slice_size_B;
+ };
+ 
++/*
++ * VK_FORMAT_X8_D24_UNORM_PACK32 is backed by MTLPixelFormatDepth32Float (see
++ * kk_format.c), so -[MTLTexture getBytes:]/-[MTLTexture replaceRegion:] speak
++ * IEEE binary32 while VK_EXT_host_image_copy, like every other Vulkan copy
++ * interface, requires a 24-bit unorm value in the LSBs of a 32-bit word.  Both
++ * are 4 B/texel, so this only rewrites values, never moves anything.
++ *
++ * VK_FORMAT_D24_UNORM_S8_UINT never reaches here: Metal refuses CPU access to
++ * a combined depth/stencil texture, so kk_get_image_plane_format_features()
++ * withholds VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT from it.  The check
++ * below still names it so this stays correct if that ever changes.
++ */
++#define KK_D24_MAX_U 16777215u
++
++/* Same conversions as libkk/kk_copy.cl; see the derivation there.  Encode is
++ * exact for every float in [0, 1] and decode is exact to 2^-47 relative, so
++ * unorm24 -> float32 -> unorm24 is the identity for all 2^24 values. */
++static inline float
++kk_unorm24_to_float(uint32_t v)
++{
++   uint64_t n = ((uint64_t)v << 24) + (uint64_t)v;
++   return (float)n * 0x1p-48f;
++}
++
++static inline uint32_t
++kk_float_to_unorm24(float d)
++{
++   float a = d * 0x1p24f;
++   uint32_t ai = (uint32_t)a;
++   float af = a - (float)ai;
++   float r = af - d;
++
++   return ai + (r >= 0.5f ? 1u : 0u) - (r < -0.5f ? 1u : 0u);
++}
++
++static bool
++kk_host_copy_needs_d24_fixup(enum pipe_format plane_format,
++                             VkImageAspectFlags aspect_mask)
++{
++   if (aspect_mask != VK_IMAGE_ASPECT_DEPTH_BIT)
++      return false;
++
++   return plane_format == PIPE_FORMAT_Z24_UNORM_S8_UINT ||
++          plane_format == PIPE_FORMAT_Z24X8_UNORM;
++}
++
++/* In place over what mtl_texture_get_bytes() just wrote. */
++static void
++kk_host_copy_f32_to_unorm24(uint8_t *base,
++                            const struct mtl_texture_memory_copy *c)
++{
++   for (uint64_t z = 0u; z < c->image_size.z; ++z) {
++      for (uint64_t y = 0u; y < c->image_size.y; ++y) {
++         uint32_t *row = (uint32_t *)(base + z * c->buffer_2d_image_size_B +
++                                      y * c->buffer_stride_B);
++         for (uint64_t x = 0u; x < c->image_size.x; ++x) {
++            row[x] = kk_float_to_unorm24(CLAMP(uif(row[x]), 0.0f, 1.0f));
++         }
++      }
++   }
++}
++
++/* Out of place: the application's memory is const, so decode into the staging
++ * slice that mtl_texture_replace_region() will read. */
++static void
++kk_host_copy_unorm24_to_f32(uint8_t *dst, const uint8_t *src,
++                            const struct mtl_texture_memory_copy *c)
++{
++   for (uint64_t z = 0u; z < c->image_size.z; ++z) {
++      for (uint64_t y = 0u; y < c->image_size.y; ++y) {
++         const uint64_t off =
++            z * c->buffer_2d_image_size_B + y * c->buffer_stride_B;
++         uint32_t *drow = (uint32_t *)(dst + off);
++         const uint32_t *srow = (const uint32_t *)(src + off);
++         for (uint64_t x = 0u; x < c->image_size.x; ++x) {
++            /* The eight MSBs are undefined on the Vulkan side. */
++            drow[x] = fui(kk_unorm24_to_float(srow[x] & KK_D24_MAX_U));
++         }
++      }
++   }
++}
++
+ static struct kk_host_copy_info
+ vk_image_to_memory_copy_to_mtl_texture_memory_copy(
+    const VkImageToMemoryCopy *region, const struct kk_image_plane *plane)
+@@ -1030,11 +1114,16 @@ kk_CopyImageToMemory(UNUSED VkDevice device,
+       struct kk_host_copy_info info =
+          vk_image_to_memory_copy_to_mtl_texture_memory_copy(region, plane);
+ 
++      const bool d24 = kk_host_copy_needs_d24_fixup(
++         plane->layout.format.pipe, region->imageSubresource.aspectMask);
++
+       uint8_t *host_ptr = region->pHostPointer;
+       kk_foreach_slice(slice, image, imageSubresource)
+       {
+          info.mtl_data.image_slice = slice;
+          mtl_texture_get_bytes(plane->mtl_handle, host_ptr, &info.mtl_data);
++         if (d24)
++            kk_host_copy_f32_to_unorm24(host_ptr, &info.mtl_data);
+          host_ptr += info.buffer_slice_size_B;
+       }
+    }
+@@ -1073,14 +1162,30 @@ kk_CopyMemoryToImage(UNUSED VkDevice device,
+       struct kk_host_copy_info info =
+          vk_memory_to_image_copy_to_mtl_texture_memory_copy(region, plane);
+ 
++      uint8_t *staging = NULL;
++      if (kk_host_copy_needs_d24_fixup(plane->layout.format.pipe,
++                                       region->imageSubresource.aspectMask)) {
++         staging = calloc(1, info.buffer_slice_size_B);
++         if (staging == NULL)
++            return vk_error(image, VK_ERROR_OUT_OF_HOST_MEMORY);
++      }
++
+       const uint8_t *host_ptr = region->pHostPointer;
+       kk_foreach_slice(slice, image, imageSubresource)
+       {
+          info.mtl_data.image_slice = slice;
+-         mtl_texture_replace_region(plane->mtl_handle, host_ptr,
+-                                    &info.mtl_data);
++         if (staging != NULL) {
++            kk_host_copy_unorm24_to_f32(staging, host_ptr, &info.mtl_data);
++            mtl_texture_replace_region(plane->mtl_handle, staging,
++                                       &info.mtl_data);
++         } else {
++            mtl_texture_replace_region(plane->mtl_handle, host_ptr,
++                                       &info.mtl_data);
++         }
+          host_ptr += info.buffer_slice_size_B;
+       }
++
++      free(staging);
+    }
+ 
+    return VK_SUCCESS;
+diff --git a/src/kosmickrisp/vulkan/kk_image_layout.c b/src/kosmickrisp/vulkan/kk_image_layout.c
+index f65cb2c38c11e5809c71de90abdd6570ff162320..27cfbc13a307f2e27d14b9c7a9c41a85ab54e9f1 100644
+--- a/src/kosmickrisp/vulkan/kk_image_layout.c
++++ b/src/kosmickrisp/vulkan/kk_image_layout.c
+@@ -228,10 +228,13 @@ kk_image_layout_init(const struct kk_device *dev, const struct vk_image *image,
+ 
+    /*
+     * Metal requires adding MTL_TEXTURE_USAGE_PIXEL_FORMAT_VIEW if we are going
+-    * to reinterpret the format with a different format. This seems to be the
+-    * only format with this issue.
++    * to reinterpret the format with a different format.  Combined
++    * depth/stencil is the only case: a VK_IMAGE_ASPECT_STENCIL_BIT image view
++    * becomes an X32_Stencil8 texture view of the same Metal texture (see
++    * util_format_stencil_only() in kk_image_view.c).  This covers both
++    * Z32_FLOAT_S8X24_UINT and the substituted Z24_UNORM_S8_UINT.
+     */
+-   if (format == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT) {
++   if (util_format_is_depth_and_stencil(format)) {
+       layout->usage |= MTL_TEXTURE_USAGE_PIXEL_FORMAT_VIEW;
+    }
+ 

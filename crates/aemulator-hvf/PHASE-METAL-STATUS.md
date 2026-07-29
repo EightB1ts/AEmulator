@@ -8,9 +8,15 @@
 > — the resource-lifecycle protocol, the blob/ASG machinery, the cereal codegen gap and the
 > `VK_EXT_memory_budget` analysis, the guest capability ceilings — still stands, and the
 > guest-visible `cmd gpu vkjson` capability table below has since been **re-measured on KosmicKrisp**
-> (87 guest extensions vs the 85 recorded here, device id `0x00000064` not `0x1B000208`, 3DMark
-> verdicts byte-identical) — see the new document for the current numbers. History below is left
-> unedited.
+> (**136** guest extensions vs the 85 recorded here, device id `0x00000064` not `0x1B000208`) — see
+> the new document for the current numbers. Two claims below are specifically **superseded**: the
+> "No Vulkan ray tracing" row in the capability table is now **half wrong** — the extensions
+> (`VK_KHR_acceleration_structure`, `VK_KHR_ray_query`, `VK_KHR_deferred_host_operations`) are
+> implemented on Metal 4 and do reach the guest, but **every ray still misses on this M2** because
+> Metal has no MTL4 ray tracing below Apple9, so the row's practical conclusion survives its stated
+> reason. And 3DMark's verdicts are **no longer byte-identical** — `Sling Shot Extreme` now reports
+> *not compatible*, identically on the stock and rebuilt guest ICD, and that divergence is not
+> root-caused. History below is left unedited.
 
 # Phase Metal (resource lifecycle) — the virtio-gpu ↔ gfxstream resource protocol is now complete: `RESOURCE_UNREF` / `DETACH_BACKING` reach the host renderer, `ATTACH_BACKING` no longer hands it a dangling pointer, and `SET_SCANOUT_BLOB` / `ASSIGN_UUID` are answered
 

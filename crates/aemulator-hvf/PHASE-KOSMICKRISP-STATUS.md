@@ -7,10 +7,21 @@ Vulkan 1.3 Metal driver upstreamed in Mesa; this build advertises `apiVersion = 
 app on *both* drivers; Android boots to the lock screen on KosmicKrisp with zero gfxstream aborts and
 zero present-path fallbacks; MoltenVK is still installed on this machine but **no MoltenVK image is
 loaded into the running VMM**; the 2D/CPU present path still paints when no 3D frame exists. The
-guest-visible capability diff (`cmd gpu vkjson`: **87** extensions vs the MoltenVK baseline's 85) and
-the **3DMark** workload have both since been measured on KosmicKrisp and folded in below, as has a
-**torn-readback fix** for partial black flicker that this migration introduced and that only shows up
-under animation.
+guest-visible capability diff (`cmd gpu vkjson`) and the **3DMark** workload have both since been
+measured on KosmicKrisp and folded in below, as has a **torn-readback fix** for partial black flicker
+that this migration introduced and that only shows up under animation.
+
+> **The capability numbers in this document were re-measured on 2026-07-29 and several of them
+> moved a long way.** The guest now sees **136** device extensions, not 87; the host advertises
+> **144**, not 140; the cereal strip list is generated and currently hides **0 of 144**, not 9 of 19;
+> and Vulkan **ray tracing exists as plumbing** — `VK_KHR_acceleration_structure`, `VK_KHR_ray_query`
+> and `VK_KHR_deferred_host_operations` are implemented in KosmicKrisp on Metal 4 and reach the guest,
+> **but every ray misses on this M2**: Metal refuses MTL4-built acceleration structures below Apple9
+> (`run-rq-smoke.sh` 12/16, exit 1 — the expected score on this hardware). Do not read "ray tracing
+> works" out of this document; read the ray-tracing retraction in *Measured capability delta*.
+> Superseded passages are marked where they stand rather than deleted, because the *reasoning* in
+> them is still how the current numbers were arrived at. Where a number is stated twice, the section
+> nearest the bottom is the current one.
 
 **Not proven here:** the Phase 3 gfxstream C++ edits have no automated guard (they live in an external
 checkout); the Phase 3 boot gate reached the lock screen rather than the home screen (input timing,
@@ -28,9 +39,12 @@ the VMM blitted that texture into the window's `CAMetalLayer` (documented in
 `PHASE-METAL-STATUS.md`). **That construction cannot exist on KosmicKrisp**, for two independent
 reasons:
 
-1. **KosmicKrisp does not implement `VK_EXT_metal_objects` at all.** It is absent from the 140
-   device extensions (verified: `vulkaninfo` grep count 0), so `vkExportMetalObjectsEXT` has no
-   entry point to load.
+1. ~~**KosmicKrisp does not implement `VK_EXT_metal_objects` at all.** It is absent from the 140
+   device extensions (verified grep count 0), so `vkExportMetalObjectsEXT` has no entry point to
+   load.~~ **NO LONGER TRUE** — we implemented it
+   (`third_party/patches/mesa/0006-kosmickrisp-implement-VK_EXT_metal_objects.patch`); it is one of
+   the 144 today. Reason (2) is the one that was ever structural, and it still stands, so the
+   conclusion below is unchanged: this reason has been removed, not the argument.
 2. **Its Metal-handle export supports only `MTLHeap`.** `VK_EXT_external_memory_metal` is present,
    but in
    `SampleRepos/mesa-kosmickrisp/mesa/src/kosmickrisp/vulkan/kk_device_memory.c:265`,
@@ -111,7 +125,7 @@ Five changes in `SampleRepos/platform_hardware_google_gfxstream/host/vulkan/`:
 | Deleted the `MVK_CONFIG_*` block | MoltenVK-private tuning knobs, meaningless to any other driver. Includes `MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE=0` — see the single-queue note below for why removing it is structurally safe rather than merely untested. |
 | `instanceSupportsMoltenVK` → `useMetalExternalMemory`, and it is now a **capability probe** | It used to be an ICD-name test. It now asks the *selected physical device* whether it supports `VK_EXT_EXTERNAL_MEMORY_METAL_EXTENSION_NAME` (`VkCommonOperations.cpp:1193`), so it is true for any conformant Metal driver and false — with an explicit abort message naming KosmicKrisp — for anything else. The comment states the ordering constraint that makes it correct: it must be assigned before the `getImageFormatExternalMemorySupportInfo()` loop that reads it. |
 | **Latent bug fixed:** the `vkCreateDevice` result was discarded | The `if` after `vkCreateDevice` re-tested a stale `res` left over from `vkCreateInstance`, so a failed device creation was reported as success and the failure surfaced later as something else entirely. Pre-existing; found while reading the path, not caused by this migration. |
-| The one-off `VK_EXT_memory_budget` filter became a 9-entry strip list | See *The strip list* below — the reasoning is the part worth keeping. |
+| The one-off `VK_EXT_memory_budget` filter became a 9-entry strip list | See *The strip list* below — the reasoning is the part worth keeping. The list itself is gone: it is now GENERATED from the pinned tree's own codegen and currently strips **nothing**. |
 
 ### Proof (observed in `/tmp/aemu-kk-gate.log`, `--gpu3d --display`, KosmicKrisp)
 
@@ -175,36 +189,134 @@ and is not being used.
 
 ---
 
-## Measured capability delta (host driver, `vulkaninfo`, this build)
+## Measured capability delta (host driver, this build)
 
 `Apple M2`, `driverID = DRIVER_ID_MESA_KOSMICKRISP`, `apiVersion = 1.4.354`,
-`driverVersion = 26.2.99`, `conformanceVersion 1.4.3.2`, **140 device extensions** (MoltenVK: 130).
+`driverVersion = 26.2.99`, `conformanceVersion 1.4.3.2`, **144 device extensions** (MoltenVK: 130).
 One memory heap, one queue family.
 
-**Absent on KosmicKrisp, present on MoltenVK** (each verified by grep count 0):
+The full machine-readable dump is `gfxstream/evidence/host-vulkan-identity.json`, re-recorded with
+`kosmickrisp/run-gate.sh --dump-identity`; `ci/hvf-doctor.sh` now checks that golden against
+`TP_MESA_SHA` so it cannot silently describe a driver that is no longer installed.
+
+**The four extensions above the 140 first recorded here are all ours**, added by the patch series in
+`third_party/patches/mesa/`, and they are the reason the ray-tracing statement below is retracted:
+
+| Added extension | Patch |
+|---|---|
+| `VK_KHR_acceleration_structure` | `0003-kosmickrisp-acceleration-structure.patch` |
+| `VK_KHR_ray_query` | `0002-kosmickrisp-compiler-msl-ray-query.patch` (NIR→MSL ray-query emission) + `0004-kosmickrisp-ray-query-descriptors.patch` |
+| `VK_KHR_deferred_host_operations` | `0003-…` (required by `acceleration_structure`) |
+| `VK_EXT_metal_objects` | `0006-kosmickrisp-implement-VK_EXT_metal_objects.patch` |
+
+**Absent on KosmicKrisp, present on MoltenVK** (each verified by grep count 0 *at the time this
+table was written* — the first two rows have since changed and are annotated):
 
 | Extension | Consequence |
 |---|---|
-| `VK_EXT_metal_objects` | The reason the present path was rebuilt. See above. |
+| ~~`VK_EXT_metal_objects`~~ | **NO LONGER ABSENT** — implemented by patch 0006. It is *not* why the present path was rebuilt any more, but the present path is staying as it is: the in-Vulkan swapchain present works, and the `MTLHEAP`-only memory model documented at the top of this file is unchanged, so a re-exported `id<MTLTexture>` would still be the harder construction. |
+| ~~`VK_KHR_deferred_host_operations`~~ | **NO LONGER ABSENT** — implemented. The old reasoning ("only consumed by ray-tracing pipeline builds, which do not exist here anyway") was correct about the consumer and wrong about the premise. |
 | `VK_KHR_portability_subset`, `VK_MVK_macos_surface` | Removed from gfxstream's required sets in Phase 3. Not a loss — their absence *is* conformance. |
 | `VK_KHR_external_memory_fd` (absent on MoltenVK too — listed only because gfxstream used to require it on the non-Metal path) | Never used on macOS; gfxstream's fd paths are `#if defined(__QNX__)` / Linux-only. |
-| `VK_KHR_deferred_host_operations` | Only consumed by ray-tracing pipeline builds, which do not exist here anyway. |
 | `VK_EXT_fragment_shader_interlock`, `VK_KHR_fragment_shader_barycentric` | Real capability losses. Nothing in this harness has been observed to want them; that is an absence of evidence, not a measurement. |
 | `VK_KHR_incremental_present` | Damage-region presents unavailable; our present is a full-surface blit, so no current cost. |
 | `VK_GOOGLE_display_timing` | **Worth watching.** Android sometimes uses it for frame pacing. Not observed to be requested in these runs, but this is the one loss with a plausible path to a user-visible symptom (jitter, not a failure). |
 
-**The ceiling that is hardware, not a porting gap.** `geometryShader = false` on KosmicKrisp
-(`vulkaninfo`, verbatim) — Apple GPUs have no geometry-shader stage. GLES 3.2 requires geometry +
-tessellation, so `androidboot.opengles.version=196609` (3.1) remains the honest ceiling, exactly as
-it was under MoltenVK. Likewise **no Vulkan ray tracing**: `ray_tracing` / `ray_query` /
-`acceleration_structure` grep count in the KosmicKrisp extension list is **0**. Metal 3 has ray
-tracing, but no Vulkan-on-Metal driver here exposes the Vulkan RT extensions and gfxstream does not
-forward them. Switching drivers does not move either ceiling, and no future driver work on our side
-will move the first one at all.
+**The ceiling that is hardware, not a porting gap.** `geometryShader = false` on KosmicKrisp — Apple
+GPUs have no geometry-shader stage. GLES 3.2 requires geometry + tessellation, so
+`androidboot.opengles.version=196609` (3.1) remains the honest ceiling, exactly as it was under
+MoltenVK. No driver work on our side will move that one at all.
+
+**RETRACTED — "no Vulkan ray tracing" was a ceiling, and it moved.** This section used to read:
+*"Likewise **no Vulkan ray tracing**: `ray_tracing` / `ray_query` / `acceleration_structure` grep
+count in the KosmicKrisp extension list is **0**. Metal 3 has ray tracing, but no Vulkan-on-Metal
+driver here exposes the Vulkan RT extensions and gfxstream does not forward them."* Both halves have
+been fixed rather than worked around:
+
+- **The driver half.** `VK_KHR_acceleration_structure`, `VK_KHR_deferred_host_operations` and
+  `VK_KHR_ray_query` are implemented in KosmicKrisp on **Metal 4**: `kosmickrisp/run-rq-smoke.sh`
+  builds a one-triangle BLAS + TLAS, writes the TLAS into an `ACCELERATION_STRUCTURE` descriptor, and
+  dispatches a real SPIR-V `rayQueryEXT` shader. **It scores 12/16 and exits 1 — read the next
+  bullet before repeating any RT claim, because the 4 failures are the whole hit path.**
+- **The gfxstream half.** The host cereal was regenerated so those extensions' `pNext` structs are
+  actually *decoded* rather than merely sized — the two RT `sType`s were in the cereal gap, where
+  they would have reached `reservedunmarshal_extension_struct`'s `abort()` — and the guest ICD's
+  `allowedExtensionNames` was widened so the names survive the ICD's own filter.
+
+**AND THE HONEST LIMIT: no ray has ever hit anything on this machine.** `run-rq-smoke.sh` is
+**12/16**, and the 4 failures are exactly the four hit assertions — committed intersection type,
+hit distance `t`, `instanceCustomIndex`, barycentrics. Everything around them passes: the extensions
+are advertised, `rayQuery = 1`, `vkCreateDevice` with ray query succeeds, the descriptor layout and
+`vkUpdateDescriptorSets` take an acceleration structure, the SPIR-V with `OpRayQueryInitializeKHR`
+compiles to a pipeline, the build + dispatch complete cleanly, `rayQueryGetRayTMin`/`GetRayFlags`
+read back correctly, and **all 7 rays that should miss do miss**. One triangle, one instance, and it
+is invisible.
+
+**That is Metal, not the driver, and it was isolated rather than assumed.** `kosmickrisp/mtl4-rt-matrix.m`
+is a pure-Metal control — no Vulkan, no KosmicKrisp — that builds the same BLAS + TLAS through both
+the legacy `MTLAccelerationStructureCommandEncoder` and the Metal 4 compute encoder and traces all
+four combinations. On this Apple M2 / macOS 27.0, **only legacy-built structures ever intersect**; no
+MTL4-built variant does, with no error and no commit feedback to say why. Under Metal API validation
+it says so in one line:
+
+```
+METAL_DEVICE_WRAPPER_TYPE=1 ./mtl4-rt-matrix
+_validateRTDescriptorCompatibility: failed assertion
+`Acceleration Structure Descriptor Validation
+ this device does not support Metal 4 ray tracing.'
+```
+
+Nothing public reports this: `supportsRaytracing` and `supportsFamily:MTLGPUFamilyMetal4` are **both
+YES** on the M2. Hardware ray tracing arrives with **Apple9**; below it Metal emulates RT with a
+builder only the legacy encoder can reach, and KosmicKrisp is a Metal 4 driver. So `12/16` is the
+*expected* score on this hardware — `run-rq-smoke.sh` documents it as such in its own header — and
+the open decision is what to do about it (task #17): teach the driver to build through the legacy
+encoder, or accept that ray query answers "miss" on Apple8 and earlier.
+
+`VK_KHR_ray_tracing_pipeline` is still **not** advertised, deliberately: it is the negative control
+for the whole chain, and it stays absent until something implements it. What has *not* been
+established is whether any of this is fast, or correct on hardware where it can hit at all — see
+*Known, still open*.
 
 ---
 
 ## The strip list — why it is **9** extensions and not **19**
+
+> **SUPERSEDED, AND BY ITS OWN ARGUMENT.** There is no hand-written strip list any more. The section
+> below reasons its way from "one empirically confirmed aborter" to "a 329-type codegen gap", and
+> then stops one step short: if the gap is a property of the *codegen*, the fix is to regenerate the
+> codegen, not to curate names by hand. That is what happened.
+>
+> - `kGuestHiddenDeviceExtensions` (9 hand-picked names) was replaced by
+>   `aemu_cereal_gap::kCerealGapExtensions`, **generated** from the pinned tree's own cereal switches
+>   into `host/vulkan/VkDecoderCerealGap.inc` (213 extensions, 477 struct types) by
+>   `cargo run --bin aemu-cereal-gap -- generate`.
+> - The polarity inverted: the strip list is now derived and the *exceptions* are enumerated. The
+>   exception list `kCerealGapExtensionsKeptAnyway` is down from ten names to **one**
+>   (`VK_KHR_push_descriptor`), and even that one is now a provable no-op kept as a marker — the
+>   v1.4.348 registry bump promoted push descriptors into core Vulkan 1.4, so the struct is decoded
+>   under its core spelling.
+> - The cereal was then regenerated to actually decode 49 more extensions, which is what collapsed
+>   the intersection. **Measured on every boot, printed by the renderer itself:**
+>   `[gfxstream] cereal gap: hiding 0 of 144 host device extensions (0 kept by allowlist)`.
+>   **Nothing is stripped.** Every extension KosmicKrisp advertises is decodable, so the containment
+>   measure currently costs the guest nothing.
+> - A second hazard the hand list was structurally blind to is also closed: an extension the *live
+>   Mesa driver* advertises that the *vendored registry* has never heard of has its `VkStructureType`s
+>   in **neither** cereal switch, so it aborts one step earlier, inside
+>   `goldfish_vk_extension_struct_size()`. A strip list cannot contain that — the dangerous names are
+>   unknown when the list is built. Moving the vendored registry from Vulkan-Docs v1.3.269 to
+>   v1.4.348 (552 → 682 extension names) took that count from 26 to 0.
+> - Both are now guarded at doctor time instead of at `abort()` time: `ci/hvf-doctor.sh` verifies the
+>   generated `.inc` still matches the gfxstream pin, **and** intersects it against the recorded host
+>   extension list so a `TP_MESA_SHA` bump that hands KosmicKrisp an undecodable extension fails the
+>   doctor rather than a boot. That step was negatively validated against both hazards and against a
+>   silently-broken parse of its own inputs.
+>
+> The two things below that are still true and still load-bearing: the *method* (compare the sizing
+> switch against the unmarshal switch), and the *reason not to soften the `abort()` into a skip* (one
+> `pNext_size` for the whole chain, variable-length bodies — a decoder that does not know a struct
+> cannot know how many bytes to step over, so skipping desynchronises the stream). Read on for those.
 
 The method (`host/vulkan/VkDecoderGlobalState.cpp`, `kGuestHiddenDeviceExtensions` and the comment
 above it): this build's gfxstream cereal codegen knows **523** `VkStructureType`s in
@@ -252,6 +364,13 @@ the codegen gap is a property of this gfxstream build, not of macOS.
 
 The proper fix is regenerating the host cereal from a complete registry so the two tables agree.
 Stripping is a containment measure and is labelled as one in the source.
+
+**That "proper fix" is what shipped.** `third_party/regen-cereal.sh` regenerates the host cereal from
+the era codegen (`TP_GFXSTREAM_CODEGEN_REF=838dd1d61`) against a registry bumped to v1.4.348 by
+`third_party/downgrade-registry.py`, with `--reproduce` / `--opcode-diff` / `--record-baseline` modes
+so a regeneration has to prove it moved no opcode it did not mean to (last run: 426 existing, +35, −0,
+0 moved). The containment measure is still in the source, still labelled as one, and now strips zero
+names — which is the outcome the paragraph above was asking for.
 
 ---
 
@@ -355,45 +474,109 @@ Neither substitutes for the other. And the Phase 3 gfxstream C++ edits are pinne
 they live in `SampleRepos/platform_hardware_google_gfxstream`, an external checkout a hermetic test
 of this crate must not require to be present.
 
-`cargo test --lib`: **61 passed**, 0 failed.
+`cargo test`: **125 passed**, 0 failed (was 61 when this section was written).
 
 ---
 
 ## Guest-visible capability delta — measured on KosmicKrisp (`cmd gpu vkjson`)
 
-The host-side delta above is `vulkaninfo`. This is what **ANGLE and Android actually see** through
-gfxstream, which is the number that matters for app compatibility. Measured on the KosmicKrisp boot
-(`/tmp/aemu-p5.log`, `sys.boot_completed=1`):
+The host-side delta above is the driver's own view. This is what **ANGLE and Android actually see**
+through gfxstream, which is the number that matters for app compatibility.
 
-| | MoltenVK baseline | KosmicKrisp |
-|---|---|---|
-| Guest device | `Virtio-GPU GFXStream (Apple M2)` **`(0x1B000208)`** | `Virtio-GPU GFXStream (Apple M2)` **`(0x00000064)`** |
-| Guest Vulkan | 1.3.0 | 1.3.0 |
-| Guest device extensions | 85 | **87** (net **+2**) |
-| `VK_ANDROID_external_memory_android_hardware_buffer` | ✅ | ✅ |
-| `VK_KHR_sampler_ycbcr_conversion`, `VK_EXT_descriptor_indexing` | ✅ | ✅ |
-| `tessellationShader`, ASTC/ETC2, `shaderInt64`, `multiViewport` | ✅ | ✅ |
-| `geometryShader`, ray tracing | ❌ | ❌ (structural to Apple GPUs — unchanged) |
+**Re-measured 2026-07-29** over `adb` on a clean boot (`SurfaceFlinger: Boot is finished`, 0
+`Internal Vulkan error`, 0 `Unhandled Vulkan structure type`, 0 `Fatal signal`), with the **rebuilt
+guest ICD** installed by `prep-vulkan-icd.sh`. The 87 in the middle column is what this document
+originally recorded and is kept for the delta:
 
-The guest device ID is an independent driver fingerprint: `0x1B000208` → `0x00000064`.
+| | MoltenVK baseline | KosmicKrisp, as first recorded | KosmicKrisp, current |
+|---|---|---|---|
+| Guest device | `…(Apple M2)` **`(0x1B000208)`** | `…(Apple M2)` **`(0x00000064)`** | `…(Apple M2)` **`(0x00000064)`** |
+| Guest Vulkan | 1.3.0 | 1.3.0 | 1.3.0 |
+| Guest device extensions | 85 | 87 | **136** |
+| `VK_ANDROID_external_memory_android_hardware_buffer` | ✅ | ✅ | ✅ |
+| `VK_KHR_sampler_ycbcr_conversion`, `VK_EXT_descriptor_indexing` | ✅ | ✅ | ✅ |
+| `tessellationShader`, ASTC/ETC2, `shaderInt64`, `multiViewport` | ✅ | ✅ | ✅ |
+| `VK_KHR_acceleration_structure` / `ray_query` / `deferred_host_operations` | ❌ | ❌ | **✅** |
+| `VK_KHR_ray_tracing_pipeline` | ❌ | ❌ | ❌ (negative control — deliberately not advertised) |
+| `geometryShader` | ❌ | ❌ | ❌ (structural to Apple GPUs — unchanged) |
 
-**The strip list is airtight, verified against the guest's own view:** of the 9 stripped extensions,
-**0 leaked** to the guest.
+The guest device ID is an independent driver fingerprint: `0x1B000208` → `0x00000064`. The guest's
+renderer string now names the driver outright:
+`ANGLE (Apple, Vulkan 1.3.0 (Virtio-GPU GFXStream (Apple M2) (0x00000064)), gfxstream (KosmicKrisp)-26.2.99)`.
 
-**3DMark, real workload, 3 launch/force-stop cycles** (`screenshots/phase5-3dmark-on-kosmickrisp.png`):
-full UI renders; guest log `Renderer (Vulkan 1.3.0 (Virtio-GPU GFXStream (Apple M2) (0x00000064)))`;
-**0 host gfxstream aborts, 0 `[gpu3d]` command failures**, VMM alive throughout. Its 13 compatibility
-verdicts are **byte-identical to the MoltenVK baseline** — same 13 items, same true/false for each,
-`Sling Shot Extreme` still the one compatible test. **Zero application-visible capability regression.**
+**Where the +49 came from, and the A/B that attributes it.** 87 → 136 is *not* a host-side gain. The
+guest-visible set is decided by a hardcoded allow-list in the guest ICD (`allowedExtensionNames` in
+mesa's `src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp`), intersected with what the host
+advertises. Booting the **same image** with the stock ICD reverted in
+(`prep-vulkan-icd.sh --revert`) and re-measuring gives **89**; with the rebuilt ICD, **136**. Same
+host, same renderer, same boot line — so the delta is the ICD and nothing else.
+
+**The RT names are decoded, not merely listed.** Each of the three appears exactly once as a device
+`extensionName`, and their property structs come back with real values rather than zeroes:
+`accelerationStructure = true`, `accelerationStructureCaptureReplay = false`,
+`maxGeometryCount = 0xffffff`, `minAccelerationStructureScratchOffsetAlignment = 256`, `rayQuery = true`.
+Both of those `sType`s were in the cereal gap before this work, where they would have reached
+`reservedunmarshal_extension_struct`'s `abort()`; a zero-filled struct would be the signature of a
+decoder that had not really round-tripped them.
+
+**The strip list is airtight for the trivial reason:** it strips nothing. `hiding 0 of 144`, printed
+by the renderer on the boot this table was measured on.
+
+### 3DMark, real workload — re-run 2026-07-29, and it found a divergence from this document
+
+`3DMarkandroid-v2-6-5056.apk`, installed over `adb` (29 s), 3 launch/force-stop cycles, device awake
+and keyguard dismissed.
+
+- **The UI renders.** Full 3DMark welcome/tutorial screen and then the benchmark list, logo, text and
+  photographic backgrounds — `screenshots/phasec-3dmark-ui-on-rebuilt-icd.png`.
+- All 3 cycles reached a resumed activity; VMM alive throughout; the boot's error counters stayed at
+  0 across the whole run.
+- Guest renderer string as above, i.e. the real host GPU path.
+
+**All 13 compatibility verdicts, enumerated from the UI tree (`uiautomator dump`) rather than eyeballed:**
+
+| Test | Verdict |
+|---|---|
+| Sling Shot Extreme | not compatible |
+| Sling Shot | not compatible |
+| Steel Nomad Light | RAM: needs 8 GB (guest has 4 GB) |
+| Steel Nomad Light Stress Test | RAM: needs 8 GB (guest has 4 GB) |
+| Solar Bay / Solar Bay Stress Test | not compatible |
+| Solar Bay Extreme / Solar Bay Extreme Stress Test | not compatible |
+| Wild Life / Wild Life Stress Test | not compatible |
+| Wild Life Extreme / Wild Life Extreme Stress Test | not compatible |
+| Opacity Micromaps Feature Test | "does not support all the Vulkan features required" |
+
+**This does not match what this section used to claim** — *"`Sling Shot Extreme` still the one
+compatible test"*. It now reports **not compatible**. That claim is withdrawn as a *current*
+statement; whether it was ever right is not something this run can settle.
+
+**It is not a regression from any work on this branch, and that is measured, not argued.** The same
+13 tabs were walked on the **stock ICD** (89 guest extensions, no RT names, 3DMark's `/data` install
+untouched) and the verdicts are **identical, all 13, verbatim** — including Sling Shot Extreme. So
+the guest-ICD widening, the regenerated host cereal and the ray-tracing work move this workload's
+verdicts **not at all**, in either direction.
+
+What that leaves unexplained is the difference against the *older* recorded baseline, and the honest
+answer is that it has not been root-caused. Two facts bound it: `MyDeviceNotRecognizedException`
+appears in this run exactly as it did in the baseline (so 3DMark's device lookup is failing the same
+way in both), and none of the benchmark DLC data packages are installed
+(`slingshot-android-data=INSTALL_AVAILABLE`, never `INSTALLED`) — a 3DMark-version or app-state
+difference is at least as plausible as a graphics one, and neither has been tested. Steel Nomad
+Light's 8 GB verdict, meanwhile, reproduces the baseline exactly, against a guest that still has
+4 GB (`MemTotal: 4009648 kB`) — so at least one verdict is confirmed to be reading a real property of
+this harness.
 
 **Retraction of a retraction — read this before repeating either claim.** An earlier revision of this
 document "corrected" the strip-list reasoning by asserting that the **10** deliberately-unstripped
 matches are "not guest-visible anyway, so the harm avoided was smaller than claimed". **That
-correction was itself wrong**, and it is withdrawn. Measured against the guest's own 87-extension
-list: `VK_KHR_buffer_device_address` and `VK_KHR_present_id` **are guest-visible**. Over-stripping
+correction was itself wrong**, and it is withdrawn. Measured against the guest's own extension list:
+`VK_KHR_buffer_device_address` and `VK_KHR_present_id` **are guest-visible**. Over-stripping
 would therefore have removed real, guest-reachable capability — including
 `buffer_device_address`, which the section above independently flags as not obscure. The original
-reasoning for keeping them stands, for exactly the reason first given.
+reasoning for keeping them stands, for exactly the reason first given. (The question is now moot in
+the operative sense — nothing is stripped — but the reasoning is what would be reached for the next
+time the exception list is argued about.)
 
 (The remaining 8 of the 10 are indeed not in the guest list, because gfxstream curates the
 guest-visible set independently of the host's 140. That is why the count matters: "some are not
@@ -513,14 +696,38 @@ now settle before touching ColorBuffer pixels.
   Making it demand-driven needs a VMM-side on-demand capture path; `AEMU_PRESENT_READBACK` is **not**
   that, since it would force the same readback *and* retire the in-Vulkan present path in the
   windowed configuration.
-- **The Phase 3 gate reached the lock screen, not the home screen.** The keyguard was not dismissed
-  in that run. Every graphics signal in it is healthy (present ACTIVE, 0 gfxstream aborts, 0
-  present-path fallbacks, real GPU renderer string, SwiftShader count 0), so the evidence points at
-  scripted-input timing rather than rendering — but *points at* is the correct strength. It has not
-  been root-caused.
-- ~~`cmd gpu vkjson` and 3DMark have not been re-run into this document.~~ **DONE — reduced and
-  reviewed; see "Guest-visible capability delta" below.** The guest-side statement of record is now
-  KosmicKrisp-era, not MoltenVK-era.
+- ~~**The Phase 3 gate reached the lock screen, not the home screen.**~~ **EXPLAINED, and it was not
+  input timing.** The device is simply *asleep* — `mWakefulness` is not `Awake` and the keyguard is
+  up, so a launched app resumes behind it (`callingUidProcState: TOP_SLEEPING`) and a screencap
+  returns the lock screen no matter how healthy rendering is. Two `adb` commands fix it and they are
+  now part of every measurement here: `input keyevent KEYCODE_WAKEUP` then `wm dismiss-keyguard`
+  (`svc power stayon true` keeps it that way). The earlier guess at "scripted-input timing" was in
+  the right neighbourhood and the wrong mechanism. First 3DMark run this pass reproduced the old
+  symptom exactly — 3 clean cycles, every screenshot the lock screen — which is what identified it.
+- ~~`cmd gpu vkjson` and 3DMark have not been re-run into this document.~~ **DONE, twice** — the
+  numbers were re-measured again on 2026-07-29 over `adb` and the 3DMark verdict table is now
+  enumerated rather than summarised. See "Guest-visible capability delta".
+- **Ray tracing reaches the guest, and on this M2 every ray misses.** `run-rq-smoke.sh` is **12/16,
+  exit 1**; the 4 failures are the entire hit path, and `mtl4-rt-matrix.m` traces the cause to Metal
+  refusing MTL4-built acceleration structures on Apple8 (*"this device does not support Metal 4 ray
+  tracing"*, despite `supportsRaytracing == YES`). Hardware RT starts at Apple9. **This is the single
+  most over-claimable thing in this document** — the plumbing is real and end-to-end, and the answer
+  it returns is "miss". Open decision, task #17: build through the legacy encoder, or accept the
+  ceiling and say so. Also still true: no guest-side RT workload has ever been run, no CTS ray-query
+  subset has been attempted, and `VK_KHR_ray_tracing_pipeline` is deliberately unimplemented.
+- **3DMark's `Sling Shot Extreme` verdict does not match this document's older baseline.** Measured
+  identical on the stock and rebuilt guest ICD, so nothing on this branch caused it, but the
+  divergence from the earlier recorded run is **not root-caused** — see the 3DMark subsection for the
+  two facts that bound it.
+- **Host-side adb authorisation does not persist on this image, and which platform path clears it is
+  not established.** `prep-adb-keys.sh` writes both `/data/misc/adb/adb_keys` and system_server's
+  `adb_temp_keys.xml`; after the next boot the directory is *empty*. Measured twice (first with
+  `adb_keys` alone — the entry came back with **inode 0**, i.e. unlinked — then with both files).
+  `AdbService: setAdbEnabled(true)` is in every boot log, so `AdbDebuggingManager` is live and owns
+  that directory, but the specific path doing the delete was not traced. **It costs nothing today**:
+  `ro.adb.secure=0`, so adbd never asks, and adb was measured working end-to-end with the directory
+  empty (335 MB `adb install`, `uiautomator dump`, `adb root`). It becomes a real problem only on an
+  image with `ro.adb.secure=1`.
 - **`VK_GOOGLE_display_timing` is gone** and Android sometimes uses it for frame pacing. Not
   observed to be requested; the plausible symptom is jitter, not failure. Worth watching, not worth
   pre-emptively working around.
@@ -549,17 +756,31 @@ bash crates/aemulator-hvf/kosmickrisp/build-kosmickrisp.sh
 #    opt-in), which is what makes a pass here evidence about KosmicKrisp specifically.
 bash crates/aemulator-hvf/kosmickrisp/run-gate.sh
 
-# 3. Dependency + driver preflight (ICD manifest, its library_path, macOS floor, rpaths, entitlement).
+# 3. Dependency + driver preflight. Beyond the ICD manifest / library_path / macOS floor / rpaths /
+#    entitlement, this also verifies the generated cereal strip list still matches the gfxstream pin
+#    AND that it does not intersect what KosmicKrisp advertises — so a TP_MESA_SHA bump that hands the
+#    renderer an undecodable extension fails HERE instead of as an abort() minutes into a boot.
 bash ci/hvf-doctor.sh
+#   expect: "cereal gap ∩ host advertised = 0 of 144 (deny-set: 0)"
 
 # 4. Guards (hermetic — no GPU, no boot, no driver required).
-cd crates/aemulator-hvf && cargo test --lib          # 61 passed
+cd crates/aemulator-hvf && cargo test                # 125 passed
 
-# 5. Host driver identity + the capability numbers quoted above.
-VK_DRIVER_FILES="$TP_KOSMICKRISP_ICD"   # resolved by third_party/paths.sh \
-  vulkaninfo | grep -E 'driverName|driverInfo|apiVersion|Device Extensions: count|geometryShader|queueCount'
-#   expect: KosmicKrisp / Mesa 26.3.0-devel (git-4f4b73dfe5) / 1.4.354 / count = 140 /
-#           geometryShader = false / queueCount = 1
+# 5. Host driver identity + the capability numbers quoted above. run-gate.sh is the source of the
+#    committed golden, so this and the golden cannot disagree the way a hand-run vulkaninfo can.
+bash crates/aemulator-hvf/kosmickrisp/run-gate.sh --dump-identity - \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["driverProperties"]["driverName"], d["driverProperties"]["driverInfo"], d["deviceExtensionCount"])'
+#   expect: KosmicKrisp   Mesa 26.3.0-devel (git-4f4b73dfe5)   144
+#   (and `diff` it against gfxstream/evidence/host-vulkan-identity.json — it must be byte-identical)
+
+# 5b. Ray tracing on the HOST driver: BLAS + TLAS build and a compute ray-query hit/miss readback.
+bash crates/aemulator-hvf/kosmickrisp/run-rq-smoke.sh
+#   expect on Apple8 (M2): "12/16 checks passed", exit 1 — the 4 failures are the hit path, and that
+#   is the CORRECT result on this hardware. 16/16 means real hits (Apple9+). Anything else — some
+#   rays hitting with wrong answers — is a real driver bug.
+bash crates/aemulator-hvf/kosmickrisp/run-rq-smoke.sh --matrix   # pure-Metal control for a 12/16
+#   only the legacy/legacy row intersects => Metal, not KosmicKrisp. Add METAL_DEVICE_WRAPPER_TYPE=1
+#   and Metal API validation names it: "this device does not support Metal 4 ray tracing."
 
 # 6. Android on KosmicKrisp, windowed, in-Vulkan present:
 rm -f crates/aemulator-hvf/testdata/cf64/img/userdata.img
@@ -581,10 +802,52 @@ vmmap $(pgrep -f aemulator-hvf) | grep -i -E 'moltenvk|kosmickrisp'
 cd crates/aemulator-hvf && ./run-linux-display.sh
 #   expect BOTH: "CAMetalLayer 0x… published for in-Vulkan present"
 #           and: "[display] scanout gen=… non_zero_fb_bytes=<nonzero>"
+
+# 9. GUEST-SIDE measurement over adb — this is how every guest number above was taken.
+#    Do 9a ONCE per image (offline, VMM stopped); 9b every boot.
+#
+# 9a. Install the rebuilt guest ICD and authorise this host's adb key. Both are idempotent and both
+#     refuse to run against an image a VMM is holding. WITHOUT the ICD the guest sees 89 extensions
+#     and no ray tracing; the widened allow-list is the entire 89 -> 136 delta.
+PB=<scratch>/phaseb bash <scratch>/phaseb/build-guest-icd.sh      # ~27 s -> vulkan.ranchu.so
+bash crates/aemulator-hvf/prep-vulkan-icd.sh \
+  crates/aemulator-hvf/testdata/cf64/img/super.raw.img --icd=<scratch>/phaseb/vulkan.ranchu.so
+bash crates/aemulator-hvf/prep-adb-keys.sh                        # --verify to inspect, writes nothing
+#     (prep-vulkan-icd.sh --revert puts the stock ICD back; that is the A/B used above.)
+#     On THIS image the adb key is not what makes adb work — `ro.adb.secure=0`, so adbd never asks,
+#     and the platform clears /data/misc/adb at every boot anyway (measured; see the script header).
+#     Run it for the record and for --verify; do not depend on it persisting.
+
+# 9b. Boot, then reach adbd over the slirp port-forward (host 5555 -> guest 5555). The VMM's
+#     net-autoconfig thread starts adbd a few seconds in. THE DEVICE BOOTS ASLEEP: without the wake +
+#     dismiss-keyguard, every screencap is the lock screen and every launched app resumes behind it.
+adb connect 127.0.0.1:5555 && adb devices
+adb shell input keyevent KEYCODE_WAKEUP && adb shell wm dismiss-keyguard && adb shell svc power stayon true
+adb shell cmd gpu vkjson | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"][0]; \
+  n=[e["extensionName"] for e in d["extensions"]]; print(len(n), sorted(x for x in n if "ray" in x or "accel" in x))'
+#   expect: 136 ['VK_KHR_acceleration_structure', 'VK_KHR_deferred_host_operations', 'VK_KHR_ray_query']
+#   and the boot log: "[gfxstream] cereal gap: hiding 0 of 144 host device extensions"
 ```
 
 Only one VMM may hold the `testdata/cf64` disk images at a time — a second concurrent instance
-corrupts the shared `userdata` ext4. Kill any stale VMM (`pkill -f "aemulator-hvf run-android"`)
-before a run.
+corrupts the shared `userdata` ext4. Kill any stale VMM (`pkill -f "aemulator-hvf control"`,
+`pkill -f "aemulator-hvf run-android"`) before a run, and before any `prep-*.sh` — those write to the
+same images and both scripts refuse rather than race.
 
-No git commits made.
+## Provenance of the numbers in this document
+
+Everything KosmicKrisp-era in the tables above was measured on **2026-07-29** on this machine
+(macOS 27.0, Apple M2) at:
+
+| Pin / artifact | Value |
+|---|---|
+| `TP_MESA_SHA` | `4f4b73dfe58171865f95e8ef1b52236ad341dea0` + `third_party/patches/mesa/0001…0007` |
+| `TP_GFXSTREAM_SHA` | `5c5fe539389dc4fc6b0566f8f9785285f0144af9` + `third_party/patches/gfxstream/` |
+| Host cereal | regenerated by `third_party/regen-cereal.sh`, `TP_GFXSTREAM_CODEGEN_REF=838dd1d61`, registry v1.4.348 |
+| Guest ICD | rebuilt `vulkan.ranchu.so`, 1,962,824 B, `sha256 e66cac99…` (stock: 5,218,752 B, `sha256 3910089c…`) |
+| Gates | `bootstrap.sh --verify` ✓, `ci/check.sh` ✓, `cargo test` 125/0, `run-gate.sh` 3/3, `hvf-doctor.sh` ✓ |
+| Not a gate | `run-rq-smoke.sh` **12/16, exit 1** — the expected Apple8 score, not a regression. See the ray-tracing retraction above. |
+
+Earlier revisions of this file were written before any of it was committed and said so. It is
+committed now; use `git log` on this path for the history, and treat a number's *section* as its
+date — the ones nearest the bottom of each section are the current ones.

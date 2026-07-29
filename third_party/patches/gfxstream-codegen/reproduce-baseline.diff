@@ -20,7 +20,7 @@
                        deepcopy_VkPhysicalDeviceIndexTypeUint8FeaturesEXT)
 --- a/host/vulkan/cereal/common/goldfish_vk_dispatch.cpp
 +++ b/host/vulkan/cereal/common/goldfish_vk_dispatch.cpp
-@@ -808,6 +808,10 @@
+@@ -821,6 +821,10 @@
  #ifdef VK_EXT_tooling_info
      out->vkGetPhysicalDeviceToolPropertiesEXT = (PFN_vkGetPhysicalDeviceToolPropertiesEXT)dlSymFunc(
          lib, "vkGetPhysicalDeviceToolPropertiesEXT");
@@ -31,7 +31,7 @@
  #endif
  #ifdef VK_EXT_extended_dynamic_state
      out->vkCmdSetCullModeEXT = (PFN_vkCmdSetCullModeEXT)dlSymFunc(lib, "vkCmdSetCullModeEXT");
-@@ -2020,6 +2024,10 @@
+@@ -2092,6 +2096,10 @@
      out->vkGetPhysicalDeviceToolPropertiesEXT =
          (PFN_vkGetPhysicalDeviceToolPropertiesEXT)vk->vkGetInstanceProcAddr(
              instance, "vkGetPhysicalDeviceToolPropertiesEXT");
@@ -42,7 +42,7 @@
  #endif
  #ifdef VK_EXT_extended_dynamic_state
      out->vkCmdSetCullModeEXT =
-@@ -3258,6 +3266,10 @@
+@@ -3394,6 +3402,10 @@
          (PFN_vkGetPhysicalDeviceToolPropertiesEXT)vk->vkGetDeviceProcAddr(
              device, "vkGetPhysicalDeviceToolPropertiesEXT");
  #endif
@@ -55,7 +55,7 @@
          (PFN_vkCmdSetCullModeEXT)vk->vkGetDeviceProcAddr(device, "vkCmdSetCullModeEXT");
 --- a/host/vulkan/cereal/common/goldfish_vk_dispatch.h
 +++ b/host/vulkan/cereal/common/goldfish_vk_dispatch.h
-@@ -570,6 +570,9 @@
+@@ -577,6 +577,9 @@
  #ifdef VK_EXT_tooling_info
      PFN_vkGetPhysicalDeviceToolPropertiesEXT vkGetPhysicalDeviceToolPropertiesEXT;
  #endif
@@ -87,7 +87,7 @@
  }
 --- a/host/vulkan/cereal/common/goldfish_vk_marshaling.cpp
 +++ b/host/vulkan/cereal/common/goldfish_vk_marshaling.cpp
-@@ -29220,6 +29220,11 @@
+@@ -30291,6 +30291,11 @@
              return "OP_vkCmdSetTessellationDomainOriginEXT";
          }
  #endif
@@ -101,7 +101,7 @@
              return "OP_vkCmdSetCullModeEXT";
 --- a/host/vulkan/cereal/common/goldfish_vk_marshaling.h
 +++ b/host/vulkan/cereal/common/goldfish_vk_marshaling.h
-@@ -4808,6 +4808,27 @@
+@@ -4815,6 +4815,27 @@
      VkPhysicalDeviceShaderAtomicFloatFeaturesEXT* forUnmarshaling);
  
  #endif
@@ -153,7 +153,7 @@
      memcpy((VkDeviceSize*)&forUnmarshaling->offset, *ptr, sizeof(VkDeviceSize));
      *ptr += sizeof(VkDeviceSize);
      memcpy((VkDeviceSize*)&forUnmarshaling->range, *ptr, sizeof(VkDeviceSize));
-@@ -20625,9 +20631,31 @@
+@@ -21360,9 +21366,31 @@
          }
  #endif
          default: {
@@ -407,7 +407,7 @@
                  if ((vkQueuePresentKHR_VkResult_return) == VK_ERROR_DEVICE_LOST)
                      m_state->on_DeviceLost();
                  m_state->on_CheckOutOfMemory(vkQueuePresentKHR_VkResult_return, opcode, context);
-@@ -22016,6 +22011,50 @@
+@@ -22265,6 +22260,50 @@
                  break;
              }
  #endif
@@ -458,7 +458,7 @@
  #ifdef VK_EXT_extended_dynamic_state
              case OP_vkCmdSetCullModeEXT: {
                  GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DECODER_CATEGORY,
-@@ -27076,6 +27115,7 @@
+@@ -28415,6 +28454,7 @@
              }
          }
          ptr += packetLen;
@@ -1429,7 +1429,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3129,7 +3289,8 @@
+@@ -3151,7 +3311,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetEvent2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1439,7 +1439,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3143,7 +3304,8 @@
+@@ -3165,7 +3326,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdResetEvent2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1449,7 +1449,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3158,7 +3320,8 @@
+@@ -3180,7 +3342,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdWaitEvents2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1459,7 +1459,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3172,7 +3335,8 @@
+@@ -3194,7 +3357,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdPipelineBarrier2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1469,7 +1469,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3187,7 +3351,8 @@
+@@ -3209,7 +3373,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdWriteTimestamp2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1479,7 +1479,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3205,7 +3370,8 @@
+@@ -3227,7 +3392,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdWriteBufferMarker2AMD, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1489,7 +1489,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3225,7 +3391,8 @@
+@@ -3247,7 +3413,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyBuffer2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1499,7 +1499,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3239,7 +3406,8 @@
+@@ -3261,7 +3428,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyImage2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1509,7 +1509,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3253,7 +3421,8 @@
+@@ -3275,7 +3443,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyBufferToImage2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1519,7 +1519,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3267,7 +3436,8 @@
+@@ -3289,7 +3458,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdCopyImageToBuffer2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1529,7 +1529,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3281,7 +3451,8 @@
+@@ -3303,7 +3473,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBlitImage2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1539,7 +1539,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3295,7 +3466,8 @@
+@@ -3317,7 +3488,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdResolveImage2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1549,7 +1549,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3329,7 +3501,8 @@
+@@ -3351,7 +3523,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindIndexBuffer2KHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1559,7 +1559,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3372,7 +3545,8 @@
+@@ -3394,7 +3567,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetLineStippleKHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1569,7 +1569,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3560,7 +3734,8 @@
+@@ -3582,7 +3756,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindTransformFeedbackBuffersEXT,
                                      snapshotTraceBegin, snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1579,7 +1579,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3577,7 +3752,8 @@
+@@ -3599,7 +3774,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginTransformFeedbackEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1589,7 +1589,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3593,7 +3769,8 @@
+@@ -3615,7 +3791,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndTransformFeedbackEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1599,7 +1599,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3608,7 +3785,8 @@
+@@ -3630,7 +3807,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginQueryIndexedEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1609,7 +1609,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3622,7 +3800,8 @@
+@@ -3644,7 +3822,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndQueryIndexedEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1619,7 +1619,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3638,7 +3817,8 @@
+@@ -3660,7 +3839,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdDrawIndirectByteCountEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1629,7 +1629,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3701,7 +3881,8 @@
+@@ -3723,7 +3903,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBeginDebugUtilsLabelEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1639,7 +1639,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3714,7 +3895,8 @@
+@@ -3736,7 +3917,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdEndDebugUtilsLabelEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1649,7 +1649,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3728,7 +3910,8 @@
+@@ -3750,7 +3932,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdInsertDebugUtilsLabelEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1659,7 +1659,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3819,6 +4002,23 @@
+@@ -3841,6 +4024,23 @@
                                                VkPhysicalDevice physicalDevice, uint32_t* pToolCount,
                                                VkPhysicalDeviceToolProperties* pToolProperties) {}
  #endif
@@ -1683,7 +1683,7 @@
  #ifdef VK_EXT_extended_dynamic_state
      void vkCmdSetCullModeEXT(const uint8_t* snapshotTraceBegin, size_t snapshotTraceBytes,
                               android::base::BumpPool* pool, VkCommandBuffer commandBuffer,
-@@ -3830,7 +4030,8 @@
+@@ -3852,7 +4052,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetCullModeEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1693,7 +1693,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3844,7 +4045,8 @@
+@@ -3866,7 +4067,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetFrontFaceEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1703,7 +1703,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3858,7 +4060,8 @@
+@@ -3880,7 +4082,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetPrimitiveTopologyEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1713,7 +1713,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3872,7 +4075,8 @@
+@@ -3894,7 +4097,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetViewportWithCountEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1723,7 +1723,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3886,7 +4090,8 @@
+@@ -3908,7 +4112,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetScissorWithCountEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1733,7 +1733,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3902,7 +4107,8 @@
+@@ -3924,7 +4129,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdBindVertexBuffers2EXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1743,7 +1743,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3916,7 +4122,8 @@
+@@ -3938,7 +4144,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthTestEnableEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1753,7 +1753,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3930,7 +4137,8 @@
+@@ -3952,7 +4159,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthWriteEnableEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1763,7 +1763,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3944,7 +4152,8 @@
+@@ -3966,7 +4174,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthCompareOpEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1773,7 +1773,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3959,7 +4168,8 @@
+@@ -3981,7 +4190,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthBoundsTestEnableEXT,
                                      snapshotTraceBegin, snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1783,7 +1783,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3973,7 +4183,8 @@
+@@ -3995,7 +4205,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilTestEnableEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1793,7 +1793,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -3988,7 +4199,8 @@
+@@ -4010,7 +4221,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetStencilOpEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1803,7 +1803,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -4052,7 +4264,8 @@
+@@ -4074,7 +4286,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetPatchControlPointsEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1813,7 +1813,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -4068,7 +4281,8 @@
+@@ -4090,7 +4303,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetRasterizerDiscardEnableEXT,
                                      snapshotTraceBegin, snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1823,7 +1823,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -4082,7 +4296,8 @@
+@@ -4104,7 +4318,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetDepthBiasEnableEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1833,7 +1833,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -4096,7 +4311,8 @@
+@@ -4118,7 +4333,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetLogicOpEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1843,7 +1843,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -4111,7 +4327,8 @@
+@@ -4133,7 +4349,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetPrimitiveRestartEnableEXT,
                                      snapshotTraceBegin, snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1853,7 +1853,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -4127,7 +4344,8 @@
+@@ -4149,7 +4366,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetColorWriteEnableEXT, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1863,7 +1863,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -4868,7 +5086,8 @@
+@@ -5050,7 +5268,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdTraceRaysKHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1873,7 +1873,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -4899,7 +5118,8 @@
+@@ -5081,7 +5300,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdTraceRaysIndirectKHR, snapshotTraceBegin,
                                      snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1883,7 +1883,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -4921,7 +5141,8 @@
+@@ -5103,7 +5323,8 @@
          mReconstruction.setApiTrace(apiInfo, OP_vkCmdSetRayTracingPipelineStackSizeKHR,
                                      snapshotTraceBegin, snapshotTraceBytes);
          for (uint32_t i = 0; i < 1; ++i) {
@@ -1893,7 +1893,7 @@
              mReconstruction.forEachHandleAddModifyApi((const uint64_t*)(&boxed), 1, apiHandle);
          }
      }
-@@ -8417,6 +8638,14 @@
+@@ -8646,6 +8867,14 @@
      mImpl->vkGetPhysicalDeviceToolPropertiesEXT(snapshotTraceBegin, snapshotTraceBytes, pool,
                                                  input_result, physicalDevice, pToolCount,
                                                  pToolProperties);
@@ -1910,7 +1910,7 @@
  #ifdef VK_EXT_extended_dynamic_state
 --- a/host/vulkan/VkDecoderSnapshot.h
 +++ b/host/vulkan/VkDecoderSnapshot.h
-@@ -1566,6 +1566,11 @@
+@@ -1588,6 +1588,11 @@
                                                VkPhysicalDevice physicalDevice, uint32_t* pToolCount,
                                                VkPhysicalDeviceToolProperties* pToolProperties);
  #endif

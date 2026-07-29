@@ -79,7 +79,7 @@ TP_VULKAN_HEADERS_TAG="v1.4.348"
 # RE-RECORD IT whenever the patch series legitimately changes — the digest is a function of the
 # series, so it goes stale on every regeneration:
 #     bash third_party/bootstrap.sh --record-digest      # recomputes and rewrites the line below
-TP_GFXSTREAM_TREE_DIGEST="68cc39f837d1bf56bf1b816fdf4fadf0ebb883fa"
+TP_GFXSTREAM_TREE_DIGEST="7fa1d8e153a2d4062daf265afe96db16b2ec2c8a"
 
 # ---------------------------------------------------------------------------------------------
 # aemu — aemu-base / aemu-host-common. A build-time dependency of gfxstream's SYSTEM dependency

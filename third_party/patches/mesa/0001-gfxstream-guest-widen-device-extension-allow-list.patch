@@ -1,8 +1,8 @@
 diff --git a/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp b/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
-index f25295f..70bd62e 100644
+index f25295f..11680c1 100644
 --- a/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
 +++ b/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
-@@ -1895,6 +1895,82 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
+@@ -1895,6 +1895,102 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
          "VK_KHR_maintenance8",
          "VK_KHR_maintenance9",
          "VK_GOOGLE_display_timing",
@@ -82,6 +82,26 @@ index f25295f..70bd62e 100644
 +        "VK_KHR_swapchain_maintenance1",
 +        "VK_KHR_unified_image_layouts",
 +        "VK_KHR_workgroup_memory_explicit_layout",
++        // RAY TRACING. Checked in the GENERATED build/src/vulkan/util/vk_extensions.c, per the trap
++        // described above, NOT in the registry:
++        //     .KHR_acceleration_structure     = ANDROID_API_LEVEL >= 31
++        //     .KHR_deferred_host_operations   = ANDROID_API_LEVEL >= 31
++        //     .KHR_ray_query                  = ANDROID_API_LEVEL >= 31
++        // This driver is built at 34, so all three generate `true` and vk_device_init will accept
++        // them — unlike VK_KHR_maintenance5 (>= 35) which is why that one is excluded above.
++        //
++        // All three are also decoded by the host cereal
++        // (third_party/patches/gfxstream-codegen/0001-supported-features.patch) and therefore no
++        // longer hidden by VkDecoderCerealGap.inc, and all three are implemented by KosmicKrisp.
++        // Adding a name here that the host still hides is harmless but useless: this list is
++        // intersected with the host's advertised set.
++        //
++        // VK_KHR_ray_tracing_pipeline is NOT here. It is Android-allowed (>= 31) and the guest
++        // encoder could carry it, but KosmicKrisp does not implement it, so the host never
++        // advertises it and the intersection would drop it anyway.
++        "VK_KHR_acceleration_structure",
++        "VK_KHR_deferred_host_operations",
++        "VK_KHR_ray_query",
      };
  
      VkEncoder* enc = (VkEncoder*)context;
