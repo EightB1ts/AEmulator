@@ -12,12 +12,15 @@ measured on KosmicKrisp and folded in below, as has a **torn-readback fix** for 
 that this migration introduced and that only shows up under animation.
 
 > **The capability numbers in this document were re-measured on 2026-07-29 and several of them
-> moved a long way.** The guest now sees **136** device extensions, not 87; the host advertises
-> **144**, not 140; the cereal strip list is generated and currently hides **0 of 144**, not 9 of 19;
+> moved a long way.** The guest now sees **133** device extensions, not 87; the host advertises
+> **141**, not 140; the cereal strip list is generated and currently hides **0 of 141**, not 9 of 19;
 > and Vulkan **ray tracing exists as plumbing** — `VK_KHR_acceleration_structure`, `VK_KHR_ray_query`
-> and `VK_KHR_deferred_host_operations` are implemented in KosmicKrisp on Metal 4 and reach the guest,
-> **but every ray misses on this M2**: Metal refuses MTL4-built acceleration structures below Apple9
-> (`run-rq-smoke.sh` 12/16, exit 1 — the expected score on this hardware). Do not read "ray tracing
+> and `VK_KHR_deferred_host_operations` are implemented in KosmicKrisp on Metal 4 — **but they are no
+> longer advertised on this M2, because every ray missed**: Metal refuses MTL4-built acceleration
+> structures below Apple9, so the driver now withholds all three names rather than let an application
+> enable ray query and silently render wrong (`0010-kosmickrisp-gate-ray-tracing-advertisement.patch`,
+> `kk_ray_tracing.c`; `run-rq-smoke.sh` reports **GATED**, and
+> `MESA_KK_FORCE_RAY_TRACING=1` restores the old 12/16 measurement). Do not read "ray tracing
 > works" out of this document; read the ray-tracing retraction in *Measured capability delta*.
 > Superseded passages are marked where they stand rather than deleted, because the *reasoning* in
 > them is still how the current numbers were arrived at. Where a number is stated twice, the section
@@ -236,8 +239,9 @@ been fixed rather than worked around:
 - **The driver half.** `VK_KHR_acceleration_structure`, `VK_KHR_deferred_host_operations` and
   `VK_KHR_ray_query` are implemented in KosmicKrisp on **Metal 4**: `kosmickrisp/run-rq-smoke.sh`
   builds a one-triangle BLAS + TLAS, writes the TLAS into an `ACCELERATION_STRUCTURE` descriptor, and
-  dispatches a real SPIR-V `rayQueryEXT` shader. **It scores 12/16 and exits 1 — read the next
-  bullet before repeating any RT claim, because the 4 failures are the whole hit path.**
+  dispatches a real SPIR-V `rayQueryEXT` shader. **It scored 12/16 — read the next bullet before
+  repeating any RT claim, because the 4 failures are the whole hit path, and the names are withheld
+  from the guest now for exactly that reason (`MESA_KK_FORCE_RAY_TRACING=1` to reproduce the 12/16).**
 - **The gfxstream half.** The host cereal was regenerated so those extensions' `pNext` structs are
   actually *decoded* rather than merely sized — the two RT `sType`s were in the cereal gap, where
   they would have reached `reservedunmarshal_extension_struct`'s `abort()` — and the guest ICD's
@@ -268,10 +272,22 @@ _validateRTDescriptorCompatibility: failed assertion
 
 Nothing public reports this: `supportsRaytracing` and `supportsFamily:MTLGPUFamilyMetal4` are **both
 YES** on the M2. Hardware ray tracing arrives with **Apple9**; below it Metal emulates RT with a
-builder only the legacy encoder can reach, and KosmicKrisp is a Metal 4 driver. So `12/16` is the
-*expected* score on this hardware — `run-rq-smoke.sh` documents it as such in its own header — and
-the open decision is what to do about it (task #17): teach the driver to build through the legacy
-encoder, or accept that ray query answers "miss" on Apple8 and earlier.
+builder only the legacy encoder can reach, and KosmicKrisp is a Metal 4 driver. So `12/16` was the
+*expected* score on this hardware — and the decision that was open above has since been taken.
+
+**RESOLVED — the names are no longer advertised on a device that cannot intersect.**
+`0010-kosmickrisp-gate-ray-tracing-advertisement.patch` gates `VK_KHR_acceleration_structure`,
+`VK_KHR_ray_query`, `VK_KHR_deferred_host_operations` and their feature bools on a runtime probe
+(`kk_ray_tracing.c`): the private `-requiresRaytracingEmulation`, `respondsToSelector:`-guarded, with
+GPU family ≥ 9 as the fallback when the selector is absent. Measured on this M2 it answers **YES**
+(emulated), so all three names are withheld and `run-rq-smoke.sh` reports **GATED** instead of 12/16.
+The question the gate asks is "can this device build an acceleration structure a ray query can
+intersect", not "is this Apple9" — so when the legacy-encoder builder lands, flipping
+`KK_RT_HAVE_LEGACY_BUILDER` makes the same gate answer true on this same M2. Two escape hatches:
+`MESA_KK_FORCE_RAY_TRACING=1` advertises anyway (with a warning, for development — every query
+misses), `=0` withholds unconditionally; `MESA_KK_RT_DEBUG=1` prints the probe's inputs and verdict.
+Guest-visible effect, measured: host device extensions **144 → 141**, guest **136 → 133**, and
+`cmd gpu vkjson` in the guest now greps zero ray-tracing names.
 
 `VK_KHR_ray_tracing_pipeline` is still **not** advertised, deliberately: it is the negative control
 for the whole chain, and it stays absent until something implements it. What has *not* been
@@ -492,11 +508,11 @@ originally recorded and is kept for the delta:
 |---|---|---|---|
 | Guest device | `…(Apple M2)` **`(0x1B000208)`** | `…(Apple M2)` **`(0x00000064)`** | `…(Apple M2)` **`(0x00000064)`** |
 | Guest Vulkan | 1.3.0 | 1.3.0 | 1.3.0 |
-| Guest device extensions | 85 | 87 | **136** |
+| Guest device extensions | 85 | 87 | **133** (136 before the RT gate below withheld three names) |
 | `VK_ANDROID_external_memory_android_hardware_buffer` | ✅ | ✅ | ✅ |
 | `VK_KHR_sampler_ycbcr_conversion`, `VK_EXT_descriptor_indexing` | ✅ | ✅ | ✅ |
 | `tessellationShader`, ASTC/ETC2, `shaderInt64`, `multiViewport` | ✅ | ✅ | ✅ |
-| `VK_KHR_acceleration_structure` / `ray_query` / `deferred_host_operations` | ❌ | ❌ | **✅** |
+| `VK_KHR_acceleration_structure` / `ray_query` / `deferred_host_operations` | ❌ | ❌ | ❌ — implemented, then **withheld by the runtime gate** because this M2 cannot intersect an MTL4-built structure (`MESA_KK_FORCE_RAY_TRACING=1` to see them) |
 | `VK_KHR_ray_tracing_pipeline` | ❌ | ❌ | ❌ (negative control — deliberately not advertised) |
 | `geometryShader` | ❌ | ❌ | ❌ (structural to Apple GPUs — unchanged) |
 
@@ -511,7 +527,9 @@ advertises. Booting the **same image** with the stock ICD reverted in
 (`prep-vulkan-icd.sh --revert`) and re-measuring gives **89**; with the rebuilt ICD, **136**. Same
 host, same renderer, same boot line — so the delta is the ICD and nothing else.
 
-**The RT names are decoded, not merely listed.** Each of the three appears exactly once as a device
+**The RT names are decoded, not merely listed** — measured before the gate landed, and still true
+under `MESA_KK_FORCE_RAY_TRACING=1`, which is now the only way to see them in the guest. Each of the
+three appears exactly once as a device
 `extensionName`, and their property structs come back with real values rather than zeroes:
 `accelerationStructure = true`, `accelerationStructureCaptureReplay = false`,
 `maxGeometryCount = 0xffffff`, `minAccelerationStructureScratchOffsetAlignment = 256`, `rayQuery = true`.
@@ -519,8 +537,8 @@ Both of those `sType`s were in the cereal gap before this work, where they would
 `reservedunmarshal_extension_struct`'s `abort()`; a zero-filled struct would be the signature of a
 decoder that had not really round-tripped them.
 
-**The strip list is airtight for the trivial reason:** it strips nothing. `hiding 0 of 144`, printed
-by the renderer on the boot this table was measured on.
+**The strip list is airtight for the trivial reason:** it strips nothing. `hiding 0 of 141`, printed
+by the renderer on the boot the RT gate was measured on (`0 of 144` before it withheld three names).
 
 ### 3DMark, real workload — re-run 2026-07-29, and it found a divergence from this document
 
@@ -707,14 +725,28 @@ now settle before touching ColorBuffer pixels.
 - ~~`cmd gpu vkjson` and 3DMark have not been re-run into this document.~~ **DONE, twice** — the
   numbers were re-measured again on 2026-07-29 over `adb` and the 3DMark verdict table is now
   enumerated rather than summarised. See "Guest-visible capability delta".
-- **Ray tracing reaches the guest, and on this M2 every ray misses.** `run-rq-smoke.sh` is **12/16,
-  exit 1**; the 4 failures are the entire hit path, and `mtl4-rt-matrix.m` traces the cause to Metal
-  refusing MTL4-built acceleration structures on Apple8 (*"this device does not support Metal 4 ray
-  tracing"*, despite `supportsRaytracing == YES`). Hardware RT starts at Apple9. **This is the single
-  most over-claimable thing in this document** — the plumbing is real and end-to-end, and the answer
-  it returns is "miss". Open decision, task #17: build through the legacy encoder, or accept the
-  ceiling and say so. Also still true: no guest-side RT workload has ever been run, no CTS ray-query
-  subset has been attempted, and `VK_KHR_ray_tracing_pipeline` is deliberately unimplemented.
+- ~~**Ray tracing reaches the guest, and on this M2 every ray misses.**~~ **CLOSED by withholding the
+  names.** `mtl4-rt-matrix.m` traced the cause to Metal refusing MTL4-built acceleration structures on
+  Apple8 (*"this device does not support Metal 4 ray tracing"*, despite `supportsRaytracing == YES`);
+  hardware RT starts at Apple9. Rather than keep advertising an extension that answers "miss",
+  `kk_ray_tracing.c` now probes `-requiresRaytracingEmulation` at physical-device init and withholds
+  all three names — so the guest sees no `VK_KHR_ray_query` and nothing can enable it by accident.
+  `run-rq-smoke.sh` reports **GATED**; `MESA_KK_FORCE_RAY_TRACING=1` restores the 12/16. Still open,
+  and now the only open part: **build through the legacy encoder** so an Apple8 can hit (needs a
+  device-address → `id<MTLBuffer>` resolution step and an event-ordered encoder split in
+  `kk_queue_submit`), after which `KK_RT_HAVE_LEGACY_BUILDER` flips the same gate back on. Also still
+  true: no guest-side RT workload has ever been run, no CTS ray-query subset has been attempted, and
+  `VK_KHR_ray_tracing_pipeline` is deliberately unimplemented.
+- **The transform-matrix scare was measured false.** The private
+  `-supportsRayTracingMatrixLayout` answers **NO** on this M2, which reads like
+  `MTL_MATRIX_LAYOUT_ROW_MAJOR` — which `0003` asks for, so a row-major `VkTransformMatrixKHR` copies
+  across verbatim — being silently ignored, i.e. correct for identity and wrong for every other
+  transform. `mtl-rt-matrix-layout.m` measures it directly with a translate-+2x transform on the
+  legacy builder: row-major bytes with `MTLMatrixLayoutRowMajor` transform **correctly** for both
+  instance and triangle transforms, and feeding the same bytes with the other layout changes the
+  result, so the declaration is honoured rather than ignored. Nothing is gated on that selector; kk's
+  row-major choice stands. It is recorded and printed by `MESA_KK_RT_DEBUG=1` so the next person to
+  read that NO finds the measurement instead of repeating it.
 - **3DMark's `Sling Shot Extreme` verdict does not match this document's older baseline.** Measured
   identical on the stock and rebuilt guest ICD, so nothing on this branch caused it, but the
   divergence from the earlier recorded run is **not root-caused** — see the 3DMark subsection for the
@@ -824,12 +856,21 @@ bash crates/aemulator-hvf/kosmickrisp/run-gate.sh --dump-identity - \
 
 # 5b. Ray tracing on the HOST driver: BLAS + TLAS build and a compute ray-query hit/miss readback.
 bash crates/aemulator-hvf/kosmickrisp/run-rq-smoke.sh
-#   expect on Apple8 (M2): "12/16 checks passed", exit 1 — the 4 failures are the hit path, and that
-#   is the CORRECT result on this hardware. 16/16 means real hits (Apple9+). Anything else — some
-#   rays hitting with wrong answers — is a real driver bug.
-bash crates/aemulator-hvf/kosmickrisp/run-rq-smoke.sh --matrix   # pure-Metal control for a 12/16
+#   expect on Apple8 (M2): "GATED: ray tracing is not advertised, 0 of 16 checks run", exit 0 — the
+#   driver withholds the three RT names on a device that cannot intersect an MTL4-built structure, and
+#   that is the CORRECT result here. 16/16 means real hits (Apple9+). Anything else — some rays
+#   hitting with wrong answers — is a real driver bug.
+MESA_KK_FORCE_RAY_TRACING=1 bash crates/aemulator-hvf/kosmickrisp/run-rq-smoke.sh
+#   expect on Apple8: "12/16 checks passed", exit 1 — advertises anyway and every hit misses. This is
+#   the measurement the gate is built on; the driver warns that it is reporting a capability it lacks.
+MESA_KK_RT_DEBUG=1 bash crates/aemulator-hvf/kosmickrisp/run-rq-smoke.sh   # the gate's own verdict
+#   expect: "apple family 8, -supportsRaytracing YES, -requiresRaytracingEmulation YES,
+#   -supportsRayTracingMatrixLayout NO, legacy builder no" then "VK_KHR_ray_query withheld — …"
+bash crates/aemulator-hvf/kosmickrisp/run-rq-smoke.sh --matrix   # both pure-Metal controls
 #   only the legacy/legacy row intersects => Metal, not KosmicKrisp. Add METAL_DEVICE_WRAPPER_TYPE=1
 #   and Metal API validation names it: "this device does not support Metal 4 ray tracing."
+#   The second probe (mtl-rt-matrix-layout) answers the separate question of whether
+#   MTLMatrixLayoutRowMajor is honoured here. Expect "kk may keep MTL_MATRIX_LAYOUT_ROW_MAJOR".
 
 # 5c. geometryShader on the HOST driver — a stage Metal does not have, emulated with a compute
 #     prepass + libpoly. Renders and reads back real pixels; check 0 is the no-GS control.
@@ -880,8 +921,10 @@ adb connect 127.0.0.1:5555 && adb devices
 adb shell input keyevent KEYCODE_WAKEUP && adb shell wm dismiss-keyguard && adb shell svc power stayon true
 adb shell cmd gpu vkjson | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"][0]; \
   n=[e["extensionName"] for e in d["extensions"]]; print(len(n), sorted(x for x in n if "ray" in x or "accel" in x))'
-#   expect: 136 ['VK_KHR_acceleration_structure', 'VK_KHR_deferred_host_operations', 'VK_KHR_ray_query']
-#   and the boot log: "[gfxstream] cereal gap: hiding 0 of 144 host device extensions"
+#   expect: 133 [] — the three RT names are withheld by the gate in kk_ray_tracing.c. Booting with
+#   MESA_KK_FORCE_RAY_TRACING=1 in the VMM's environment gives back
+#   136 ['VK_KHR_acceleration_structure', 'VK_KHR_deferred_host_operations', 'VK_KHR_ray_query']
+#   and the boot log: "[gfxstream] cereal gap: hiding 0 of 141 host device extensions" (144 when forced)
 ```
 
 Only one VMM may hold the `testdata/cf64` disk images at a time — a second concurrent instance
@@ -896,12 +939,12 @@ Everything KosmicKrisp-era in the tables above was measured on **2026-07-29** on
 
 | Pin / artifact | Value |
 |---|---|
-| `TP_MESA_SHA` | `4f4b73dfe58171865f95e8ef1b52236ad341dea0` + `third_party/patches/mesa/0001…0007` |
+| `TP_MESA_SHA` | `4f4b73dfe58171865f95e8ef1b52236ad341dea0` + `third_party/patches/mesa/0001…0010` |
 | `TP_GFXSTREAM_SHA` | `5c5fe539389dc4fc6b0566f8f9785285f0144af9` + `third_party/patches/gfxstream/` |
 | Host cereal | regenerated by `third_party/regen-cereal.sh`, `TP_GFXSTREAM_CODEGEN_REF=838dd1d61`, registry v1.4.348 |
 | Guest ICD | rebuilt `vulkan.ranchu.so`, 1,962,824 B, `sha256 e66cac99…` (stock: 5,218,752 B, `sha256 3910089c…`) |
 | Gates | `bootstrap.sh --verify` ✓, `ci/check.sh` ✓, `cargo test` 125/0, `run-gate.sh` 3/3, `hvf-doctor.sh` ✓ |
-| Not a gate | `run-rq-smoke.sh` **12/16, exit 1** — the expected Apple8 score, not a regression. See the ray-tracing retraction above. |
+| Not a gate | `run-rq-smoke.sh` **GATED, exit 0** — the driver withholds the RT names on this Apple8. `MESA_KK_FORCE_RAY_TRACING=1` gives the 12/16 the gate is built on. See the ray-tracing retraction above. |
 
 Earlier revisions of this file were written before any of it was committed and said so. It is
 committed now; use `git log` on this path for the history, and treat a number's *section* as its

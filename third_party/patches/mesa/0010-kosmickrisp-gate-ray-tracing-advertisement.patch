@@ -1,0 +1,524 @@
+diff --git a/src/kosmickrisp/bridge/mtl_device.h b/src/kosmickrisp/bridge/mtl_device.h
+--- a/src/kosmickrisp/bridge/mtl_device.h
++++ b/src/kosmickrisp/bridge/mtl_device.h
+@@ -37,6 +37,36 @@
+ uint64_t mtl_device_current_allocated_size(mtl_device *dev);
+ uint32_t mtl_device_max_argument_buffer_sampler_count(mtl_device *dev);
+ 
++/* Ray-tracing capability query.
++ *
++ * Metal answers the question that actually matters — "can a structure built
++ * through the Metal 4 encoder be intersected?" — only privately, so these are
++ * tri-state: UNKNOWN means the selector is not on this macOS, which is not the
++ * same as NO. Nothing hard-links a private selector; every one of them is
++ * reached through -respondsToSelector: and NSSelectorFromString.
++ */
++enum mtl_tristate {
++   MTL_TRISTATE_UNKNOWN = 0,
++   MTL_TRISTATE_NO,
++   MTL_TRISTATE_YES,
++};
++
++/* -[MTLDevice supportsRaytracing]. Public, and YES on hardware that merely
++ * EMULATES ray tracing, so it is necessary but nowhere near sufficient. */
++bool mtl_device_supports_ray_tracing(mtl_device *dev);
++
++/* Private -[MTLDevice requiresRaytracingEmulation]. YES below GPU family
++ * Apple9, where Metal emulates ray tracing in software and the emulated
++ * acceleration-structure BUILDER is reachable only from the legacy
++ * -[MTLCommandBuffer accelerationStructureCommandEncoder] — never from
++ * MTL4ComputeCommandEncoder. See kk_ray_tracing.c for what that costs. */
++enum mtl_tristate mtl_device_requires_ray_tracing_emulation(mtl_device *dev);
++
++/* Private -[MTLDevice supportsRayTracingMatrixLayout]. Diagnostic only —
++ * measured NOT to predict whether MTLMatrixLayoutRowMajor is honoured. Again,
++ * see kk_ray_tracing.c. */
++enum mtl_tristate mtl_device_supports_ray_tracing_matrix_layout(mtl_device *dev);
++
+ /* Timestamp query */
+ uint64_t mtl_device_get_gpu_timestamp(mtl_device *dev);
+ /* Frequency of the GPU timestamp counter in ticks per second. */
+diff --git a/src/kosmickrisp/bridge/mtl_device.m b/src/kosmickrisp/bridge/mtl_device.m
+--- a/src/kosmickrisp/bridge/mtl_device.m
++++ b/src/kosmickrisp/bridge/mtl_device.m
+@@ -14,6 +14,8 @@
+ #include <Metal/MTLCaptureManager.h>
+ #include <Metal/MTLDevice.h>
+ 
++#include <objc/message.h>
++
+ /* Device creation */
+ mtl_device *
+ mtl_device_create()
+@@ -179,6 +181,53 @@
+    }
+ }
+ 
++bool
++mtl_device_supports_ray_tracing(mtl_device *dev)
++{
++   @autoreleasepool {
++      id<MTLDevice> device = (id<MTLDevice>)dev;
++      return device.supportsRaytracing;
++   }
++}
++
++/* Read a private BOOL property by name.
++ *
++ * NSSelectorFromString plus -respondsToSelector: rather than a declared
++ * category: nothing here is linked against, so a macOS that drops the selector
++ * answers UNKNOWN instead of failing to launch. The objc_msgSend cast is the
++ * documented way to call through a SEL whose signature the compiler cannot see;
++ * it is correct only because the signature really is BOOL(id, SEL), which is
++ * what a BOOL @property getter always is.
++ */
++static enum mtl_tristate
++mtl_device_private_bool(id<MTLDevice> device, NSString *name)
++{
++   SEL sel = NSSelectorFromString(name);
++   if (sel == NULL || ![device respondsToSelector:sel])
++      return MTL_TRISTATE_UNKNOWN;
++
++   BOOL value = ((BOOL (*)(id, SEL))objc_msgSend)(device, sel);
++   return value ? MTL_TRISTATE_YES : MTL_TRISTATE_NO;
++}
++
++enum mtl_tristate
++mtl_device_requires_ray_tracing_emulation(mtl_device *dev)
++{
++   @autoreleasepool {
++      return mtl_device_private_bool((id<MTLDevice>)dev,
++                                     @"requiresRaytracingEmulation");
++   }
++}
++
++enum mtl_tristate
++mtl_device_supports_ray_tracing_matrix_layout(mtl_device *dev)
++{
++   @autoreleasepool {
++      return mtl_device_private_bool((id<MTLDevice>)dev,
++                                     @"supportsRayTracingMatrixLayout");
++   }
++}
++
+ /* Timestamp query */
+ uint64_t
+ mtl_device_get_gpu_timestamp(mtl_device *dev)
+diff --git a/src/kosmickrisp/bridge/stubs/mtl_device.c b/src/kosmickrisp/bridge/stubs/mtl_device.c
+--- a/src/kosmickrisp/bridge/stubs/mtl_device.c
++++ b/src/kosmickrisp/bridge/stubs/mtl_device.c
+@@ -89,6 +89,24 @@
+    return 0u;
+ }
+ 
++bool
++mtl_device_supports_ray_tracing(mtl_device *dev)
++{
++   return false;
++}
++
++enum mtl_tristate
++mtl_device_requires_ray_tracing_emulation(mtl_device *dev)
++{
++   return MTL_TRISTATE_UNKNOWN;
++}
++
++enum mtl_tristate
++mtl_device_supports_ray_tracing_matrix_layout(mtl_device *dev)
++{
++   return MTL_TRISTATE_UNKNOWN;
++}
++
+ /* Timestamp query */
+ uint64_t
+ mtl_device_get_gpu_timestamp(mtl_device *dev)
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.h b/src/kosmickrisp/vulkan/kk_physical_device.h
+--- a/src/kosmickrisp/vulkan/kk_physical_device.h
++++ b/src/kosmickrisp/vulkan/kk_physical_device.h
+@@ -18,6 +18,8 @@
+ #include "vk_sync.h"
+ #include "vk_sync_binary.h"
+ 
++#include "kk_ray_tracing.h"
++
+ #include "wsi_common.h"
+ 
+ #include <sys/types.h>
+@@ -54,6 +56,10 @@
+    mtl_device *mtl_dev_handle;
+    struct kk_device_info info;
+ 
++   /* Whether the ray-tracing extension names may be advertised. Filled by
++    * kk_rt_caps_init; see kk_ray_tracing.c. */
++   struct kk_rt_caps rt;
++
+    struct wsi_device wsi_device;
+ 
+    uint8_t device_uuid[VK_UUID_SIZE];
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -42,6 +42,11 @@
+ kk_get_device_extensions(const struct kk_instance *instance,
+                          struct vk_device_extension_table *ext)
+ {
++   /* NOTE. The three ray-tracing names below — KHR_acceleration_structure,
++    * KHR_deferred_host_operations and KHR_ray_query — are set unconditionally
++    * here and then CLEARED by kk_rt_apply_gate() on any device whose
++    * acceleration-structure builds cannot be intersected. The long comment
++    * beside them predates that gate; kk_ray_tracing.c is the authority. */
+    *ext = (struct vk_device_extension_table){
+       /* Vulkan 1.1 */
+       .KHR_16bit_storage = true,
+@@ -259,6 +264,9 @@
+    const struct vk_device_extension_table *supported_extensions,
+    struct vk_features *features)
+ {
++   /* As in kk_get_device_extensions: the ray-tracing feature bools below are
++    * cleared again by kk_rt_apply_gate() unless this device can build an
++    * acceleration structure a ray query can intersect. */
+    *features = (struct vk_features){
+       /* Vulkan 1.0 */
+       .alphaToOne = true,
+@@ -1245,6 +1253,11 @@
+    vk_physical_device_dispatch_table_from_entrypoints(
+       &dispatch_table, &wsi_physical_device_entrypoints, false);
+ 
++   /* Must precede the gate applied below, and cheap enough to sit on every
++    * vkEnumeratePhysicalDevices: a respondsToSelector-guarded property read,
++    * measured at 0.0008 ms. */
++   kk_rt_caps_init(pdev);
++
+    struct vk_device_extension_table supported_extensions;
+    kk_get_device_extensions(instance, &supported_extensions);
+ 
+@@ -1256,6 +1269,12 @@
+ 
+    properties.drmHasRender = false;
+ 
++   /* Withhold VK_KHR_ray_query and friends on a device that would build
++    * acceleration structures nothing can intersect. Has to happen before
++    * vk_physical_device_init, which is what turns these two tables into the
++    * advertised set and derives the SPIR-V capabilities from them. */
++   kk_rt_apply_gate(pdev, &supported_extensions, &supported_features);
++
+    result = vk_physical_device_init(&pdev->vk, &instance->vk,
+                                     &supported_extensions, &supported_features,
+                                     &properties, &dispatch_table);
+diff --git a/src/kosmickrisp/vulkan/meson.build b/src/kosmickrisp/vulkan/meson.build
+--- a/src/kosmickrisp/vulkan/meson.build
++++ b/src/kosmickrisp/vulkan/meson.build
+@@ -105,6 +105,8 @@
+   'kk_query_table.c',
+   'kk_queue.h',
+   'kk_queue.c',
++  'kk_ray_tracing.h',
++  'kk_ray_tracing.c',
+   'kk_sampler.h',
+   'kk_sampler.c',
+   'kk_shader.h',
+diff --git a/src/kosmickrisp/vulkan/kk_ray_tracing.h b/src/kosmickrisp/vulkan/kk_ray_tracing.h
+new file mode 100644
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/kk_ray_tracing.h
+@@ -0,0 +1,57 @@
++/*
++ * Copyright 2025 LunarG, Inc.
++ * Copyright 2025 Google LLC
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef KK_RAY_TRACING_H
++#define KK_RAY_TRACING_H 1
++
++#include "kk_private.h"
++
++#include "kosmickrisp/bridge/mtl_device.h"
++
++#include <stdbool.h>
++
++struct kk_physical_device;
++struct vk_device_extension_table;
++struct vk_features;
++
++/* Can this device, driven by THIS driver, build an acceleration structure that
++ * a ray query can actually intersect?
++ *
++ * Resolved once at physical-device init, like struct kk_sparse_caps, because
++ * the answer decides which extension names exist and the extension table has to
++ * be complete before any VkDevice does.
++ *
++ * The question is deliberately not "is this Apple9 or better". It is a property
++ * of the pair (device, builder this driver uses): the same Apple8 that answers
++ * false today answers true the moment kk can reach the legacy builder. See
++ * kk_ray_tracing.c.
++ */
++struct kk_rt_caps {
++   /* The gate. False means VK_KHR_ray_query, VK_KHR_acceleration_structure and
++    * VK_KHR_deferred_host_operations are not advertised at all. */
++   bool buildable;
++
++   /* Diagnostics behind the decision, reported by MESA_KK_RT_DEBUG=1. Kept
++    * because "advertised nothing" is otherwise indistinguishable from "the
++    * probe never ran". */
++   bool supports_ray_tracing;
++   enum mtl_tristate emulation_required;
++   enum mtl_tristate matrix_layout;
++   /* Human-readable reason for `buildable`, always non-NULL. */
++   const char *source;
++};
++
++/* Fills pdev->rt. Must run before kk_rt_apply_gate. */
++void kk_rt_caps_init(struct kk_physical_device *pdev);
++
++/* Clears every ray-tracing extension name and feature bool unless pdev->rt says
++ * a build can be intersected. Must run before vk_physical_device_init, which is
++ * what freezes both tables into the advertised set. */
++void kk_rt_apply_gate(const struct kk_physical_device *pdev,
++                      struct vk_device_extension_table *ext,
++                      struct vk_features *features);
++
++#endif /* KK_RAY_TRACING_H */
+diff --git a/src/kosmickrisp/vulkan/kk_ray_tracing.c b/src/kosmickrisp/vulkan/kk_ray_tracing.c
+new file mode 100644
+--- /dev/null
++++ b/src/kosmickrisp/vulkan/kk_ray_tracing.c
+@@ -0,0 +1,238 @@
++/*
++ * Copyright 2025 LunarG, Inc.
++ * Copyright 2025 Google LLC
++ * SPDX-License-Identifier: MIT
++ */
++
++/* Whether the ray-tracing extension names may be advertised at all.
++ *
++ * WHY THIS FILE EXISTS. KosmicKrisp is a Metal 4 driver: it builds acceleration
++ * structures with -[MTL4ComputeCommandEncoder buildAccelerationStructure:...].
++ * On an Apple M2 (GPU family Apple8, macOS 27.0 26A5388g) that build reports no
++ * error, no commit feedback and no validation failure, produces a structure of
++ * the size Metal asked for — and intersects NOTHING. Every ray query returns
++ * CommittedIntersectionNone. Under METAL_DEVICE_WRAPPER_TYPE=1 Metal finally
++ * says it:
++ *
++ *    _validateRTDescriptorCompatibility: failed assertion
++ *    `Acceleration Structure Descriptor Validation
++ *     this device does not support Metal 4 ray tracing.'
++ *
++ * MEASURED, in pure Metal, 7 build variants x 2 trace encoders
++ * (crates/aemulator-hvf/kosmickrisp/mtl4-rt-matrix.m): only a BLAS *and* TLAS
++ * both built through the LEGACY -[MTLCommandBuffer
++ * accelerationStructureCommandEncoder] intersect, and once built they trace
++ * correctly from either encoder. Any combination involving a Metal-4-built
++ * structure misses. Not sizing (oversized to 64 KiB: nothing), not descriptor
++ * class (a legacy descriptor handed to the MTL4 encoder: nothing), not
++ * allocation (allocated by descriptor: nothing). So traversal, descriptors and
++ * the generated MSL are all fine; it is the Metal 4 BUILD that this GPU does not
++ * implement.
++ *
++ * The cause is that hardware ray tracing arrives with Apple9. Below it Metal
++ * emulates ray tracing, and the emulated builder is reachable only from the
++ * legacy encoder. Nothing public reports any of this: -supportsRaytracing is YES
++ * and -supportsFamily:MTLGPUFamilyMetal4 is YES on an M2.
++ *
++ * Advertising VK_KHR_ray_query anyway is worse than not advertising it. An
++ * application that queries the extension, gets it, enables it and traces gets
++ * plausible geometry that hits nothing, with no error anywhere to explain it.
++ * So the names are gated on this probe.
++ *
++ * HOW THE PROBE IS DONE, AND WHY NOT THE OBVIOUS ALTERNATIVES.
++ *
++ *   Private selectors (what this uses). -requiresRaytracingEmulation is exactly
++ *   the condition above, and it is free: 0.0008 ms measured. Reached through
++ *   -respondsToSelector: so a macOS that removes it degrades to the coarse
++ *   family check rather than failing to launch.
++ *
++ *   A family allow-list (family >= 9) is only the fallback. The family number is
++ *   not the contract: it is a proxy that happens to correlate today, and it
++ *   cannot express "Apple8 plus a driver that reaches the legacy builder".
++ *
++ *   A startup self-test — build a tiny BLAS+TLAS, trace one ray that must hit,
++ *   cache the boolean — is the most honest probe and it does answer correctly
++ *   here (measured: committed type 0, no hit, matching the matrix above). It is
++ *   not the default because it is not free. Measured on this M2, one full
++ *   build+trace self-test: 575 ms the very first time on a machine, of which
++ *   571 ms is the MSL compile, then 3.8-6.3 ms in each fresh process once the
++ *   system shader cache is warm, and 1.3 ms for a second self-test inside one
++ *   process. That cost lands on every vkEnumeratePhysicalDevices, i.e. on every
++ *   VkInstance, including the ones created by an application that never traces a
++ *   ray; and it puts an MTL4 queue, a residency set, a runtime MSL compile and a
++ *   GPU submit into the path the Android boot depends on. 0.0008 ms of selector
++ *   answers the same question. The self-test therefore lives out of process, as
++ *   the mtl4-rt-matrix harness, where it can be re-measured deliberately.
++ *
++ * WHEN THIS FLIPS BACK TO TRUE ON APPLE8. Building through the legacy encoder
++ * needs two things kk does not have yet: legacy AS descriptors take
++ * id<MTLBuffer>, while kk carries only raw GPU addresses (MTL4BufferRange), so a
++ * device-address -> MTLBuffer resolution step is required; and the legacy
++ * acceleration-structure encoder is a different encoder class, so kk_queue_submit
++ * needs an event-ordered split to interleave it with the MTL4 compute and render
++ * encoders. When that lands, set KK_RT_HAVE_LEGACY_BUILDER to true below and
++ * this same gate answers true on an M2 — no other change, because the gate asks
++ * about the pair (device, builder) and not about the family.
++ *
++ * ON THE TRANSFORM MATRIX LAYOUT. The private -supportsRayTracingMatrixLayout
++ * answers NO on this M2, which reads like a warning that
++ * MTL_MATRIX_LAYOUT_ROW_MAJOR — which kk asks for, so that a row-major
++ * VkTransformMatrixKHR copies across verbatim — is silently ignored, and would
++ * be invisible for an identity transform but wrong for every other one. It is
++ * NOT. MEASURED in pure Metal with a non-identity transform (translate +2 along
++ * x, legacy builder, the only one that intersects here,
++ * crates/aemulator-hvf/kosmickrisp/mtl-rt-matrix-layout.m):
++ *
++ *   instance transform, row-major bytes + MTLMatrixLayoutRowMajor  -> correct
++ *   instance transform, col-major bytes + MTLMatrixLayoutRowMajor  -> different
++ *   triangle transform, row-major bytes + MTLMatrixLayoutRowMajor  -> correct
++ *   triangle transform, col-major bytes + MTLMatrixLayoutRowMajor  -> different
++ *
++ * The declaration changes the result, so it is honoured, and honouring it gives
++ * the right answer. `supportsRayTracingMatrixLayout == NO` does not predict
++ * that, so nothing is gated on it and kk's row-major choice stands. The selector
++ * is still recorded and printed, because the next person to read that NO deserves
++ * to find the measurement rather than repeat it.
++ */
++
++#include "kk_ray_tracing.h"
++
++#include "kk_physical_device.h"
++
++#include "util/log.h"
++#include "util/u_debug.h"
++
++/* Flip when kk_queue can encode an event-ordered legacy
++ * MTLAccelerationStructureCommandEncoder pass. Until then the only builder kk
++ * has is the Metal 4 one, and on a device that emulates ray tracing that builder
++ * does not work. */
++#define KK_RT_HAVE_LEGACY_BUILDER false
++
++/* MESA_KK_FORCE_RAY_TRACING overrides the probe, for development on a device
++ * where ray tracing does not work — the kk equivalent of gfxstream's
++ * AEMU_GFXSTREAM_NO_EXT_STRIP:
++ *
++ *   unset (default)  the probe decides
++ *   1                advertise the ray-tracing names regardless. The guest-side
++ *                    plumbing and the shader path are exercised; every query
++ *                    MISSES. Warns on stderr, because the driver is knowingly
++ *                    reporting a capability it does not have.
++ *   0                never advertise them, even on a device that can build.
++ *
++ * Parsed as a number, so anything without a leading digit (=yes, =true) reads as
++ * unset rather than as 0 — debug_get_num_option restores the default when strtoll
++ * consumes nothing.
++ */
++#define KK_RT_FORCE_ENV "MESA_KK_FORCE_RAY_TRACING"
++
++/* MESA_KK_RT_DEBUG=1 prints the probe's inputs and its verdict. Worth having
++ * because "the guest sees no VK_KHR_ray_query" and "the probe never ran" look
++ * identical from the guest. */
++#define KK_RT_DEBUG_ENV "MESA_KK_RT_DEBUG"
++
++static const char *
++tristate_str(enum mtl_tristate value)
++{
++   switch (value) {
++   case MTL_TRISTATE_YES:
++      return "YES";
++   case MTL_TRISTATE_NO:
++      return "NO";
++   default:
++      return "unknown (selector absent)";
++   }
++}
++
++void
++kk_rt_caps_init(struct kk_physical_device *pdev)
++{
++   mtl_device *dev = pdev->mtl_dev_handle;
++
++   pdev->rt = (struct kk_rt_caps){
++      .supports_ray_tracing = mtl_device_supports_ray_tracing(dev),
++      .emulation_required = mtl_device_requires_ray_tracing_emulation(dev),
++      .matrix_layout = mtl_device_supports_ray_tracing_matrix_layout(dev),
++   };
++
++   if (!pdev->rt.supports_ray_tracing) {
++      pdev->rt.buildable = false;
++      pdev->rt.source = "-supportsRaytracing is NO";
++   } else if (pdev->rt.emulation_required != MTL_TRISTATE_UNKNOWN) {
++      /* The precise answer. Emulated ray tracing means the builder is reachable
++       * only from the legacy encoder, so kk can build only if it has that
++       * encoder. */
++      pdev->rt.buildable =
++         pdev->rt.emulation_required == MTL_TRISTATE_NO ||
++         KK_RT_HAVE_LEGACY_BUILDER;
++      pdev->rt.source = pdev->rt.buildable
++                           ? "-requiresRaytracingEmulation says the Metal 4 "
++                             "builder is the real one"
++                           : "-requiresRaytracingEmulation is YES and kk has no "
++                             "legacy acceleration-structure encoder, so a build "
++                             "would intersect nothing";
++   } else {
++      /* Fallback only: the selector is gone, so guess from the family that
++       * introduced hardware ray tracing. */
++      pdev->rt.buildable =
++         pdev->info.gpu_apple_family >= 9u || KK_RT_HAVE_LEGACY_BUILDER;
++      pdev->rt.source =
++         pdev->rt.buildable
++            ? "GPU family Apple9+ (emulation selector unavailable)"
++            : "GPU family below Apple9, where Metal emulates ray tracing "
++              "(emulation selector unavailable)";
++   }
++
++   const int64_t force = debug_get_num_option(KK_RT_FORCE_ENV, -1);
++   if (force >= 0) {
++      pdev->rt.buildable = force != 0;
++      pdev->rt.source = KK_RT_FORCE_ENV " override";
++
++      if (pdev->rt.buildable && pdev->rt.emulation_required == MTL_TRISTATE_YES &&
++          !KK_RT_HAVE_LEGACY_BUILDER) {
++         mesa_logw("kk: " KK_RT_FORCE_ENV
++                   "=1 advertises VK_KHR_ray_query on a device whose Metal 4 "
++                   "acceleration-structure builds intersect nothing. Every ray "
++                   "query will MISS and no error will be reported.");
++      }
++   }
++
++   if (debug_get_bool_option(KK_RT_DEBUG_ENV, false)) {
++      mesa_logi("kk ray tracing: apple family %u, -supportsRaytracing %s, "
++                "-requiresRaytracingEmulation %s, "
++                "-supportsRayTracingMatrixLayout %s, legacy builder %s",
++                pdev->info.gpu_apple_family,
++                pdev->rt.supports_ray_tracing ? "YES" : "NO",
++                tristate_str(pdev->rt.emulation_required),
++                tristate_str(pdev->rt.matrix_layout),
++                KK_RT_HAVE_LEGACY_BUILDER ? "yes" : "no");
++      mesa_logi("kk ray tracing: VK_KHR_ray_query %s — %s",
++                pdev->rt.buildable ? "ADVERTISED" : "withheld",
++                pdev->rt.source);
++   }
++}
++
++void
++kk_rt_apply_gate(const struct kk_physical_device *pdev,
++                 struct vk_device_extension_table *ext,
++                 struct vk_features *features)
++{
++   if (pdev->rt.buildable)
++      return;
++
++   /* The three names go together: VK_KHR_acceleration_structure is what
++    * VK_KHR_ray_query needs and VK_KHR_deferred_host_operations exists here only
++    * because VK_KHR_acceleration_structure requires it. */
++   ext->KHR_acceleration_structure = false;
++   ext->KHR_deferred_host_operations = false;
++   ext->KHR_ray_query = false;
++
++   /* And the feature bools, because vk_physical_device_init derives the SPIR-V
++    * capability set from them: leaving .rayQuery set would keep RayQueryKHR
++    * accepted by a driver that no longer admits to the extension. */
++   features->accelerationStructure = false;
++   features->accelerationStructureCaptureReplay = false;
++   features->accelerationStructureIndirectBuild = false;
++   features->accelerationStructureHostCommands = false;
++   features->descriptorBindingAccelerationStructureUpdateAfterBind = false;
++   features->rayQuery = false;
++}

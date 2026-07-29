@@ -7,14 +7,27 @@
 # runs it. rq-smoke.c's own header explains what each check means and how to read
 # a partial pass; the short version is
 #
+#   GATED  the driver does not advertise VK_KHR_ray_query at all, because this
+#          device cannot build an acceleration structure a ray query can
+#          intersect. EXPECTED ON AN APPLE M2 (Apple8) and the correct answer
+#          there — see kk_ray_tracing.c for the gate and what was measured.
 #   16/16  ray query works, real hit and real miss.
-#   12/16  everything except the hit path works. Expected on Apple8 (M2) and
-#          earlier, which have no Metal 4 ray tracing — see mtl4-rt-matrix.m.
+#   12/16  everything except the hit path works. What an Apple8 reports with the
+#          gate overridden (below), which is how the gate's verdict was reached
+#          in the first place — see mtl4-rt-matrix.m.
 #   other  a real driver bug: some rays hit, with the wrong answer.
 #
 #   ./run-rq-smoke.sh              # against the ICD paths.sh discovers
 #   ./run-rq-smoke.sh --matrix     # also build+run the pure-Metal probe, which
 #                                  # isolates Metal from the driver entirely
+#
+#   MESA_KK_FORCE_RAY_TRACING=1 ./run-rq-smoke.sh
+#                                  # advertise ray tracing on a device the gate
+#                                  # rejects, to exercise the path anyway. Every
+#                                  # ray misses; the driver warns that it is
+#                                  # reporting a capability it does not have.
+#   MESA_KK_RT_DEBUG=1 ./run-rq-smoke.sh
+#                                  # print the gate's inputs and its verdict
 #
 # The probe is the control for a 12/16: it builds the same BLAS+TLAS through both
 # the legacy MTLAccelerationStructureCommandEncoder and the Metal 4 compute
@@ -53,6 +66,14 @@ if [ "$MATRIX" = 1 ]; then
         -framework Metal -framework Foundation
     echo "=== pure Metal: which build path traces on this GPU? ==="
     "$BUILD/mtl4-rt-matrix"
+    echo
+    # The second probe is what keeps the transform layout honest. Its verdict is
+    # advice about kk, not a gate on this run, so a non-zero status here must not
+    # abort the harness under `set -e`.
+    clang -fobjc-arc -O1 -o "$BUILD/mtl-rt-matrix-layout" \
+        "$HERE/mtl-rt-matrix-layout.m" -framework Metal -framework Foundation
+    echo "=== pure Metal: is MTLMatrixLayoutRowMajor honoured on this GPU? ==="
+    "$BUILD/mtl-rt-matrix-layout" || true
     echo
 fi
 

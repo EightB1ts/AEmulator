@@ -22,7 +22,7 @@
     "deviceType": 1,
     "deviceTypeName": "VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU",
     "deviceName": "Apple M2",
-    "pipelineCacheUUID": "824db57cc08daff74d154673eecf6321",
+    "pipelineCacheUUID": "04776bee521bf78149b5915b57339677",
     "limits": {
       "maxImageDimension1D": 16384,
       "maxImageDimension2D": 16384,
@@ -152,7 +152,7 @@
       "nonCoherentAtomSize": 64
     },
     "sparseProperties": {
-      "residencyStandard2DBlockShape": false,
+      "residencyStandard2DBlockShape": true,
       "residencyStandard2DMultisampleBlockShape": false,
       "residencyStandard3DBlockShape": false,
       "residencyAlignedMipSize": false,
@@ -173,7 +173,7 @@
   },
   "idProperties": {
     "deviceUUID": "60030000010000000000000000000000",
-    "driverUUID": "3203e63a829733908ba1142eb4ff73c4",
+    "driverUUID": "c08f40db21ae3128b7fefc0f0e3f2eb7",
     "deviceLUID": "0000000000000000",
     "deviceNodeMask": 0,
     "deviceLUIDValid": false
@@ -186,7 +186,7 @@
   },
   "vulkan11Properties": {
     "deviceUUID": "60030000010000000000000000000000",
-    "driverUUID": "3203e63a829733908ba1142eb4ff73c4",
+    "driverUUID": "c08f40db21ae3128b7fefc0f0e3f2eb7",
     "deviceLUID": "0000000000000000",
     "deviceNodeMask": 0,
     "deviceLUIDValid": false,
@@ -353,19 +353,19 @@
     "shaderInt16": true,
     "shaderResourceResidency": false,
     "shaderResourceMinLod": true,
-    "sparseBinding": false,
-    "sparseResidencyBuffer": false,
-    "sparseResidencyImage2D": false,
-    "sparseResidencyImage3D": false,
+    "sparseBinding": true,
+    "sparseResidencyBuffer": true,
+    "sparseResidencyImage2D": true,
+    "sparseResidencyImage3D": true,
     "sparseResidency2Samples": false,
     "sparseResidency4Samples": false,
     "sparseResidency8Samples": false,
     "sparseResidency16Samples": false,
-    "sparseResidencyAliased": false,
+    "sparseResidencyAliased": true,
     "variableMultisampleRate": false,
     "inheritedQueries": true
   },
-  "deviceExtensionCount": 144,
+  "deviceExtensionCount": 141,
   "deviceExtensions": [
     {
       "name": "VK_AMD_shader_image_load_store_lod",
@@ -624,10 +624,6 @@
       "specVersion": 1
     },
     {
-      "name": "VK_KHR_acceleration_structure",
-      "specVersion": 13
-    },
-    {
       "name": "VK_KHR_bind_memory2",
       "specVersion": 1
     },
@@ -650,10 +646,6 @@
     {
       "name": "VK_KHR_dedicated_allocation",
       "specVersion": 3
-    },
-    {
-      "name": "VK_KHR_deferred_host_operations",
-      "specVersion": 4
     },
     {
       "name": "VK_KHR_depth_stencil_resolve",
@@ -802,10 +794,6 @@
     {
       "name": "VK_KHR_push_descriptor",
       "specVersion": 2
-    },
-    {
-      "name": "VK_KHR_ray_query",
-      "specVersion": 1
     },
     {
       "name": "VK_KHR_relaxed_block_layout",
@@ -1062,7 +1050,7 @@
     "why": "vkGetPipelineCacheData is a RAW PASSTHROUGH in gfxstream (no on_vkGetPipelineCacheData in VkDecoderGlobalState; VkDecoder.cpp:4403 calls the driver). Mesa builds this 32-byte VkPipelineCacheHeaderVersionOne from the real vendorID (bytes 8..12), deviceID (12..16) and pipelineCacheUUID (16..32), so any guest app recovers all three from a cache blob no matter what the properties call reported. Phase 4.9 rewrites bytes 8..32 outbound and back inbound; after that, the *AgreesWithProperties flags below must read false.",
     "totalCacheDataSize": 36,
     "bytesCaptured": 32,
-    "first32BytesHex": "20000000010000006b10000064000000824db57cc08daff74d154673eecf6321",
+    "first32BytesHex": "20000000010000006b1000006400000004776bee521bf78149b5915b57339677",
     "decoded": {
       "headerSize_bytes0_4": 32,
       "headerVersion_bytes4_8": 1,
@@ -1070,7 +1058,7 @@
       "vendorID_bytes8_12_hex": "0x0000106b",
       "deviceID_bytes12_16": 100,
       "deviceID_bytes12_16_hex": "0x00000064",
-      "pipelineCacheUUID_bytes16_32": "824db57cc08daff74d154673eecf6321"
+      "pipelineCacheUUID_bytes16_32": "04776bee521bf78149b5915b57339677"
     },
     "leak": {
       "vendorIDAgreesWithProperties": true,

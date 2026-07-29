@@ -10,7 +10,14 @@
  * reports "miss" for everything are equally broken and a hit-only test cannot
  * tell them apart.
  *
- * EXPECT 12/16 ON AN APPLE M2 (Apple8), and expect the four failures to be
+ * EXPECT "GATED" ON AN APPLE M2 (Apple8). The driver no longer advertises
+ * VK_KHR_ray_query on a device whose acceleration-structure builds cannot be
+ * intersected — see kk_ray_tracing.c — so there is nothing to test and that is
+ * the pass. Set MESA_KK_FORCE_RAY_TRACING=1 to advertise it anyway and get the
+ * measurement the rest of this comment describes.
+ *
+ * EXPECT 12/16 ON AN APPLE M2 WITH MESA_KK_FORCE_RAY_TRACING=1, and expect the
+ * four failures to be
  * exactly the four hit-path checks. That is not this harness being wrong and it
  * is not the driver's shader path being wrong: the M2 does not implement Metal 4
  * ray tracing, so an acceleration structure built through
@@ -205,11 +212,39 @@ main(void)
          has_dho = 1;
    }
    free(exts);
+
+   /* All three names or none of them. kk_rt_apply_gate() clears them together on
+    * a device whose acceleration-structure builds cannot be intersected, and
+    * that is the correct answer rather than a failure: an application that gets
+    * VK_KHR_ray_query and then silently misses every ray is worse off than one
+    * that never got the extension. A PARTIAL set is a driver bug either way. */
+   if (!has_rq && !has_as && !has_dho) {
+      printf(
+         "\nVK_KHR_ray_query is NOT advertised, and on this device that is the\n"
+         "correct answer: the driver withheld it because it cannot build an\n"
+         "acceleration structure a ray query can intersect. The probe and the\n"
+         "measurements behind it are in\n"
+         "third_party/mesa/src/kosmickrisp/vulkan/kk_ray_tracing.c; run with\n"
+         "MESA_KK_RT_DEBUG=1 for the driver's own account of the decision, and\n"
+         "--matrix for the pure-Metal control that confirms it.\n"
+         "\nTo exercise the ray-query path anyway — pipeline, descriptors,\n"
+         "dispatch and the miss path all work, every hit MISSES, which is the\n"
+         "12/16 this harness reported before the gate existed:\n"
+         "    MESA_KK_FORCE_RAY_TRACING=1 ./run-rq-smoke.sh\n"
+         "\nGATED: ray tracing is not advertised, 0 of 16 checks run.\n");
+      return 0;
+   }
+
    report(has_rq, "VK_KHR_ray_query advertised");
    report(has_as && has_dho,
           "VK_KHR_acceleration_structure + deferred_host_operations advertised");
-   if (!has_rq || !has_as || !has_dho)
+   if (!has_rq || !has_as || !has_dho) {
+      printf("\nPARTIAL ray-tracing advertisement. The three names stand or fall\n"
+             "together — VK_KHR_ray_query needs VK_KHR_acceleration_structure,\n"
+             "which needs VK_KHR_deferred_host_operations — so any subset is a\n"
+             "driver bug. Check kk_rt_apply_gate().\n");
       return 1;
+   }
 
    /* ---- 2. the rayQuery feature bit ---- */
    VkPhysicalDeviceRayQueryFeaturesKHR rqfeat = {
