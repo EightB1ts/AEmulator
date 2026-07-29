@@ -22,10 +22,14 @@ that this migration introduced and that only shows up under animation.
 > `MTLAccelerationStructureCommandEncoder` rather than the Metal 4 one, because below Apple9 Metal
 > emulates ray tracing and only the legacy builder reaches the emulated BVH
 > (`0012-kosmickrisp-legacy-acceleration-structure-builder.patch`).
-> **The one thing that does not work is the guest.** Through gfxstream every ray still misses —
-> `vk_rt_probe` in the guest reports `FAIL at ray-hit` while the identical shader, triangle and rays
-> pass 16/16 on the host. That gap is transport-side and unsolved; see *Ray tracing: hits on the host,
-> misses in the guest*. Do not read "ray tracing works in the guest" out of this document.
+> **And it now works in the guest, all the way to a picture.** A real ray-query application in the
+> guest renders ray-traced **shadows**, matching an RTX 4070 golden of the same scene
+> (`scratchpad/rtapp/run/05-rayquery-SHADOWS.png`). Two more bugs stood between the host hit and that
+> frame: gfxstream's guest ICD silently *discarded* every acceleration-structure descriptor write
+> (`0013-…`), and kk sized every structure for one triangle regardless of `pMaxPrimitiveCounts` by
+> handing an MTL4 descriptor to the pre-Metal-4 size query (`0003`). See *Ray tracing: a real
+> ray-query application in the guest now renders shadows* — including why a 16/16 host gate could not
+> see either of them.
 > Superseded passages are marked where they stand rather than deleted, because the *reasoning* in
 > them is still how the current numbers were arrived at. Where a number is stated twice, the section
 > nearest the bottom is the current one.
@@ -244,9 +248,10 @@ been fixed rather than worked around:
   `VK_KHR_ray_query` are implemented in KosmicKrisp on **Metal 4**: `kosmickrisp/run-rq-smoke.sh`
   builds a one-triangle BLAS + TLAS, writes the TLAS into an `ACCELERATION_STRUCTURE` descriptor, and
   dispatches a real SPIR-V `rayQueryEXT` shader. **It scored 12/16 on the Metal 4 builder and scores
-  16/16 with a real intersection on the legacy builder that superseded it — but only on the host. In
-  the guest every ray still misses.** Read *Ray tracing: hits on the host, misses in the guest* below
-  before repeating any RT claim.
+  16/16 with a real intersection on the legacy builder that superseded it**, and ray queries now hit
+  in the guest too. Read *Ray tracing: a real ray-query application in the guest now renders shadows*
+  below before repeating any RT claim — in particular, this one-triangle smoke test passed 16/16 while
+  the driver mis-sized every structure with more than one triangle.
 - **The gfxstream half.** The host cereal was regenerated so those extensions' `pNext` structs are
   actually *decoded* rather than merely sized — the two RT `sType`s were in the cereal gap, where
   they would have reached `reservedunmarshal_extension_struct`'s `abort()` — and the guest ICD's
@@ -254,8 +259,8 @@ been fixed rather than worked around:
 
 > **SUPERSEDED on 2026-07-29 — a ray does hit now, on the host.** The paragraph below was true of the
 > Metal 4 builder and is kept because its isolation argument is what led to the fix. `run-rq-smoke.sh`
-> is now **16/16** with a real intersection; the current state is in *Ray tracing: hits on the host,
-> misses in the guest* at the end of this section. `MESA_KK_RT_LEGACY_BUILDER=0` reproduces the 12/16
+> is now **16/16** with a real intersection; the current state is in *Ray tracing: a real ray-query
+> application in the guest now renders shadows* at the end of this section. `MESA_KK_RT_LEGACY_BUILDER=0` reproduces the 12/16
 > described here on demand.
 
 **AND THE HONEST LIMIT (as of the Metal 4 builder): no ray has ever hit anything on this machine.**
@@ -292,7 +297,10 @@ builder only the legacy encoder can reach, and KosmicKrisp is a Metal 4 driver. 
 `VK_KHR_ray_query`, `VK_KHR_deferred_host_operations` and their feature bools on a runtime probe
 (`kk_ray_tracing.c`): the private `-requiresRaytracingEmulation`, `respondsToSelector:`-guarded, with
 GPU family ≥ 9 as the fallback when the selector is absent. Measured on this M2 it answers **YES**
-(emulated), so all three names are withheld and `run-rq-smoke.sh` reports **GATED** instead of 12/16.
+(emulated), so all three names were withheld and `run-rq-smoke.sh` reported **GATED** instead of
+12/16. *(That withholding is now itself superseded: `0012` gave the device a builder that works, the
+same gate answers true, and all three names are advertised again — exactly the "when the
+legacy-encoder builder lands" case described in the next sentence.)*
 The question the gate asks is "can this device build an acceleration structure a ray query can
 intersect", not "is this Apple9" — so when the legacy-encoder builder lands, flipping
 `KK_RT_HAVE_LEGACY_BUILDER` makes the same gate answer true on this same M2. Two escape hatches:
@@ -304,58 +312,110 @@ Guest-visible effect, measured: host device extensions **144 → 141**, guest **
 `VK_KHR_ray_tracing_pipeline` is still **not** advertised, deliberately: it is the negative control
 for the whole chain, and it stays absent until something implements it.
 
-### Ray tracing: hits on the host, misses in the guest
+### Ray tracing: a real ray-query application in the guest now renders shadows
 
-**The gate above answered its own question, and the answer flipped.** It asked "can this device build
-an acceleration structure a ray query can intersect", not "is this Apple9" — and
-`0012-kosmickrisp-legacy-acceleration-structure-builder.patch` made the answer **yes on this same M2**
-by building through the pre-Metal-4 `MTLAccelerationStructureCommandEncoder`. All three names are
-advertised again: host device extensions **141 → 144**, guest **133 → 136**, `cmd gpu vkjson` greps
-`VK_KHR_acceleration_structure`, `VK_KHR_deferred_host_operations`, `VK_KHR_ray_query`.
+**The end-to-end deliverable, which is a picture.** SaschaWillems' *"Ray queries for ray traced
+shadows"* runs in the guest and the scene has shadows — cast shadows on the floor, self-shadowing on
+the models — A/B'd against an RTX 4070 golden of the same scene. Captures:
+`scratchpad/rtapp/run/05-rayquery-SHADOWS.png` (new) next to `02-rayquery-FIXED.png` (the same scene,
+same build, before the last fix, with no shadows) and `apps/GOLDEN-rayquery-reference.jpg`.
 
-**Host: measured hits, read back from the buffer.** `run-rq-smoke.sh` is **16/16** in four modes —
-identity transforms, a non-identity instance transform, a non-identity per-triangle transform, and a
-resubmitted command buffer:
+Read the floor rather than the impression. Achromatic floor pixels in the bottom 20% of the frame,
+share that is near-black (luma < 16):
+
+| capture | near-black floor | verdict |
+| --- | --- | --- |
+| RTX 4070 golden | 4.7 % | shadows |
+| **guest, now** | **5.3 %** | **shadows** |
+| guest, before | 1.8 % | no shadows — that residue is object silhouette edges |
+
+70-75 fps, down from 104 with an empty BVH, which is what tracing 53583 triangles per shadow ray
+costs.
+
+**Three separate bugs had to die for that picture, and each one was invisible to the gate that existed
+when it was written.** In order of discovery:
+
+1. **The Metal 4 builder does not work on an Apple8 GPU.** A structure built through
+   `-[MTL4ComputeCommandEncoder buildAccelerationStructure:...]` completes without error and
+   intersects nothing. `0012-…-legacy-acceleration-structure-builder.patch` builds through the
+   pre-Metal-4 `MTLAccelerationStructureCommandEncoder` instead. Control:
+   `MESA_KK_RT_LEGACY_BUILDER=0` → 12/16, failing exactly the four hit-path checks.
+2. **The gfxstream GUEST silently discarded every acceleration-structure descriptor write.**
+   `doEmulatedDescriptorWrite` handled images, buffers, buffer views and inline uniform blocks, and
+   for `VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR` logged `Ignoring emulated write` and returned —
+   never setting `entry.type`, so the slot stayed `DescriptorWriteType::Empty` and the flush loop
+   skipped it. The host built a correct BVH that nothing was ever pointed at. That branch is on the
+   hot path unconditionally: the renderer sets `VulkanBatchedDescriptorSetUpdate` to a literal `true`
+   (`virtio-gpu-gfxstream-renderer.cpp`), so *every* guest `vkUpdateDescriptorSets` goes through it.
+   A second defect sat right behind it — the flush loop's `case AccelerationStructure:` was
+   `mesa_loge(...); abort();`, unreachable only because the drop site never recorded the type, so
+   fixing the drop alone would have turned a silent miss into a guest crash. Both fixed in
+   `0013-gfxstream-guest-acceleration-structure-descriptor-writes.patch`.
+3. **kk sized every acceleration structure for one triangle.** `kk_GetAccelerationStructureBuildSizesKHR`
+   built an `MTL4PrimitiveAccelerationStructureDescriptor` and passed it to
+   `-[MTLDevice accelerationStructureSizesWithDescriptor:]`, which is the *pre-Metal-4* query and
+   ignores an MTL4 descriptor's `triangleCount`. MEASURED, same binary, same machine:
+
+   | triangles | `accelerationStructureSize` | `buildScratchSize` | ray 0 |
+   | --- | --- | --- | --- |
+   | 1 | 1280 | 5632 | hits |
+   | 100 | 1280 | 5632 | **misses** |
+   | 10000 | 1280 | 5632 | **misses** |
+   | 53583 | 1280 | 5632 | **build fails** |
+
+   The application allocates the size it is told, the build writes a whole BVH into it, every ray
+   misses, and nothing anywhere reports an error. Fixed in `0003` by
+   `mtl_new_primitive_acceleration_structure_sizing_descriptor()` — the legacy sizing descriptor,
+   bufferless, exactly as the instance path already did for its own version of this bug (there it
+   *threw*, via `-motionKeyframeCount`, so it was found immediately; the primitive path failed
+   silently and survived). After the fix the same four rows read 1536 / 18688 / 1760768 / **9431552**
+   bytes and all four hit.
+
+**Why bug 3 outlived two gates, which is the transferable lesson.** `rq-smoke` builds **one**
+tightly-packed unindexed triangle and traces it from a **compute** shader with ray flags **0x1**. That
+is one point in a four-dimensional space — primitive count, vertex layout, shader stage, ray flags —
+and it is degenerate in all four coordinates at once: with one triangle a size query that ignores the
+count is right by accident; with stride 12 the stride *is* the format size; with `indexType = NONE`
+the index buffer is untested. Three of those four dimensions have now each hidden a shipped bug. So:
+
+* `vk-rt-probe` takes `--primitives N`, `--indexed`, `--fragment` and `--flags N`, and the mode
+  matters — the reference application is a **fragment**-stage ray query over **indexed** geometry with
+  a 44-byte glTF vertex stride and flags **0x4** (`TerminateOnFirstHit`), which is a different code
+  path in the driver at every one of those four points.
+* `run-rq-smoke.sh` keeps its 16/16 × 4 and then runs `vk-rt-probe` over those axes, including
+  53583 triangles — the reference scene's exact count, kept verbatim so the number in the gate is the
+  number that was broken. `build-vk-rt-probe.sh --host` builds the same source natively, so a
+  host/guest divergence stays one diff apart instead of being a rebuild away.
+
+**Guest, measured this session, read back from the buffer.** `vk-rt-probe` in the booted guest,
+`VK_RT_PROBE: PASS`, `GUEST_EXIT=0`, in all four modes (compute; fragment; indexed; and 53583
+triangles + indexed + fragment + flags 0x4 together):
 
 ```
-ray 0: type=1 t=1.0000 prim=0 geom=0 inst=0 custom=0x123456 bary=(0.2500,0.2500) ff=1
+ray 0: type=1 t=1.0000 prim=0 geom=0 inst=0 custom=0x123456 bary=(0.2500,0.2500) ff=1 tmin=0.0010
 rays 1-7: type=0                                    (the miss half, still required)
 ```
 
-The control on the same binary and machine is `MESA_KK_RT_LEGACY_BUILDER=0` → **12/16**, failing
-exactly the four hit-path checks, so the builder is demonstrably what changed the answer.
-`run-rq-smoke.sh --matrix` still shows that of the seven build variants only the legacy-built
-`BLAS3+TLAS3` intersects, from either trace encoder.
+`instanceCustomIndex = 0x123456` is the TLAS instance record surviving the guest→host round trip, and
+the barycentrics are analytically exact for that triangle, so this is a real intersection and not a
+non-zero return.
 
-**Guest: every ray still misses. This is the open item.** `vk_rt_probe`, a native arm64 Vulkan probe
-that asks the GPU the same question as `rq-smoke` through the full guest stack, reports
-`VK_RT_PROBE: FAIL at ray-hit` — all 8 rays `type=0`. What has been ruled out with the driver's own
-`MESA_KK_RT_DEBUG=1` diagnostics, measured in the renderer during a guest run:
+**What the VkDeviceAddress question turned out to be.** gfxstream does **not** virtualise device
+addresses and does not need to: there is no `on_vkGetBufferDeviceAddress` override host-side, no
+guest-side address map, both `VkDeviceOrHostAddress{,Const}KHR` unions are a plain 8-byte `memcpy`,
+and both `transform_tohost` hooks are empty. The convention is verbatim pass-through of the **host**
+address, and `ResourceTracker`'s only device-address code exists to keep that valid (it forces
+`dedicated = true` for `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT` allocations so they are not
+suballocated). Proven rather than reasoned: in one boot the guest printed
+`triangles.vertexData.deviceAddress = 0x1508410000` and the host printed
+`resolve 0x1508410000 -> buffer 0x7c0996ca80 offset 0` followed by the bytes it was about to build
+from — `(0 0 1) (1 0 1) (0 1 1)`, exactly the triangle the guest wrote.
 
-| Ruled out | Evidence from the renderer during the guest's build |
-| --- | --- |
-| Wrong builder chosen | `legacy acceleration-structure queue created (… VK_KHR_acceleration_structure enabled: yes)` — the guest's `VkDevice` gets the legacy queue |
-| Builds not reaching the legacy encoder | `build BLAS, legacy builder, 1 geometry, 1 primitive, descriptor ok` and the same for the TLAS |
-| A descriptor Metal refused | `descriptor ok`, not `REFUSED` |
-| An address the map could not resolve | the unconditional `mesa_loge` "acceleration-structure build skipped" **never fires** |
-| A bogus acceleration-structure handle | `device address 0x1` — *identical* on the host run that scores 16/16, so it is the normal first `MTLResourceID`, not a null |
+**Host, unchanged.** `run-rq-smoke.sh` is 16/16 in all four modes, and `--matrix` still shows that of
+the seven build variants only the legacy-built `BLAS3+TLAS3` intersects, from either trace encoder.
 
-So the guest failure is **downstream of builder selection, descriptor construction and
-device-address resolution**, all of which behave exactly as they do on the passing host run. The two
-hypotheses left are the geometry *parameters* that the cereal marshals for
-`vkCmdBuildAccelerationStructuresKHR` (the `T* const*` `ppGeometries` indirection was the hard part of
-the transport — see the cereal notes) and the ordering of the event-split submission when gfxstream
-replays the guest's single command buffer. Discriminating them needs a diagnostic that dumps the
-resolved geometry parameters and the vertex bytes as the host build sees them; that has not been
-written.
-
-**Do not describe guest ray tracing as working.** An app in the guest that enables ray query today
-gets advertised extensions, a successful build, and rays that hit nothing. That is the same
-silently-wrong outcome `0010` exists to prevent, and it is currently only prevented on the host side —
-the gate probes the *device*, and the device can now intersect; it cannot see that the transport in
-front of it cannot.
-
-What has *also* not been established is whether any of this is fast — see *Known, still open*.
+**Still not established: whether any of this is fast enough to matter beyond a sample.** 70 fps on
+this scene is a measurement of this scene. See *Known, still open*.
 
 ---
 
@@ -794,8 +854,13 @@ now settle before touching ColorBuffer pixels.
   hardware RT starts at Apple9. Rather than keep advertising an extension that answers "miss",
   `kk_ray_tracing.c` now probes `-requiresRaytracingEmulation` at physical-device init and withholds
   all three names — so the guest sees no `VK_KHR_ray_query` and nothing can enable it by accident.
-  `run-rq-smoke.sh` reports **GATED**; `MESA_KK_FORCE_RAY_TRACING=1` restores the 12/16. Still open,
-  and now the only open part: **build through the legacy encoder** so an Apple8 can hit (needs a
+  `run-rq-smoke.sh` reported **GATED**; `MESA_KK_FORCE_RAY_TRACING=1` restored the 12/16. **Now also
+  CLOSED, all the way to a guest application rendering shadows** — patches `0011` (device-address →
+  `id<MTLBuffer>`), `0012` (legacy encoder + event-ordered split), `0013` (the guest ICD was
+  discarding acceleration-structure descriptor writes) and the `0003` size-query fix. The names are
+  advertised again. See *Ray tracing: a real ray-query application in the guest now renders shadows*.
+  The superseded plan below is kept because it is how the fix was found: **build through the legacy
+  encoder** so an Apple8 can hit (needs a
   device-address → `id<MTLBuffer>` resolution step and an event-ordered encoder split in
   `kk_queue_submit`), after which `KK_RT_HAVE_LEGACY_BUILDER` flips the same gate back on. Also still
   true: no guest-side RT workload has ever been run, no CTS ray-query subset has been attempted, and
@@ -917,18 +982,33 @@ bash crates/aemulator-hvf/kosmickrisp/run-gate.sh --dump-identity - \
 #   expect: KosmicKrisp   Mesa 26.3.0-devel (git-4f4b73dfe5)   144
 #   (and `diff` it against gfxstream/evidence/host-vulkan-identity.json — it must be byte-identical)
 
-# 5b. Ray tracing on the HOST driver: BLAS + TLAS build and a compute ray-query hit/miss readback.
+# 5b. Ray tracing on the HOST driver: BLAS + TLAS build and a ray-query hit/miss readback, then the
+#     four axes that one-triangle test holds fixed.
 bash crates/aemulator-hvf/kosmickrisp/run-rq-smoke.sh
-#   expect on Apple8 (M2): "GATED: ray tracing is not advertised, 0 of 16 checks run", exit 0 — the
-#   driver withholds the three RT names on a device that cannot intersect an MTL4-built structure, and
-#   that is the CORRECT result here. 16/16 means real hits (Apple9+). Anything else — some rays
-#   hitting with wrong answers — is a real driver bug.
-MESA_KK_FORCE_RAY_TRACING=1 bash crates/aemulator-hvf/kosmickrisp/run-rq-smoke.sh
-#   expect on Apple8: "12/16 checks passed", exit 1 — advertises anyway and every hit misses. This is
-#   the measurement the gate is built on; the driver warns that it is reporting a capability it lacks.
+#   expect on Apple8 (M2): "16/16 checks passed" x4 (identity, --transform, --triangle-transform,
+#   --resubmit), then 4x "PASS" from vk-rt-probe over primitive count / vertex layout / shader stage /
+#   ray flags, including 53583 triangles. exit 0. Anything else — some rays hitting with wrong
+#   answers — is a real driver bug.
+MESA_KK_RT_LEGACY_BUILDER=0 bash crates/aemulator-hvf/kosmickrisp/run-rq-smoke.sh
+#   expect on Apple8: "12/16 checks passed", exit 1 — forces the Metal 4 builder, which on this GPU
+#   builds a structure that intersects nothing. This is the control that keeps "the legacy builder is
+#   what fixed the hit" measurable rather than merely asserted.
 MESA_KK_RT_DEBUG=1 bash crates/aemulator-hvf/kosmickrisp/run-rq-smoke.sh   # the gate's own verdict
 #   expect: "apple family 8, -supportsRaytracing YES, -requiresRaytracingEmulation YES,
-#   -supportsRayTracingMatrixLayout NO, legacy builder no" then "VK_KHR_ray_query withheld — …"
+#   -supportsRayTracingMatrixLayout NO" then "VK_KHR_ray_query ADVERTISED, builder legacy …"
+
+# 5c. Ray tracing in the GUEST, and then the picture that is the point of all of it.
+#     Boot (step 6), then:
+bash crates/aemulator-hvf/kosmickrisp/build-vk-rt-probe.sh          # cross-compile for the guest
+bash crates/aemulator-hvf/kosmickrisp/run-vk-rt-probe.sh --primitives 53583 --indexed --fragment --flags 0x4
+#   expect: "VK_RT_PROBE: PASS", GUEST_EXIT=0, and
+#   "ray 0: type=1 t=1.0000 ... custom=0x123456 bary=(0.2500,0.2500)" with rays 1-7 type=0.
+#   Those four flags together are the shape a real ray-query application has; the default
+#   (1 triangle, tightly packed, compute, flags 0x1) is degenerate in all four and passed while the
+#   driver was broken.
+#   Then install and run scratchpad/rtapp/apps/sw-rayquery-arm64.apk and screenshot it: the scene
+#   MUST have shadows. Read the floor, not the impression — near-black achromatic floor pixels should
+#   be ~5%, as in the RTX 4070 golden (4.7%); 1.8% is the no-shadow signature.
 bash crates/aemulator-hvf/kosmickrisp/run-rq-smoke.sh --matrix   # both pure-Metal controls
 #   only the legacy/legacy row intersects => Metal, not KosmicKrisp. Add METAL_DEVICE_WRAPPER_TYPE=1
 #   and Metal API validation names it: "this device does not support Metal 4 ray tracing."
@@ -1002,12 +1082,12 @@ Everything KosmicKrisp-era in the tables above was measured on **2026-07-29** on
 
 | Pin / artifact | Value |
 |---|---|
-| `TP_MESA_SHA` | `4f4b73dfe58171865f95e8ef1b52236ad341dea0` + `third_party/patches/mesa/0001…0010` |
+| `TP_MESA_SHA` | `4f4b73dfe58171865f95e8ef1b52236ad341dea0` + `third_party/patches/mesa/0001…0013` |
 | `TP_GFXSTREAM_SHA` | `5c5fe539389dc4fc6b0566f8f9785285f0144af9` + `third_party/patches/gfxstream/` |
 | Host cereal | regenerated by `third_party/regen-cereal.sh`, `TP_GFXSTREAM_CODEGEN_REF=838dd1d61`, registry v1.4.348 |
 | Guest ICD | rebuilt `vulkan.ranchu.so`, 1,962,824 B, `sha256 e66cac99…` (stock: 5,218,752 B, `sha256 3910089c…`) |
-| Gates | `bootstrap.sh --verify` ✓, `ci/check.sh` ✓, `cargo test` 125/0, `run-gate.sh` 3/3, `hvf-doctor.sh` ✓ |
-| Not a gate | `run-rq-smoke.sh` **GATED, exit 0** — the driver withholds the RT names on this Apple8. `MESA_KK_FORCE_RAY_TRACING=1` gives the 12/16 the gate is built on. See the ray-tracing retraction above. |
+| Gates | `bootstrap.sh --verify` ✓ (13 patches), `ci/check.sh` ✓, `cargo test --workspace` 245/0, `run-gate.sh` 3/3, `run-rq-smoke.sh` 16/16 x4 + 4 probe axes, `hvf-doctor.sh` ✓ |
+| Ray tracing | `run-rq-smoke.sh` **16/16 x4 + 4 probe axes, exit 0**; `vk-rt-probe` PASS in the guest in all four modes; the reference ray-query application renders shadows. `MESA_KK_RT_LEGACY_BUILDER=0` reproduces the old 12/16 on demand. |
 
 Earlier revisions of this file were written before any of it was committed and said so. It is
 committed now; use `git log` on this path for the history, and treat a number's *section* as its

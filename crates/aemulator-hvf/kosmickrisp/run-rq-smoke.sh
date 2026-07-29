@@ -9,6 +9,13 @@
 # buffer. rq-smoke.c's own header explains what each check means, why those modes
 # exist and how to read a partial pass; the short version is
 #
+# It then runs vk-rt-probe (the same probe that runs in the guest, built for the
+# host) over the four axes rq-smoke holds fixed: primitive count, vertex stride +
+# index buffer, shader stage and ray flags. rq-smoke's one tightly-packed
+# unindexed triangle traced from compute is degenerate in all four, and that is
+# how a driver bug that broke every real scene passed this gate 16/16 x4. See the
+# comment on that section at the bottom of this file.
+#
 #   16/16 x4  ray query works, real hit and real miss, a row-major 3x4
 #             VkTransformMatrixKHR is applied as a row-major 3x4, and a resubmitted
 #             command buffer rebuilds its structures on replay.
@@ -107,4 +114,45 @@ for mode in "" "--transform" "--triangle-transform" "--resubmit"; do
     # shellcheck disable=SC2086  # deliberate: an empty $mode must expand to nothing
     "$BUILD/rq-smoke" $mode || status=$?
 done
+
+# --- the shapes a one-triangle smoke test cannot see -------------------------
+# Every mode above builds ONE tightly-packed unindexed triangle and traces it
+# from a COMPUTE shader. That combination is degenerate in four ways at once, and
+# all four hid a real bug that shipped: kk's size query handed an MTL4 descriptor
+# to the pre-Metal-4 -[MTLDevice accelerationStructureSizesWithDescriptor:], which
+# ignores triangleCount, so every acceleration structure was sized for one
+# triangle. With one triangle that is correct by accident. With 53583 — one real
+# glTF scene — the build wrote a whole BVH into a 1280-byte allocation, every ray
+# missed, nothing errored, and this script still said 16/16 four times.
+#
+# So the gate now also runs vk-rt-probe, which parameterises the four axes
+# rq-smoke fixes: primitive count, vertex stride + index buffer, shader stage,
+# and ray flags. It is the same probe that runs in the guest, built for the host,
+# so a host/guest divergence stays one diff apart.
+echo
+echo "=== vk-rt-probe: the axes rq-smoke holds fixed ==="
+"$HERE/build-vk-rt-probe.sh" --host >/dev/null || { echo "vk-rt-probe host build failed"; exit 1; }
+probe_fail=0
+run_probe() {  # <label> <args...>
+    local label="$1"; shift
+    local out
+    if out=$("$HERE/vk-rt-probe-host" -q "$@" 2>&1); then
+        echo "  PASS: $label"
+    else
+        echo "  FAIL: $label"
+        echo "$out" | grep -E "^  ray 0|FAIL|VK_RT_PROBE" | sed 's/^/        /'
+        probe_fail=1
+    fi
+}
+# 53583 is the primitive count of the reference application's scene, kept
+# verbatim so the number in the gate is the number that was broken.
+run_probe "53583 triangles, indexed, 44-byte stride, fragment stage, flags 0x4" \
+    --primitives 53583 --indexed --fragment --flags 0x4
+run_probe "53583 triangles, tightly packed, compute stage, flags 0x1" \
+    --primitives 53583
+run_probe "1 triangle, indexed, 44-byte stride (the index buffer is load-bearing)" \
+    --indexed
+run_probe "1 triangle, fragment stage" --fragment
+[ "$probe_fail" = 0 ] || status=1
+
 exit "$status"

@@ -21,7 +21,7 @@ diff --git a/src/kosmickrisp/bridge/mtl_acceleration_structure.h b/src/kosmickri
 new file mode 100644
 --- /dev/null
 +++ b/src/kosmickrisp/bridge/mtl_acceleration_structure.h
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,259 @@
 +/*
 + * Copyright 2025 LunarG, Inc.
 + * Copyright 2025 Google LLC
@@ -152,11 +152,32 @@ new file mode 100644
 +   enum mtl_acceleration_structure_usage usage);
 +
 +/* -[MTLDevice accelerationStructureSizesWithDescriptor:] is the pre-Metal-4
-+ * query and it does not understand MTL4InstanceAccelerationStructureDescriptor
-+ * — it sends -motionKeyframeCount, which that class does not implement, and
-+ * throws. The legacy MTLIndirectInstanceAccelerationStructureDescriptor
-+ * describes the same thing for sizing purposes, so use this for the size query
-+ * and the MTL4 descriptor for the build itself. */
++ * query, and it understands only the pre-Metal-4 descriptor classes. Both
++ * flavours of size query therefore need their own legacy descriptor, and the
++ * failure modes are NOT the same:
++ *
++ *  - instances: it sends -motionKeyframeCount, which
++ *    MTL4InstanceAccelerationStructureDescriptor does not implement, and THROWS.
++ *    Loud, found immediately.
++ *  - primitives: handed an MTL4PrimitiveAccelerationStructureDescriptor it
++ *    throws nothing and returns a size that IGNORES triangleCount. MEASURED: 1
++ *    triangle and 53583 triangles both answered
++ *    accelerationStructureSize 1280, buildScratchSize 5632. The application then
++ *    allocates 1280 bytes, the build writes a BVH for 53583 triangles into it,
++ *    every ray misses, and no error is reported anywhere. That is what made a
++ *    real ray-query application render without shadows while a one-triangle
++ *    smoke test passed 16/16 — see crates/aemulator-hvf/kosmickrisp/rq-smoke.c
++ *    and vk-rt-probe.c --primitives, which now cover it.
++ *
++ * So: these two for the size query, the MTL4 (or legacy) descriptors above for
++ * the build itself. Neither sizing descriptor names a buffer, because a size
++ * query runs before the application has an address to give and Metal does not
++ * need one to count nodes. */
++mtl_acceleration_structure_descriptor *
++mtl_new_primitive_acceleration_structure_sizing_descriptor(
++   const struct mtl_acceleration_structure_geometry *geometries,
++   uint32_t geometry_count, enum mtl_acceleration_structure_usage usage);
++
 +mtl_acceleration_structure_descriptor *
 +mtl_new_instance_acceleration_structure_sizing_descriptor(
 +   const struct mtl_instance_acceleration_structure_geometry *geometry,
@@ -264,7 +285,7 @@ diff --git a/src/kosmickrisp/bridge/mtl_acceleration_structure.m b/src/kosmickri
 new file mode 100644
 --- /dev/null
 +++ b/src/kosmickrisp/bridge/mtl_acceleration_structure.m
-@@ -0,0 +1,522 @@
+@@ -0,0 +1,583 @@
 +/*
 + * Copyright 2025 LunarG, Inc.
 + * Copyright 2025 Google LLC
@@ -511,6 +532,67 @@ new file mode 100644
 +         (MTLAccelerationStructureInstanceDescriptorType)geometry->descriptor_type;
 +      descriptor.instanceTransformationMatrixLayout =
 +         (MTLMatrixLayout)geometry->transform_layout;
++      descriptor.usage = (MTLAccelerationStructureUsage)usage;
++
++      return descriptor;
++   }
++}
++
++mtl_acceleration_structure_descriptor *
++mtl_new_primitive_acceleration_structure_sizing_descriptor(
++   const struct mtl_acceleration_structure_geometry *geometries,
++   uint32_t geometry_count, enum mtl_acceleration_structure_usage usage)
++{
++   @autoreleasepool {
++      MTLPrimitiveAccelerationStructureDescriptor *descriptor =
++         [MTLPrimitiveAccelerationStructureDescriptor new];
++
++      NSMutableArray<MTLAccelerationStructureGeometryDescriptor *> *array =
++         [[[NSMutableArray alloc] initWithCapacity:geometry_count] autorelease];
++
++      for (uint32_t i = 0u; i < geometry_count; ++i) {
++         const struct mtl_acceleration_structure_geometry *g = &geometries[i];
++         MTLAccelerationStructureGeometryDescriptor *geometry = nil;
++
++         if (g->type == MTL_ACCELERATION_STRUCTURE_GEOMETRY_TYPE_TRIANGLES) {
++            MTLAccelerationStructureTriangleGeometryDescriptor *triangles =
++               [[MTLAccelerationStructureTriangleGeometryDescriptor new]
++                  autorelease];
++
++            /* Everything the size of a BVH depends on, and deliberately NOT the
++             * buffers: a size query happens before the application has an
++             * address to give us, so kk never resolves one, and Metal does not
++             * need one to count nodes. The instance sizing descriptor above is
++             * bufferless for the same reason. */
++            triangles.vertexFormat =
++               (MTLAttributeFormat)g->triangles.vertex_format;
++            triangles.vertexStride = g->triangles.vertex_stride_B;
++            triangles.triangleCount = g->triangles.triangle_count;
++            /* ::index.buffer is only ever filled in by the resolve step, which a
++             * size query skips, so the address is what says "indexed" here. */
++            if (g->triangles.index.address != 0u)
++               triangles.indexType = (MTLIndexType)g->triangles.index_type;
++
++            geometry = triangles;
++         } else {
++            MTLAccelerationStructureBoundingBoxGeometryDescriptor *boxes =
++               [[MTLAccelerationStructureBoundingBoxGeometryDescriptor new]
++                  autorelease];
++
++            boxes.boundingBoxStride =
++               g->bounding_boxes.bounding_box_stride_B;
++            boxes.boundingBoxCount = g->bounding_boxes.bounding_box_count;
++
++            geometry = boxes;
++         }
++
++         geometry.opaque = g->opaque;
++         geometry.allowDuplicateIntersectionFunctionInvocation =
++            g->allow_duplicate_intersection_function_invocation;
++         [array addObject:geometry];
++      }
++
++      descriptor.geometryDescriptors = array;
 +      descriptor.usage = (MTLAccelerationStructureUsage)usage;
 +
 +      return descriptor;
@@ -882,7 +964,7 @@ diff --git a/src/kosmickrisp/bridge/stubs/mtl_acceleration_structure.c b/src/kos
 new file mode 100644
 --- /dev/null
 +++ b/src/kosmickrisp/bridge/stubs/mtl_acceleration_structure.c
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,191 @@
 +/*
 + * Copyright 2025 LunarG, Inc.
 + * Copyright 2025 Google LLC
@@ -903,6 +985,14 @@ new file mode 100644
 +mtl_new_instance_acceleration_structure_descriptor(
 +   const struct mtl_instance_acceleration_structure_geometry *geometry,
 +   enum mtl_acceleration_structure_usage usage)
++{
++   return NULL;
++}
++
++mtl_acceleration_structure_descriptor *
++mtl_new_primitive_acceleration_structure_sizing_descriptor(
++   const struct mtl_acceleration_structure_geometry *geometries,
++   uint32_t geometry_count, enum mtl_acceleration_structure_usage usage)
 +{
 +   return NULL;
 +}
@@ -1225,7 +1315,7 @@ diff --git a/src/kosmickrisp/vulkan/kk_acceleration_structure.c b/src/kosmickris
 new file mode 100644
 --- /dev/null
 +++ b/src/kosmickrisp/vulkan/kk_acceleration_structure.c
-@@ -0,0 +1,1085 @@
+@@ -0,0 +1,1098 @@
 +/*
 + * Copyright 2025 LunarG, Inc.
 + * Copyright 2025 Google LLC
@@ -1661,11 +1751,13 @@ new file mode 100644
 +   }
 +
 +   if (info->geometryCount == 0u) {
-+      return legacy && !for_size_query
-+                ? mtl_new_legacy_primitive_acceleration_structure_descriptor(
-+                     NULL, 0u, usage)
-+                : mtl_new_primitive_acceleration_structure_descriptor(NULL, 0u,
-+                                                                      usage);
++      if (for_size_query)
++         return mtl_new_primitive_acceleration_structure_sizing_descriptor(
++            NULL, 0u, usage);
++      return legacy ? mtl_new_legacy_primitive_acceleration_structure_descriptor(
++                         NULL, 0u, usage)
++                    : mtl_new_primitive_acceleration_structure_descriptor(
++                         NULL, 0u, usage);
 +   }
 +
 +   struct mtl_acceleration_structure_geometry *geometries =
@@ -1696,11 +1788,22 @@ new file mode 100644
 +      }
 +   }
 +
++   /* A size query gets the pre-Metal-4 SIZING descriptor, never the MTL4 one.
++    * -[MTLDevice accelerationStructureSizesWithDescriptor:] is a pre-Metal-4 API
++    * and handed an MTL4PrimitiveAccelerationStructureDescriptor it silently
++    * ignores triangleCount, answering the same size for 1 triangle and for
++    * 53583. The structure then gets allocated for one triangle, the build writes
++    * a whole BVH into it, and every ray misses with no error reported. See the
++    * comment on mtl_new_primitive_acceleration_structure_sizing_descriptor. */
 +   mtl_acceleration_structure_descriptor *descriptor =
-+      legacy_build ? mtl_new_legacy_primitive_acceleration_structure_descriptor(
-+                        geometries, info->geometryCount, usage)
-+                   : mtl_new_primitive_acceleration_structure_descriptor(
-+                        geometries, info->geometryCount, usage);
++      for_size_query
++         ? mtl_new_primitive_acceleration_structure_sizing_descriptor(
++              geometries, info->geometryCount, usage)
++         : (legacy_build
++               ? mtl_new_legacy_primitive_acceleration_structure_descriptor(
++                    geometries, info->geometryCount, usage)
++               : mtl_new_primitive_acceleration_structure_descriptor(
++                    geometries, info->geometryCount, usage));
 +
 +   free(geometries);
 +

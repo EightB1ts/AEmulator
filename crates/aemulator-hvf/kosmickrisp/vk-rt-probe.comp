@@ -14,6 +14,17 @@
  * legible if the shader is identical. */
 layout(local_size_x = 8) in;
 
+/* The ray flags come in as a push constant so the probe can sweep them without
+ * a rebuild. They are what an application actually varies here, and they are not
+ * cosmetic: KosmicKrisp turns each VkRayFlagBit into a call on Metal's
+ * raytracing::intersection_params, so a mis-mapped bit changes the traversal
+ * result rather than being ignored. The default the probe passes is
+ * gl_RayFlagsOpaqueEXT (0x1); the shadow-ray idiom every real ray-query
+ * application uses is gl_RayFlagsTerminateOnFirstHitEXT (0x4). */
+layout(push_constant) uniform Params {
+   uint rayFlags;
+} params;
+
 layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
 
 struct Result {
@@ -43,7 +54,7 @@ void main()
    vec3  dir    = vec3(0.0, 0.0, 1.0);
 
    rayQueryEXT rq;
-   rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT, 0xFF, origin, 0.001,
+   rayQueryInitializeEXT(rq, tlas, params.rayFlags, 0xFF, origin, 0.001,
                          dir, 100.0);
 
    uint seen = 0u;

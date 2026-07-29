@@ -1,0 +1,117 @@
+diff --git a/src/gfxstream/guest/vulkan_enc/DescriptorSetVirtualization.cpp b/src/gfxstream/guest/vulkan_enc/DescriptorSetVirtualization.cpp
+--- a/src/gfxstream/guest/vulkan_enc/DescriptorSetVirtualization.cpp
++++ b/src/gfxstream/guest/vulkan_enc/DescriptorSetVirtualization.cpp
+@@ -184,10 +184,36 @@ void doEmulatedDescriptorWrite(const VkWriteDescriptorSet* write, ReifiedDescrip
+         entry.descriptorType = descType;
+         entry.dstArrayElement = dstArrayElement;
+     } else if (isDescriptorTypeAccelerationStructure(descType)) {
+-        // TODO
+-        // Look for pNext inline uniform block or acceleration structure.
+-        // Append new DescriptorWrite entry that holds the buffer
+-        mesa_logw("%s: Ignoring emulated write for descriptor type 0x%x\n", __func__, descType);
++        const VkWriteDescriptorSetAccelerationStructureKHR* descAccelStruct =
++            static_cast<const VkWriteDescriptorSetAccelerationStructureKHR*>(write->pNext);
++        while (descAccelStruct &&
++               descAccelStruct->sType !=
++                   VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR) {
++            descAccelStruct = static_cast<const VkWriteDescriptorSetAccelerationStructureKHR*>(
++                descAccelStruct->pNext);
++        }
++        if (!descAccelStruct) {
++            mesa_loge("%s: did not find acceleration structure\n", __func__);
++            return;
++        }
++        uint32_t i = 0;
++        while (i < descriptorCount) {
++            assert(dstBinding < table.size());
++            if (arrOffset >= table[dstBinding].size()) {
++                ++dstBinding;
++                arrOffset = 0;
++                continue;
++            }
++            auto& entry = table[dstBinding][arrOffset];
++            entry.accelerationStructureHandle =
++                i < descAccelStruct->accelerationStructureCount
++                    ? descAccelStruct->pAccelerationStructures[i]
++                    : VK_NULL_HANDLE;
++            entry.type = DescriptorWriteType::AccelerationStructure;
++            entry.descriptorType = descType;
++            ++i;
++            ++arrOffset;
++        }
+     }
+ }
+ 
+diff --git a/src/gfxstream/guest/vulkan_enc/DescriptorSetVirtualization.h b/src/gfxstream/guest/vulkan_enc/DescriptorSetVirtualization.h
+--- a/src/gfxstream/guest/vulkan_enc/DescriptorSetVirtualization.h
++++ b/src/gfxstream/guest/vulkan_enc/DescriptorSetVirtualization.h
+@@ -36,6 +36,12 @@ struct DescriptorWrite {
+     };
+ 
+     std::vector<uint8_t> inlineUniformBlockBuffer;
++
++    // Only used for accelerationStructure. Held by value, outside the union: the
++    // VkWriteDescriptorSetAccelerationStructureKHR in the union carries a pointer
++    // (pAccelerationStructures) into the caller's storage, which is gone by the time
++    // the batch is flushed. This is the stable copy the flush points at.
++    VkAccelerationStructureKHR accelerationStructureHandle;
+ };
+ 
+ using DescriptorWriteTable = std::vector<std::vector<DescriptorWrite>>;
+diff --git a/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp b/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
+--- a/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
++++ b/src/gfxstream/guest/vulkan_enc/ResourceTracker.cpp
+@@ -884,6 +884,14 @@ static void commitDescriptorSetUpdates(void* context, VkQueue queue,
+     std::vector<uint32_t> writeStartingIndices;
+     std::vector<VkWriteDescriptorSet> writesForHost;
+ 
++    // Stable backing storage for the pNext chain of acceleration structure writes.
++    // Both vectors are only pointed into after the loop below has finished growing
++    // them, so reallocation during push_back cannot leave a dangling pNext.
++    std::vector<VkWriteDescriptorSetAccelerationStructureKHR> accelStructWrites;
++    std::vector<VkAccelerationStructureKHR> accelStructHandles;
++    // (index into writesForHost, index into accelStructWrites) pairs to link up at the end.
++    std::vector<std::pair<uint32_t, uint32_t>> accelStructLinks;
++
+     uint32_t poolIndex = 0;
+     uint32_t currentWriteIndex = 0;
+     for (auto set : sets) {
+@@ -938,12 +946,21 @@ static void commitDescriptorSetUpdates(void* context, VkQueue queue,
+                         dstArrayElement = j;
+                         bufferView = &write.bufferView;
+                         break;
+-                    case DescriptorWriteType::InlineUniformBlock:
+                     case DescriptorWriteType::AccelerationStructure:
++                        dstArrayElement = j;
++                        accelStructLinks.push_back(
++                            {(uint32_t)writesForHost.size(), (uint32_t)accelStructWrites.size()});
++                        accelStructHandles.push_back(write.accelerationStructureHandle);
++                        accelStructWrites.push_back({
++                            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
++                            0,
++                            1,
++                            nullptr,  // patched up below, once the vectors stop growing
++                        });
++                        break;
++                    case DescriptorWriteType::InlineUniformBlock:
+                         // TODO
+-                        mesa_loge(
+-                            "Encountered pending inline uniform block or acceleration structure "
+-                            "desc write, abort (NYI)\n");
++                        mesa_loge("Encountered pending inline uniform block desc write, abort (NYI)\n");
+                         abort();
+                     default:
+                         break;
+@@ -977,6 +994,12 @@ static void commitDescriptorSetUpdates(void* context, VkQueue queue,
+         return;
+     }
+ 
++    // Both vectors have stopped growing, so it is now safe to take addresses into them.
++    for (const auto& link : accelStructLinks) {
++        accelStructWrites[link.second].pAccelerationStructures =
++            &accelStructHandles[link.second];
++        writesForHost[link.first].pNext = &accelStructWrites[link.second];
++    }
+     enc->vkQueueCommitDescriptorSetUpdatesGOOGLE(
+         queue, (uint32_t)pools.size(), pools.data(), (uint32_t)sets.size(), setLayouts.data(),
+         poolIds.data(), descriptorSetWhichPool.data(), pendingAllocations.data(),

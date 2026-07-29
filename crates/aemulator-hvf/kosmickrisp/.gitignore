@@ -1,5 +1,11 @@
 kk-gate
+# Built probes: the guest cross-compile and the native host control.
 vk-rt-probe
-vk-rt-probe.spv
+vk-rt-probe-host
+vk-rt-probe-host.dSYM/
+# Generated from vk-rt-probe.{comp,vert,frag} by build-vk-rt-probe.sh.
+vk-rt-probe.compute.spv
+vk-rt-probe.vert.spv
+vk-rt-probe.frag.spv
 vk-rt-probe-spv.h
 guest-run.log
