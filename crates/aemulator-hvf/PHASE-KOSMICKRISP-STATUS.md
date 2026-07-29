@@ -728,6 +728,55 @@ now settle before touching ColorBuffer pixels.
   `ro.adb.secure=0`, so adbd never asks, and adb was measured working end-to-end with the directory
   empty (335 MB `adb install`, `uiautomator dump`, `adb root`). It becomes a real problem only on an
   image with `ro.adb.secure=1`.
+- **`geometryShader` renders, and it is deliberately NOT advertised.** Metal has no geometry stage,
+  so the driver takes the compute-prepass route every Metal translation layer takes: the vertex
+  shader becomes a compute kernel writing its outputs to a buffer, and libpoly
+  (`third_party/mesa/src/poly/nir/poly_nir_lower_gs.c`, shared with Honeykrisp and already linked
+  into this driver for tessellation) rewrites the geometry shader into a **vertex** shader that
+  re-runs the geometry body once per output vertex. `run-gs-smoke.sh` is **16/16** on this M2: both
+  static output shapes render with the correct per-input-vertex data and the correct
+  `gl_PrimitiveIDIn`, per-primitive `gl_Layer` routes to the right array layer of a 2-layer image,
+  and a plain VS+FS control draw still works. What is measured is a **subset**, and the feature bit
+  is behind `MESA_KK_DEBUG=gs` for exactly that reason:
+  - **Metal has no primitive restart.** libpoly's general path emits an index buffer of strips
+    separated by a restart index, which Metal cannot consume. Only the two shapes libpoly
+    pattern-matches into restart-free draws (`POLY_GS_SHAPE_STATIC_PER_PRIM`, i.e. output indices
+    `0..n-1` drawn with hardware instancing over input primitives, and
+    `POLY_GS_SHAPE_STATIC_PER_INSTANCE`, i.e. a declared strip rewritten to a primitive **list**) are
+    implemented. A data-dependent output vertex count, or any static topology that matches neither
+    pattern, is **refused at pipeline creation** with a named `mesa_loge`. Closing this is the single
+    highest-value next step and the pieces already exist: dispatch
+    `pipeline.gfx.gs[KK_GS_VARIANT_MAIN]` over a (primitives, instances) grid to fill the index
+    buffer, then push it through the existing `libkk_unroll_geometry` kernel — which is already the
+    driver's answer to "Metal has no primitive restart" for `TRIANGLE_FAN` and `uint8` indices.
+  - **Transform feedback and GS pipeline-statistics queries are refused**, not emulated. They are the
+    only consumers of libpoly's COUNT and PRE programs, which is why neither is compiled today; with
+    both gone the geometry MAIN program is *provably* empty for a static shape (libpoly strips every
+    store and atomic out of MAIN and only emits index writes for the dynamic shape), so a
+    static-topology geometry shader costs exactly one extra compute dispatch — the vertex prepass.
+  - **A geometry shader after tessellation is refused.** It needs the tessellation evaluation shader
+    lowered to compute (`poly_nir_lower_tes(.., to_hw_vs=false)`) rather than to a hardware vertex
+    shader, plus a fourth pre-render compute slot.
+  - **An indirect draw with a geometry shader fails the command buffer** (`VK_ERROR_UNKNOWN` +
+    `mesa_loge`) rather than skipping silently. `poly_gs_setup_indirect` computes the grid and the
+    rasterization draw on the GPU, but emits it in libpoly's "indirect local" layout rather than the
+    threadgroup counts Metal dispatches from, so it needs a kk-side setup kernel. Note that
+    `kk_unroll_geometry` *converts* a draw to indirect, so primitive restart, `TRIANGLE_FAN` and
+    `uint8` indices all land here too.
+  - **Per-primitive `gl_Layer`/`gl_ViewportIndex` is exact for the common case and undefined for one
+    uncommon one.** These are per-*vertex* geometry outputs in SPIR-V; Vulkan takes the value from
+    the primitive's provoking vertex, Metal requires `[[render_target_array_index]]` to be identical
+    across a primitive and leaves it undefined otherwise. A geometry shader that sets the layer once
+    per primitive is therefore exact (measured); one that varies it between the vertices of a single
+    primitive is defined in Vulkan and undefined here.
+  - **Provoking vertex is hardcoded to FIRST** in `kk_nir_lower_poly`, which is Vulkan's only mode
+    without `VK_EXT_provoking_vertex` — not advertised. If that extension is ever added, that
+    lowering must read dynamic state or every flat-shaded and strip-decomposed geometry primitive
+    picks the wrong vertex.
+  - **Not tried at all:** the dEQP/CTS geometry-shader groups, any guest workload, and adjacency input
+    topologies (libpoly's software input assembly handles them, and nothing has exercised them here).
+    So `androidboot.opengles.version` stays at GLES 3.1 (196609): GLES 3.2 needs geometry shaders
+    *plus* the refused cases, and ANGLE would find them immediately.
 - **`VK_GOOGLE_display_timing` is gone** and Android sometimes uses it for frame pacing. Not
   observed to be requested; the plausible symptom is jitter, not failure. Worth watching, not worth
   pre-emptively working around.
@@ -781,6 +830,12 @@ bash crates/aemulator-hvf/kosmickrisp/run-rq-smoke.sh
 bash crates/aemulator-hvf/kosmickrisp/run-rq-smoke.sh --matrix   # pure-Metal control for a 12/16
 #   only the legacy/legacy row intersects => Metal, not KosmicKrisp. Add METAL_DEVICE_WRAPPER_TYPE=1
 #   and Metal API validation names it: "this device does not support Metal 4 ray tracing."
+
+# 5c. geometryShader on the HOST driver — a stage Metal does not have, emulated with a compute
+#     prepass + libpoly. Renders and reads back real pixels; check 0 is the no-GS control.
+bash crates/aemulator-hvf/kosmickrisp/run-gs-smoke.sh
+#   expect: "16/16". Read check 0 first — it is a plain VS+FS draw, and if it fails the geometry
+#   work broke every ordinary draw in the driver. Check 4 must be a REFUSAL, not a render.
 
 # 6. Android on KosmicKrisp, windowed, in-Vulkan present:
 rm -f crates/aemulator-hvf/testdata/cf64/img/userdata.img
