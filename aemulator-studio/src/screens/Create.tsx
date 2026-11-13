@@ -17,7 +17,7 @@ const RENDER_OPTIONS: { mode: RenderMode; title: string; blurb: string }[] = [
     {
         mode: 'Gpu3d',
         title: 'Metal GPU',
-        blurb: 'gfxstream → KosmicKrisp (Vulkan-on-Metal) → Metal. Presents through a Vulkan swapchain on the window layer — no CPU readback. Opens a native window. Needs macOS 26+ on Apple Silicon and the binary built --features gfxstream.',
+        blurb: 'gfxstream → KosmicKrisp (Vulkan-on-Metal) → Metal. Presents through a Vulkan swapchain on the window layer — no CPU readback. Opens a native window. Needs macOS 26+ on Apple Silicon.',
     },
     {
         mode: 'Headless',

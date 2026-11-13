@@ -54,7 +54,7 @@ pub fn device_config_for(profile: &EmulatorProfile, net_available: bool) -> Devi
     let (net_status, net_detail) = if net_available {
         (Emulated, "Real NAT (guest 10.0.2.15/24, gw 10.0.2.2, DNS 10.0.2.3) + adb-over-TCP via the per-VM host port-forward.")
     } else {
-        (Partial, "Enumerate-only stub NIC — links up and takes an IP but drops all traffic; adb cannot connect. Rebuild the emulator binary with `--features net`.")
+        (Partial, "Enumerate-only stub NIC — links up and takes an IP but drops all traffic; adb cannot connect. This binary predates always-on networking — rebuild it (cargo build --release --bin aemulator-hvf).")
     };
 
     let gpu3d_detail = match profile.render_mode {

@@ -95,7 +95,7 @@ pub fn hvf_binary() -> Result<PathBuf, String> {
                 eprintln!(
                     "[studio] WARNING: using the DEBUG emulator binary — expect a slow picture. \
                      Build the fast one: cargo build --release --manifest-path {}/Cargo.toml \
-                     --features net,gfxstream --bin aemulator-hvf",
+                     --bin aemulator-hvf",
                     dir.display()
                 );
             }
@@ -104,8 +104,7 @@ pub fn hvf_binary() -> Result<PathBuf, String> {
         }
     }
     Err(format!(
-        "emulator binary not found under {}/target/{{release,debug}} — build it first: cargo build --release --manifest-path {}/Cargo.toml --features net,gfxstream --bin aemulator-hvf",
-        dir.display(),
+        "emulator binary not found under {}/target/{{release,debug}} — run `pnpm run setup` from the repo root (or start Studio with `pnpm run dev`, which runs it first)",
         dir.display()
     ))
 }

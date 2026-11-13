@@ -53,7 +53,7 @@ fn parse_vm_stat_field(out: &str, label: &str) -> Option<u64> {
 }
 
 /// Is `libslirp` present (the run scripts need `brew install libslirp` for the
-/// `--features net` NAT backend)? Proxy: the dylib exists under Homebrew.
+/// always-on NAT backend)? Proxy: the dylib exists under Homebrew.
 pub fn libslirp_present() -> bool {
     ["/opt/homebrew/lib", "/usr/local/lib"].iter().any(|d| {
         let dir = Path::new(d);
