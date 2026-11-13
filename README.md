@@ -10,6 +10,48 @@ MIDR, hand-authored device tree, GPU strings, sensors, verified-boot state, netw
 driveable through a clean, versioned **host-side control API** (perception + input live outside
 the guest so there is no in-guest automation footprint).
 
+## Getting started
+
+You need an **Apple Silicon Mac on macOS 26 or newer**, about **15 GB of free disk**, and these
+installed first:
+
+- Xcode, or just its Command Line Tools: `xcode-select --install`
+- [Homebrew](https://brew.sh)
+- [Rust](https://rustup.rs)
+- Node 22+ and pnpm 11+: `brew install node pnpm`
+
+Then:
+
+```bash
+git clone https://github.com/EightB1ts/AEmulator.git
+cd AEmulator
+pnpm run dev
+```
+
+That's it. The first `pnpm run dev` sets up everything else and then opens AEmulator Studio:
+
+1. installs the Homebrew packages it needs (`libslirp`, `vulkan-loader`, the GPU build toolchain, …)
+2. builds the GPU stack, gfxstream and the KosmicKrisp Vulkan-on-Metal driver (**~45 minutes**)
+3. installs Studio's JavaScript dependencies
+4. builds the emulator and signs it with the hypervisor entitlement
+5. downloads and prepares the Android image (**~1.1 GB download**)
+
+Everything is kept, so later runs skip straight to Studio after about a second of checks. If a step
+fails (a dropped download, a missing tool), fix it and run `pnpm run dev` again; it picks up where it
+stopped.
+
+In Studio, click **+ New Emulator**, pick a device profile, then **Start**.
+
+| Command | What it does |
+|---|---|
+| `pnpm run dev` | set up whatever is missing, then open Studio |
+| `pnpm run setup` | the same setup without opening Studio |
+| `AEMU_SKIP_IMAGE=1 pnpm run dev` | skip the Android image download (Studio opens, but **Start** needs the image) |
+| `pnpm run hvf:doctor` | check the whole host setup if a VM won't start |
+
+Use `pnpm run setup`, not `pnpm setup`: the latter is a built-in pnpm command that configures pnpm
+itself.
+
 ## Where the design lives
 
 - **Architecture + rationale + phased roadmap:** `~/.claude/plans/i-would-like-to-majestic-willow.md`
@@ -128,10 +170,13 @@ every task is one command from the repo root — it declares **no dependencies**
 truth for the merge gate; `pnpm gate` just calls it.
 
 ```bash
-pnpm setup                # install Studio deps (--frozen-lockfile)
+pnpm run setup            # scripts/setup.sh: brew deps, GPU stack, Studio deps, emulator, Android image
+                          # (`pnpm setup` without `run` is pnpm's own built-in — not this)
+pnpm dev                  # setup, then tauri:dev — the main dev loop
+pnpm image                # just the Android image (crates/aemulator-hvf/fetch-cf64.sh)
 
 # AEmulator Studio (Tauri GUI)
-pnpm tauri:dev            # the main dev loop — Vite + Tauri window   (alias: pnpm dev)
+pnpm tauri:dev            # Vite + Tauri window, without the setup checks
 pnpm tauri:build          # bundle the .app / .dmg
 pnpm tauri:check          # cargo check the excluded src-tauri crate
 pnpm tauri:lint           # clippy -D warnings over src-tauri

@@ -14,8 +14,9 @@
         "pnpm": ">=11"
     },
     "scripts": {
-        "setup": "pnpm -C aemulator-studio install --frozen-lockfile",
-        "dev": "pnpm run tauri:dev",
+        "setup": "bash scripts/setup.sh",
+        "dev": "bash scripts/setup.sh && pnpm run tauri:dev",
+        "image": "bash crates/aemulator-hvf/fetch-cf64.sh",
         "tauri": "pnpm -C aemulator-studio run tauri",
         "tauri:dev": "pnpm -C aemulator-studio run tauri:dev",
         "tauri:build": "pnpm -C aemulator-studio run tauri:build",
